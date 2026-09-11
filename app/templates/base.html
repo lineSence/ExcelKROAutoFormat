@@ -4,6 +4,8 @@
 	Новые разделы программы добавляются двумя шагами:
 	1. новый шаблон с `{% extends "base.html" %}`;
 	2. новая запись в списке `nav_items` ниже.
+
+	Свои стили раздела подключаются через блок `head`.
 #}
 {% set nav_items = nav_items | default([
 	{"href": "/", "label": "Сверка КРО"},
@@ -17,6 +19,7 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
 	<title>{% block title %}ExcelKROAutoFormat{% endblock %}</title>
 	<link rel="stylesheet" href="/static/style.css" />
+	{% block head %}{% endblock %}
 </head>
 <body>
 <header class="topbar">

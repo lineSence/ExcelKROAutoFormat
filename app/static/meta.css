@@ -1,0 +1,36 @@
+/* Строки списков формы сверки: продавцы и ревизоры. */
+
+.row-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.row-item {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.row-item input[type="text"] {
+	flex: 1 1 auto;
+	margin: 0;
+}
+
+.row-item .row-hours {
+	flex: 0 0 96px;
+	width: 96px;
+	margin: 0;
+	text-align: right;
+}
+
+.row-item .row-hours:disabled {
+	background: var(--surface-soft);
+	color: var(--muted);
+}
+
+.row-item [data-row-remove] {
+	flex: 0 0 auto;
+	line-height: 1;
+}
