@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Обучение — ExcelKROAutoFormat</title>
+	<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<main class="card wide">
+	<h1>Обучение модели пересортов</h1>
+	<p class="hint">
+		Модель — второй слой проверки. Пары собирает детерминированная логика,
+		а модель снимает явно ложные пары и отмечает сомнительные для ручного ответа.
+	</p>
+
+	{% if error %}
+	<p class="error">{{ error }}</p>
+	{% endif %}
+	{% if message %}
+	<p class="hint">{{ message }}</p>
+	{% endif %}
+
+	<h2>Состояние</h2>
+	<ul>
+		<li>Модель: {% if model.ready %}готова{% else %}не обучена{% endif %}</li>
+		<li>Обучена на примерах: {{ model.samples or 0 }}</li>
+		<li>Обновлена: {{ model.trained_at or "—" }}</li>
+		<li>Накоплено примеров: {{ stats.total }} (пересортов {{ stats.positives }}, не пересортов {{ stats.negatives }})</li>
+		<li>Из ручных ответов на спорные пары: {{ stats.from_decisions }}</li>
+	</ul>
+
+	{% if stats.sources %}
+	<h2>Источники примеров</h2>
+	<table>
+		<tr><th>Файл</th><th>Примеров</th></tr>
+		{% for name, count in stats.sources %}
+		<tr><td>{{ name }}</td><td>{{ count }}</td></tr>
+		{% endfor %}
+	</table>
+	{% endif %}
+
+	{% if report %}
+	<h2>Результат обучения</h2>
+	<ul>
+		<li>Примеров: {{ report.samples }} (пересортов {{ report.positives }})</li>
+		<li>Эпох: {{ report.epochs }}</li>
+		{% if report.train_metrics %}
+		<li>На обучении: точность {{ report.train_metrics.accuracy }},
+			прецизия {{ report.train_metrics.precision }},
+			полнота {{ report.train_metrics.recall }}</li>
+		{% endif %}
+		{% if report.holdout_metrics %}
+		<li>На отложенных файлах ({{ report.holdout_metrics.files | join(", ") }}):
+			точность {{ report.holdout_metrics.accuracy }},
+			прецизия {{ report.holdout_metrics.precision }},
+			полнота {{ report.holdout_metrics.recall }}</li>
+		{% else %}
+		<li>Проверка на отложенных файлах: нужно минимум два источника</li>
+		{% endif %}
+	</ul>
+	{% endif %}
+
+	<h2>1. Загрузить ручной образец</h2>
+	<p class="hint">
+		Готовая сверка .xlsx, проверенная вручную. Пары в рамке читаются как
+		подтверждённые пересорты, остальные похожие пары — как отрицательные примеры,
+		зелёные строки (ручной тег «не-») пропускаются.
+		Сам файл не сохраняется: в базу попадают только поля пар.
+	</p>
+	<form action="/training/samples" method="post" enctype="multipart/form-data">
+		<input type="file" name="file" accept=".xlsx" required />
+		<p><button type="submit">Добавить примеры</button></p>
+	</form>
+	<p class="hint">Предел размера файла: {{ max_upload_mb }} МБ.</p>
+
+	<h2>2. Переобучить модель</h2>
+	<p class="hint">
+		Нужно не меньше 40 примеров и оба класса. Обучение идёт в один поток на
+		чистом Python и занимает секунды: для VPS с одним ядром и 1 ГБ памяти это безопасно.
+	</p>
+	<form action="/training/train" method="post">
+		<p><button class="button" type="submit">Обучить заново</button></p>
+	</form>
+
+	<h2>3. Очистить базу примеров</h2>
+	<p class="hint">Удаляет накопленные примеры. Текущая обученная модель продолжит работать.</p>
+	<form action="/training/clear" method="post">
+		<p><button type="submit">Очистить</button></p>
+	</form>
+
+	<p><a class="link" href="/">Назад к загрузке сверки</a></p>
+</main>
+</body>
+</html>

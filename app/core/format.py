@@ -28,6 +28,7 @@ from .resort import (
     build_clusters,
     make_item,
 )
+from .verify import load_verifier
 
 MARK_NOT_PLUS = "не+"
 COL_CURRENCY_LABEL = 8   # H
@@ -56,6 +57,8 @@ class FormatResult:
     warehouse: str
     groups: list[GroupResult] = field(default_factory=list)
     last_row: int = 0
+    # Работал ли второй слой проверки.
+    verify_used: bool = False
 
 
 def _number(value: object) -> float:
@@ -194,7 +197,13 @@ def move_rows(sheet, group: Group, clusters: list[Cluster]) -> dict[int, int]:
     return moved
 
 
-def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | None = None) -> GroupResult:
+def process_group(
+    sheet,
+    group: Group,
+    settings,
+    decisions: dict[str, bool] | None = None,
+    verifier=None,
+) -> GroupResult:
     """Шаг 4: грозди брендов и разбор расхождений."""
     items = []
     for row in group.data_rows:
@@ -218,6 +227,7 @@ def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | No
         settings.doubtful_max,
         decisions,
         strict_brand_only=bool(getattr(settings, "strict_resort", False)),
+        verifier=verifier,
     )
 
     # Строки одной грозди ставятся рядом до окраски и рамки.
@@ -318,10 +328,17 @@ def format_workbook(
     document = shift_header(sheet, document)
     header_row = fill_header(sheet, document, warehouse)
 
-    result = FormatResult(document=document, warehouse=warehouse)
+    # Второй слой готовится один раз на файл, а не на каждую группу.
+    verifier = load_verifier(settings)
+
+    result = FormatResult(
+        document=document,
+        warehouse=warehouse,
+        verify_used=verifier is not None,
+    )
     total_cells: list[str] = []
     for group in document.groups:
-        group_result = process_group(sheet, group, settings, decisions)
+        group_result = process_group(sheet, group, settings, decisions, verifier)
         highlight_rest(sheet, group)
         group_result.total_cell = write_group_total(sheet, group)
         total_cells.append(group_result.total_cell)
