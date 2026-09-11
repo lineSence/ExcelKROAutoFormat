@@ -1,0 +1,68 @@
+"""Связка всех шагов: ремонт → разбор → формат → сохранение."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+import openpyxl
+
+from ..config import Settings
+from . import report
+from .format import format_workbook, output_filename
+from .parse import ParseError, warehouse_from_filename
+from .repair import repair
+
+
+@dataclass
+class PipelineResult:
+    """Результат обработки одного файла."""
+
+    output_path: Path
+    output_name: str
+    summary: dict
+    groups: list[dict]
+    clusters: list[dict]
+    doubtful: list[dict]
+
+
+def work_dir(settings: Settings) -> Path:
+    folder = Path(settings.tmp_dir) / uuid.uuid4().hex
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def pick_sheet(workbook, settings: Settings):
+    if settings.sheet_name in workbook.sheetnames:
+        return workbook[settings.sheet_name]
+    return workbook[workbook.sheetnames[0]]
+
+
+def process(input_path: str | Path, original_filename: str, settings: Settings | None = None) -> PipelineResult:
+    """Обрабатывает файл сверки и возвращает путь к готовому файлу."""
+    settings = settings or Settings.load()
+    folder = work_dir(settings)
+    repaired = repair(input_path, folder / "repaired.xlsx", settings.repair_mode)
+
+    workbook = openpyxl.load_workbook(repaired)
+    sheet = pick_sheet(workbook, settings)
+
+    warehouse = warehouse_from_filename(original_filename)
+    if not warehouse:
+        raise ParseError("Из имени файла не вышло получить имя склада.")
+
+    format_result = format_workbook(sheet, warehouse, settings)
+
+    output_name = output_filename(warehouse, format_result.document.doc_date)
+    output_path = folder / output_name
+    workbook.save(output_path)
+
+    return PipelineResult(
+        output_path=output_path,
+        output_name=output_name,
+        summary=report.summary(format_result),
+        groups=report.group_rows(format_result),
+        clusters=report.cluster_rows(format_result) if settings.report_cluster_members else [],
+        doubtful=report.doubtful_rows(format_result),
+    )
