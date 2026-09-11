@@ -4,18 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
 from pathlib import Path
 
 TITLE_PREFIX = "Инвентаризация товаров"
-TITLE_MARKS = (
-    "инвентаризация товаров",
-    "инвентаризационная опись",
-    "сличительная ведомость",
-    "инвентаризация",
-)
-SCAN_ROWS = 80
-SCAN_COLUMNS = 12
 HEADER_MARK_A = "№"
 HEADER_MARK_C = "Хар-ка"
 COL_CODE = 1       # A
@@ -30,12 +21,29 @@ COL_DOC = 11       # K
 
 DATE_PATTERN = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 NUMBER_PATTERN = re.compile(r"№\s*([\w\-]+)")
+
 MONTHS = {
-    "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
-    "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11,
-    "декабр": 12,
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+    "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+    "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
 }
-WORD_DATE_PATTERN = re.compile(r"(\d{1,2})\s+([А-Яа-яЁё]+)\s+(\d{4})")
+WORD_DATE_PATTERN = re.compile(
+    r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})", re.IGNORECASE
+)
+
+
+def date_from_text(text: str) -> str | None:
+    """Дата из титула. 1С пишет месяц словом: «от 09 сентября 2026 г.»."""
+    plain = DATE_PATTERN.search(text or "")
+    if plain:
+        return plain.group(1)
+    worded = WORD_DATE_PATTERN.search(text or "")
+    if worded:
+        day = int(worded.group(1))
+        month = MONTHS[worded.group(2).lower()]
+        year = int(worded.group(3))
+        return f"{day:02d}.{month:02d}.{year}"
+    return None
 
 
 class ParseError(Exception):
@@ -61,7 +69,7 @@ class Group:
 class Document:
     """Разобранный файл сверки."""
 
-    title_row: int | None
+    title_row: int
     title_text: str
     doc_number: str | None
     doc_date: str | None
@@ -71,31 +79,7 @@ class Document:
 
 
 def _text(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, (datetime, date)):
-        return value.strftime("%d.%m.%Y")
-    return str(value).strip()
-
-
-def _fold(text: str) -> str:
-    """Убирает неразрывные пробелы, лишние пробелы и регистр."""
-    cleaned = text.replace("\xa0", " ").replace("\u202f", " ")
-    return re.sub(r"\s+", " ", cleaned).strip().lower()
-
-
-def head_sample(sheet, rows: int = 12) -> list[str]:
-    """Первые непустые тексты листа. Нужны для разбора ошибок."""
-    sample: list[str] = []
-    for row in range(1, min(sheet.max_row, rows) + 1):
-        parts = []
-        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
-            text = _text(sheet.cell(row=row, column=column).value)
-            if text:
-                parts.append(f"{row}:{column}={text[:40]}")
-        if parts:
-            sample.append("; ".join(parts))
-    return sample
+    return "" if value is None else str(value).strip()
 
 
 def _is_number(value: object) -> bool:
@@ -112,55 +96,18 @@ def warehouse_from_filename(filename: str) -> str:
     return stem.split(" ")[0].strip()
 
 
-def find_title(sheet) -> tuple[int | None, str]:
-    """Ищет титул в первых строках и в первых столбцах.
-
-    Титул в выгрузке 1С стоит не всегда в ячейке A1. Он бывает в другом
-    столбце, с неразрывными пробелами или в другом написании. Поэтому
-    поиск идёт по области, а не по одной ячейке. Если титула нет, файл всё
-    равно обрабатывается: дата берётся из шапки.
-    """
-    for row in range(1, min(sheet.max_row, SCAN_ROWS) + 1):
-        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
-            text = _text(sheet.cell(row=row, column=column).value)
-            if not text:
-                continue
-            folded = _fold(text)
-            if any(mark in folded for mark in TITLE_MARKS):
-                return row, text
-    return None, ""
+def find_title(sheet) -> tuple[int, str]:
+    for row in range(1, min(sheet.max_row, 40) + 1):
+        text = _text(sheet.cell(row=row, column=COL_CODE).value)
+        if text.startswith(TITLE_PREFIX):
+            return row, text
+    raise ParseError("В файле нет титула «Инвентаризация товаров».")
 
 
-def date_from_text(text: str) -> str | None:
-    """Дата из строки. Понимает «09.09.2026» и «09 сентября 2026 г.»."""
-    match = DATE_PATTERN.search(text)
-    if match:
-        return match.group(1)
-    word = WORD_DATE_PATTERN.search(text)
-    if word:
-        name = _fold(word.group(2))
-        for stem, number in MONTHS.items():
-            if name.startswith(stem):
-                return f"{int(word.group(1)):02d}.{number:02d}.{word.group(3)}"
-    return None
-
-
-def find_date(sheet, limit: int = SCAN_ROWS) -> str | None:
-    """Первая дата в шапке файла. Строки данных не просматриваются."""
+def find_label_row(sheet, label: str, limit: int = 40) -> int | None:
     for row in range(1, min(sheet.max_row, limit) + 1):
-        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
-            found = date_from_text(_text(sheet.cell(row=row, column=column).value))
-            if found:
-                return found
-    return None
-
-
-def find_label_row(sheet, label: str, limit: int = SCAN_ROWS) -> int | None:
-    needle = _fold(label)
-    for row in range(1, min(sheet.max_row, limit) + 1):
-        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
-            if _fold(_text(sheet.cell(row=row, column=column).value)).startswith(needle):
-                return row
+        if _text(sheet.cell(row=row, column=COL_CODE).value).startswith(label):
+            return row
     return None
 
 
@@ -168,9 +115,10 @@ def find_group_headers(sheet) -> list[int]:
     """Заголовок группы: A = «№» и C = «Хар-ка»."""
     rows = []
     for row in range(1, sheet.max_row + 1):
-        code = _fold(_text(sheet.cell(row=row, column=COL_CODE).value))
-        trait = _fold(_text(sheet.cell(row=row, column=COL_TRAIT).value))
-        if code == HEADER_MARK_A and trait.startswith(_fold(HEADER_MARK_C)):
+        if (
+            _text(sheet.cell(row=row, column=COL_CODE).value) == HEADER_MARK_A
+            and _text(sheet.cell(row=row, column=COL_TRAIT).value) == HEADER_MARK_C
+        ):
             rows.append(row)
     return rows
 
@@ -235,17 +183,7 @@ def parse(sheet) -> Document:
 
     header_rows = find_group_headers(sheet)
     if not header_rows:
-        sample = " | ".join(head_sample(sheet)[:6])
-        raise ParseError(
-            "В файле нет блоков групп товаров. Нужен заголовок со «№» в столбце A "
-            f"и «Хар-ка» в столбце C. Начало листа: {sample or 'лист пустой'}"
-        )
-    if doc_date is None:
-        doc_date = find_date(sheet, limit=max(1, header_rows[0] - 1))
-    if doc_date is None:
-        raise ParseError(
-            "В файле нет даты вида ДД.ММ.ГГГГ. Дата нужна для имени выходного файла."
-        )
+        raise ParseError("В файле нет блоков групп товаров.")
 
     groups: list[Group] = []
     for index, header_row in enumerate(header_rows):
@@ -262,6 +200,6 @@ def parse(sheet) -> Document:
         doc_number=number_match.group(1) if number_match else None,
         doc_date=doc_date,
         warehouse_row=find_label_row(sheet, "Склад:"),
-        organization_row=find_label_row(sheet, "Организация:"),
+        organization_row=find_label_row(sheet, "Склад:") and find_label_row(sheet, "Организация:") or find_label_row(sheet, "Организация:"),
         groups=groups,
     )
