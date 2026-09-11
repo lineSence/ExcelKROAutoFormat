@@ -30,6 +30,8 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 VERIFY_MODES = ("off", "model")
+# Поля формы сверки, у которых может быть несколько значений.
+META_MULTI_FIELDS = ("sellers", "seller_hours", "auditors")
 
 # Браузер иногда отдаёт пустое тело, если файл перезаписали после выбора
 # (ошибка вида «File changed» / ERR_UPLOAD_FILE_CHANGED).
@@ -164,7 +166,12 @@ async def meta(request: Request, token: str):
         return _error(request, EXPIRED)
 
     form = await request.form()
-    sheet_meta = SheetMeta.from_form({key: form.get(key) for key in form.keys()})
+    # Продавцы, часы и ревизоры приходят повторяющимися полями — каждая строка своя.
+    payload = {
+        key: (form.getlist(key) if key in META_MULTI_FIELDS else form.get(key))
+        for key in form.keys()
+    }
+    sheet_meta = SheetMeta.from_form(payload)
     strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
     verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
 
