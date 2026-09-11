@@ -200,6 +200,6 @@ def parse(sheet) -> Document:
         doc_number=number_match.group(1) if number_match else None,
         doc_date=doc_date,
         warehouse_row=find_label_row(sheet, "Склад:"),
-        organization_row=find_label_row(sheet, "Склад:") and find_label_row(sheet, "Организация:") or find_label_row(sheet, "Организация:"),
+        organization_row=find_label_row(sheet, "Организация:"),
         groups=groups,
     )
