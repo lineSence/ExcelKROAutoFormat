@@ -30,6 +30,11 @@ COLUMN_WIDTHS = {
 }
 ROW_HEIGHT = 12
 
+# Excel показывает ширину на 0,83 меньше записанного значения:
+# в файле ширина хранится вместе с отступами ячейки.
+# Поэтому к нужной ширине добавляется эта поправка.
+WIDTH_PADDING = 0.83
+
 
 def fill(color: str) -> PatternFill:
     return PatternFill(fill_type="solid", start_color=color, end_color=color)
@@ -99,7 +104,7 @@ def style_grand_total_cell(cell) -> None:
 def apply_geometry(sheet, last_row: int) -> None:
     """Шаг 8: ширины, высоты, автофильтр, параметры печати."""
     for letter, width in COLUMN_WIDTHS.items():
-        sheet.column_dimensions[letter].width = width
+        sheet.column_dimensions[letter].width = width + WIDTH_PADDING
     for row in range(1, max(last_row, sheet.max_row) + 1):
         sheet.row_dimensions[row].height = ROW_HEIGHT
     sheet.auto_filter.ref = f"K1:K{last_row}"

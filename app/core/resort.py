@@ -2,11 +2,12 @@
 
 Правило подбора пары повторяет ручную сверку:
 1. Каждый излишек ищет себе недостачу в той же группе.
-2. Сначала берутся пары с равным количеством и похожим именем,
-   потом пары с близкой ценой.
+2. Имя важнее цены. Сначала берутся пары с похожим именем
+   и равным количеством, и только потом пары с близкой ценой.
 3. Количество в паре может не совпадать. Тогда к одной недостаче
    добавляются несколько излишков, пока количество не закроется.
 4. Излишки и недостачи без пары остаются излишками и недостачами.
+5. Решения пользователя по спорным парам (decisions) главнее расчёта.
 """
 
 from __future__ import annotations
@@ -87,6 +88,8 @@ class DoubtfulPair:
     second_name: str
     ratio: float
     linked: bool
+    key: str = ""
+    answered: bool = False
 
 
 def normalize(name: str, type_words: tuple[str, ...] = ()) -> str:
@@ -111,26 +114,29 @@ def similarity(first: str, second: str) -> float:
 
 
 def _price_bonus(first: Item, second: Item) -> float:
-    """Награда за близкую цену. Ручная сверка так и делает."""
+    """Награда за близкую цену. Цена вторична по отношению к имени."""
     high = max(first.price, second.price)
     if high <= 0:
         return 0.0
     gap = abs(first.price - second.price) / high
     if gap <= 0.001:
-        return 0.40
+        return 0.20
     if gap <= 0.10:
-        return 0.25
+        return 0.12
     if gap <= 0.25:
-        return 0.10
+        return 0.05
     return 0.0
 
 
 def _name_bonus(first: Item, second: Item) -> float:
-    """Награда за общее начало имени: бренд и вид товара."""
+    """Награда за общее начало имени: бренд и вид товара.
+
+    Имя важнее цены, поэтому награда за имя выше награды за цену.
+    """
     if len(first.words) >= 2 and first.words[:2] == second.words[:2]:
-        return 0.70
+        return 1.00
     if first.words and second.words and first.words[0] == second.words[0]:
-        return 0.40
+        return 0.50
     return 0.0
 
 
@@ -140,7 +146,7 @@ def pair_score(first: Item, second: Item) -> float:
 
 
 def _quantity_bonus(first: Item, second: Item) -> float:
-    return 0.50 if abs(first.diff) == abs(second.diff) else 0.0
+    return 0.80 if abs(first.diff) == abs(second.diff) else 0.0
 
 
 # Ниже этого порога пара не считается пересортом.
@@ -163,22 +169,34 @@ class _Union:
             self.parent[root_second] = root_first
 
 
+def pair_key(first_row: int, second_row: int) -> str:
+    """Ключ решения пользователя по спорной паре."""
+    return f"{min(first_row, second_row)}-{max(first_row, second_row)}"
+
+
 def build_clusters(
     items: list[Item],
     threshold: float,
     doubtful_min: float,
     doubtful_max: float,
+    decisions: dict[str, bool] | None = None,
 ) -> tuple[list[Cluster], list[DoubtfulPair]]:
     """Подбирает пары пересорта: каждый излишек к своей недостаче."""
     union = _Union(len(items))
     plus = [index for index, item in enumerate(items) if item.diff > 0]
     minus = [index for index, item in enumerate(items) if item.diff < 0]
 
+    choices = decisions or {}
     doubtful: list[DoubtfulPair] = []
     ranked: list[tuple[float, int, int]] = []
     for p in plus:
         for m in minus:
             score = pair_score(items[p], items[m]) + _quantity_bonus(items[p], items[m])
+            answer = choices.get(pair_key(items[p].row, items[m].row))
+            if answer is False:
+                continue
+            if answer is True:
+                score += 10.0
             ranked.append((score, p, m))
             ratio = similarity(items[p].key, items[m].key)
             if doubtful_min <= ratio <= doubtful_max:
@@ -190,6 +208,8 @@ def build_clusters(
                         second_name=items[m].name,
                         ratio=round(ratio, 3),
                         linked=False,
+                        key=pair_key(items[p].row, items[m].row),
+                        answered=pair_key(items[p].row, items[m].row) in choices,
                     )
                 )
 
