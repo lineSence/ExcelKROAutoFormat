@@ -4,8 +4,9 @@
 
 * причина инвентаризации — столбец C в строке под «Склад:» (в образце C5);
 * дата предыдущей инвентаризации — столбец B под титулом (в образце B3);
-* продавцы — блок внизу файла: строка ФИО, под ней строка для числа
-  из внешних данных, рядом формула доли; в конце — итог чисел.
+* продавцы — блок внизу файла: строка ФИО, под ней строка с весом
+  (часы или единица при делении поровну), рядом формула доли;
+  в конце — итог весов.
 
 Остальные подписи (проверил, администратор, ревизоры, ночной продавец)
 собраны в мини-таблицу под блоком продавцов.
@@ -34,6 +35,12 @@ GAP_BEFORE_SIGNATURES = 1         # пустая строка между бло�
 NIGHT_ABSENT = "нет"
 TRUE_WORDS = ("1", "true", "yes", "on", "да")
 
+# Способы разнести недостачу между продавцами.
+SHARE_HOURS = "hours"
+SHARE_EQUAL = "equal"
+SHARE_MODES = (SHARE_HOURS, SHARE_EQUAL)
+EQUAL_WEIGHT = 1
+
 FONT = Font(name="Arial", size=9)
 FONT_BOLD = Font(name="Arial", size=9, bold=True)
 
@@ -51,13 +58,44 @@ def _thin_border() -> Border:
     return Border(left=side, right=side, top=side, bottom=side)
 
 
-def _lines(value: object) -> tuple[str, ...]:
-    """Список имён из текста: по строкам, точкам с запятой или запятым."""
+def _items(value: object) -> list[str]:
+    """Значения поля: список из формы или текст с разделителями."""
     if isinstance(value, (list, tuple)):
-        items = [str(item) for item in value]
-    else:
-        items = re.split(r"[\n;,]+", str(value or ""))
-    return tuple(item.strip() for item in items if item and item.strip())
+        return [str(item or "").strip() for item in value]
+    return [item.strip() for item in re.split(r"[\n;]+", str(value or ""))]
+
+
+def _lines(value: object) -> tuple[str, ...]:
+    """Непустые значения поля, порядок сохраняется."""
+    return tuple(item for item in _items(value) if item)
+
+
+def _hours(value: object) -> str:
+    """Часы как текст: принимаем запятую и лишние пробелы."""
+    plain = str(value or "").strip().replace(",", ".")
+    if not plain:
+        return ""
+    try:
+        number = float(plain)
+    except ValueError:
+        return ""
+    if number <= 0:
+        return ""
+    return str(int(number)) if number == int(number) else str(number)
+
+
+def _hours_number(value: str) -> float | int | None:
+    """Часы для записи в ячейку."""
+    if not value:
+        return None
+    number = float(value)
+    return int(number) if number == int(number) else number
+
+
+def _share_mode(value: object) -> str:
+    """Способ распределения. По умолчанию — по часам."""
+    text = str(value or "").strip().lower()
+    return text if text in SHARE_MODES else SHARE_HOURS
 
 
 def _date_value(text: object) -> date | None:
@@ -77,13 +115,38 @@ def _date_value(text: object) -> date | None:
     return None
 
 
+@dataclass(frozen=True)
+class Seller:
+    """Продавец и его отработанные часы."""
+
+    name: str = ""
+    hours: str = ""
+
+    def to_form(self) -> dict:
+        return {"name": self.name, "hours": self.hours}
+
+
+def _sellers(names: object, hours: object) -> tuple[Seller, ...]:
+    """Пары «ФИО — часы» из двух параллельных полей формы."""
+    name_list = _items(names)
+    hour_list = _items(hours)
+    result: list[Seller] = []
+    for index, name in enumerate(name_list):
+        if not name:
+            continue
+        raw = hour_list[index] if index < len(hour_list) else ""
+        result.append(Seller(name=name, hours=_hours(raw)))
+    return tuple(result)
+
+
 @dataclass
 class SheetMeta:
     """Ручные поля одной сверки."""
 
     reason: str = ""
     prev_date: str = ""
-    sellers: tuple[str, ...] = field(default_factory=tuple)
+    share_mode: str = SHARE_HOURS
+    sellers: tuple[Seller, ...] = field(default_factory=tuple)
     checked_by: str = ""
     admin: str = ""
     auditors: tuple[str, ...] = field(default_factory=tuple)
@@ -97,7 +160,8 @@ class SheetMeta:
         return cls(
             reason=str(form.get("reason") or "").strip(),
             prev_date=str(form.get("prev_date") or "").strip(),
-            sellers=_lines(form.get("sellers")),
+            share_mode=_share_mode(form.get("share_mode")),
+            sellers=_sellers(form.get("sellers"), form.get("seller_hours")),
             checked_by=str(form.get("checked_by") or "").strip(),
             admin=str(form.get("admin") or "").strip(),
             auditors=_lines(form.get("auditors")),
@@ -106,14 +170,16 @@ class SheetMeta:
         )
 
     def to_form(self) -> dict:
-        """Обратно в вид для шаблона: списки — по строкам."""
+        """Обратно в вид для шаблона: каждая запись — отдельная строка."""
         return {
             "reason": self.reason,
             "prev_date": self.prev_date,
-            "sellers": "\n".join(self.sellers),
+            "share_mode": self.share_mode,
+            "by_hours": self.share_mode == SHARE_HOURS,
+            "sellers": [seller.to_form() for seller in self.sellers],
             "checked_by": self.checked_by,
             "admin": self.admin,
-            "auditors": "\n".join(self.auditors),
+            "auditors": list(self.auditors),
             "night": self.night,
             "night_name": self.night_name,
         }
@@ -133,6 +199,12 @@ class SheetMeta:
                 self.night_name,
             )
         )
+
+    def weight(self, seller: Seller) -> float | int | None:
+        """Вес продавца: часы или единица при делении поровну."""
+        if self.share_mode == SHARE_EQUAL:
+            return EQUAL_WEIGHT
+        return _hours_number(seller.hours)
 
     def signature_rows(self) -> list[tuple[str, str]]:
         """Мини-таблица подписей: пары «название — значение»."""
@@ -175,12 +247,14 @@ def write_prev_date(sheet, document: Document, text: str) -> None:
     sheet.cell(row=row, column=COL_NAME).number_format = style.DATE_FORMAT
 
 
-def write_sellers(sheet, document: Document, first_row: int, sellers: tuple[str, ...]) -> int:
+def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) -> int:
     """Блок продавцов. Возвращает номер последней занятой строки.
 
-    Числа под ФИО — внешние данные и вносятся руками,
-    поэтому программа готовит только строки и формулы долей.
+    Под каждым ФИО стоит вес: отработанные часы или единица,
+    если недостачу делят поровну. Рядом формула доли, внизу — итог.
+    Пустые часы оставляем для ручного ввода.
     """
+    sellers = data.sellers
     if not sellers:
         return first_row - 1
 
@@ -188,13 +262,16 @@ def write_sellers(sheet, document: Document, first_row: int, sellers: tuple[str,
     number_rows = [first_row + 1 + index * 2 for index in range(len(sellers))]
     total_row = number_rows[-1] + 1
 
-    for index, name in enumerate(sellers):
+    for index, seller in enumerate(sellers):
         name_row = first_row + index * 2
         number_row = number_rows[index]
-        _write(sheet, name_row, COL_NAME, name)
+        _write(sheet, name_row, COL_NAME, seller.name)
         if index == 0:
-            # Ставка на единицу: сумма с неучтёнкой делится на итог чисел.
+            # Ставка на единицу веса: сумма с неучтёнкой делится на итог весов.
             _write(sheet, name_row, COL_TRAIT, f"=I{rate_row}/B{total_row}")
+        weight = data.weight(seller)
+        if weight is not None:
+            _write(sheet, number_row, COL_NAME, weight)
         _write(sheet, number_row, COL_TRAIT, f"=C{first_row}*B{number_row}")
 
     _write(
@@ -240,7 +317,7 @@ def apply(sheet, document: Document, data: SheetMeta | None, last_row: int) -> i
     write_prev_date(sheet, document, data.prev_date)
 
     # Блок продавцов начинается в строке последнего итога, как в образце.
-    bottom = write_sellers(sheet, document, last_row, data.sellers)
+    bottom = write_sellers(sheet, document, last_row, data)
     signatures = data.signature_rows()
     if signatures:
         start = max(bottom, last_row) + 1 + GAP_BEFORE_SIGNATURES
