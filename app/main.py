@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import Settings
 from .core import learning, runtime
+from .core.meta import SheetMeta
 from .core.parse import ParseError
 from .core.pipeline import PipelineResult, process, work_dir
 from .core.repair import RepairError
@@ -24,7 +25,7 @@ settings = Settings.load()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
 logger = logging.getLogger("excelkro")
 
-app = FastAPI(title="ExcelKROAutoFormat", version="0.3.0")
+app = FastAPI(title="ExcelKROAutoFormat", version="0.4.0")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -36,6 +37,7 @@ EMPTY_UPLOAD = (
     "Файл не дошёл целиком: похоже, его изменили после выбора. "
     "Закройте его в Excel и выберите заново."
 )
+EXPIRED = "Срок хранения истёк. Загрузите сверку заново."
 
 RESULTS: dict[str, PipelineResult] = {}
 # Режим «только чёткие пересорты» по токену результата: нужен при пересборке.
@@ -61,7 +63,7 @@ def _settings_for(strict: bool, verify: str = "off") -> Settings:
 
 
 def _is_on(value: object) -> bool:
-    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on", "да")
 
 
 @app.get("/health")
@@ -122,12 +124,68 @@ async def upload(
     return _result_page(request, result, strict_on, verify_mode)
 
 
+def _rebuild(
+    request: Request,
+    old: PipelineResult,
+    decisions: dict[str, bool],
+    sheet_meta: SheetMeta,
+    strict_on: bool,
+    verify_mode: str,
+    token: str,
+    message: str = "",
+) -> HTMLResponse:
+    """Собирает файл заново с теми же режимами, решениями и ручными полями."""
+    try:
+        result = process(
+            old.source_path,
+            old.source_name,
+            _settings_for(strict_on, verify_mode),
+            decisions,
+            sheet_meta,
+        )
+    except (ParseError, RepairError) as error:
+        return _error(request, str(error), strict_on, verify_mode)
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Неизвестная ошибка")
+        return _error(request, f"Не удалось обработать файл: {error}", strict_on, verify_mode)
+
+    RESULTS.pop(token, None)
+    STRICT_FLAGS.pop(token, None)
+    VERIFY_FLAGS.pop(token, None)
+    shutil.rmtree(old.output_path.parent, ignore_errors=True)
+    return _result_page(request, result, strict_on, verify_mode, message)
+
+
+@app.post("/meta/{token}", response_class=HTMLResponse)
+async def meta(request: Request, token: str):
+    """Вносит в сверку ручные поля: причину, дату, продавцов и подписи."""
+    old = RESULTS.get(token)
+    if old is None or old.source_path is None or not old.source_path.is_file():
+        return _error(request, EXPIRED)
+
+    form = await request.form()
+    sheet_meta = SheetMeta.from_form({key: form.get(key) for key in form.keys()})
+    strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
+    verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
+
+    return _rebuild(
+        request,
+        old,
+        dict(old.decisions or {}),
+        sheet_meta,
+        strict_on,
+        verify_mode,
+        token,
+        message="Данные сверки внесены в файл.",
+    )
+
+
 @app.post("/confirm/{token}", response_class=HTMLResponse)
 async def confirm(request: Request, token: str):
     """Применяет решения по спорным пересортам и строит файл заново."""
     old = RESULTS.get(token)
     if old is None or old.source_path is None or not old.source_path.is_file():
-        return _error(request, "Срок хранения истёк. Загрузите сверку заново.")
+        return _error(request, EXPIRED)
 
     form = await request.form()
     decisions: dict[str, bool] = dict(old.decisions or {})
@@ -163,24 +221,16 @@ async def confirm(request: Request, token: str):
         except Exception:  # noqa: BLE001
             logger.exception("Не удалось сохранить примеры обучения")
 
-    try:
-        result = process(
-            old.source_path,
-            old.source_name,
-            _settings_for(strict_on, verify_mode),
-            decisions,
-        )
-    except (ParseError, RepairError) as error:
-        return _error(request, str(error), strict_on, verify_mode)
-    except Exception as error:  # noqa: BLE001
-        logger.exception("Неизвестная ошибка")
-        return _error(request, f"Не удалось обработать файл: {error}", strict_on, verify_mode)
-
-    RESULTS.pop(token, None)
-    STRICT_FLAGS.pop(token, None)
-    VERIFY_FLAGS.pop(token, None)
-    shutil.rmtree(old.output_path.parent, ignore_errors=True)
-    return _result_page(request, result, strict_on, verify_mode)
+    # Ручные поля сверки не теряются при пересборке.
+    return _rebuild(
+        request,
+        old,
+        decisions,
+        old.sheet_meta,
+        strict_on,
+        verify_mode,
+        token,
+    )
 
 
 def _result_page(
@@ -188,6 +238,7 @@ def _result_page(
     result: PipelineResult,
     strict: bool = False,
     verify: str = "off",
+    message: str = "",
 ) -> HTMLResponse:
     token = result.output_path.parent.name
     RESULTS[token] = result
@@ -207,6 +258,8 @@ def _result_page(
             "output_name": result.output_name,
             "strict": bool(strict),
             "verify": _mode(verify),
+            "meta": result.sheet_meta.to_form(),
+            "message": message,
         },
     )
 

@@ -4,6 +4,8 @@
 {% block subheading %}<p>{{ summary.warehouse }}{% if summary.date %} · {{ summary.date }}{% endif %}</p>{% endblock %}
 
 {% block content %}
+{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+
 <section class="card">
 	<div class="card-row">
 		<div class="actions">
@@ -11,12 +13,66 @@
 			<a class="button button-secondary" href="/">Загрузить другой файл</a>
 		</div>
 		<div class="actions">
-			{% if strict %}<span class="badge">только ч⑑ткие пересорты</span>{% else %}<span class="badge">обычный подбор</span>{% endif %}
+			{% if strict %}<span class="badge">только чёткие пересорты</span>{% else %}<span class="badge">обычный подбор</span>{% endif %}
 			{% if verify == "model" and summary.verify_used %}<span class="badge badge-ok">логика + нейросеть</span>
 			{% elif verify == "model" %}<span class="badge badge-warn">модель не загрузилась</span>
 			{% else %}<span class="badge">только логика</span>{% endif %}
 		</div>
 	</div>
+</section>
+
+<section class="card">
+	<h2>Данные сверки</h2>
+	<p class="card-sub">Заполните перед выгрузкой — поля попадут в файл так же, как в образцах.</p>
+
+	<form method="post" action="/meta/{{ token }}">
+		<input type="hidden" name="strict" value="{% if strict %}on{% else %}off{% endif %}" />
+		<input type="hidden" name="verify" value="{{ verify }}" />
+
+		<div class="field">
+			<label class="field-label" for="meta-reason">Причина инвентаризации</label>
+			<input id="meta-reason" type="text" name="reason" value="{{ meta.reason }}" placeholder="Например: плановая" />
+		</div>
+
+		<div class="field">
+			<label class="field-label" for="meta-prev-date">Дата предыдущей инвентаризации</label>
+			<input id="meta-prev-date" type="date" name="prev_date" value="{{ meta.prev_date }}" />
+		</div>
+
+		<div class="field">
+			<label class="field-label" for="meta-sellers">Продавцы</label>
+			<textarea id="meta-sellers" name="sellers" rows="6" placeholder="По одному ФИО в строке">{{ meta.sellers }}</textarea>
+			<span class="hint">Строки для чисел и формулы долей ставятся автоматически; сами числа вносятся в Excel.</span>
+		</div>
+
+		<h3 class="card-sub">Мини-таблица подписей</h3>
+
+		<div class="field">
+			<label class="field-label" for="meta-checked">Проверил</label>
+			<input id="meta-checked" type="text" name="checked_by" value="{{ meta.checked_by }}" />
+		</div>
+
+		<div class="field">
+			<label class="field-label" for="meta-admin">Администратор</label>
+			<input id="meta-admin" type="text" name="admin" value="{{ meta.admin }}" />
+		</div>
+
+		<div class="field">
+			<label class="field-label" for="meta-auditors">Ревизоры</label>
+			<textarea id="meta-auditors" name="auditors" rows="3" placeholder="По одному ФИО в строке">{{ meta.auditors }}</textarea>
+		</div>
+
+		<div class="field">
+			<label class="field-label"><input type="checkbox" name="night" value="on" data-night-toggle {% if meta.night %}checked{% endif %} /> Ночной продавец</label>
+			<input type="text" name="night_name" value="{{ meta.night_name }}" placeholder="ФИО ночного продавца" data-night-name {% if not meta.night %}disabled{% endif %} />
+			<span class="hint">Без галочки в таблице будет написано «нет».</span>
+		</div>
+
+		<div class="review-bar">
+			<span class="hint">Файл будет собран заново с этими данными. Решения по пересортам сохраняются.</span>
+			<button type="submit">Сохранить и собрать файл</button>
+		</div>
+	</form>
 </section>
 
 <section class="card">
@@ -122,4 +178,20 @@
 </section>
 {% endblock %}
 
-{% block scripts %}<script src="/static/review.js"></script>{% endblock %}
+{% block scripts %}
+<script src="/static/review.js"></script>
+<script>
+	// Поле ФИО ночного продавца нужно только при ответе «да».
+	(function () {
+		var toggle = document.querySelector("[data-night-toggle]")
+		var name = document.querySelector("[data-night-name]")
+		if (!toggle || !name) return
+		var sync = function () {
+			name.disabled = !toggle.checked
+			if (!toggle.checked) name.value = ""
+		}
+		toggle.addEventListener("change", sync)
+		sync()
+	})()
+</script>
+{% endblock %}
