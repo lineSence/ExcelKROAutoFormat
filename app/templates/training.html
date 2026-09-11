@@ -28,6 +28,10 @@
 		<li>Обновлена: {{ model.trained_at or "—" }}</li>
 		<li>Накоплено примеров: {{ stats.total }} (пересортов {{ stats.positives }}, не пересортов {{ stats.negatives }})</li>
 		<li>Из ручных ответов на спорные пары: {{ stats.from_decisions }}</li>
+		<li>Эмбеддинги имён:
+			{% if embed.enabled and embed.ready %}включены
+			{% elif embed.enabled %}включены, но не готовы
+			{% else %}выключены{% endif %}</li>
 	</ul>
 
 	{% if stats.sources %}
@@ -68,11 +72,15 @@
 		зелёные строки (ручной тег «не-») пропускаются.
 		Сам файл не сохраняется: в базу попадают только поля пар.
 	</p>
-	<form action="/training/samples" method="post" enctype="multipart/form-data">
+	<form action="/training/samples" method="post" enctype="multipart/form-data" data-inmemory="true">
 		<input type="file" name="file" accept=".xlsx" required />
 		<p><button type="submit">Добавить примеры</button></p>
 	</form>
-	<p class="hint">Предел размера файла: {{ max_upload_mb }} МБ.</p>
+	<p class="hint">
+		Предел размера файла: {{ max_upload_mb }} МБ.
+		Файл читается в память браузера сразу при отправке, поэтому открытый
+		в Excel документ больше не вызывает ошибку «File changed».
+	</p>
 
 	<h2>2. Переобучить модель</h2>
 	<p class="hint">
@@ -83,7 +91,30 @@
 		<p><button class="button" type="submit">Обучить заново</button></p>
 	</form>
 
-	<h2>3. Очистить базу примеров</h2>
+	<h2>3. Эмбеддинги имён</h2>
+	<p class="hint">
+		Маленькая нейросеть (rubert-tiny2, ONNX int8) добавляет к признакам пары
+		смысловую близость названий. Полезно на разных написаниях одного товара.
+		Векторы считаются одним потоком и кэшируются на диске.
+	</p>
+	<p class="hint">{{ embed.reason }}</p>
+	<form action="/training/embed" method="post">
+		{% if embed.enabled %}
+		<input type="hidden" name="embed" value="off" />
+		<p><button type="submit">Выключить эмбеддинги</button></p>
+		{% else %}
+		<input type="hidden" name="embed" value="on" />
+		<p><button type="submit">Включить эмбеддинги</button></p>
+		{% endif %}
+	</form>
+	{% if embed.enabled and not embed.ready %}
+	<p class="hint">
+		Пока файлы или пакеты не готовы, программа работает без эмбеддингов:
+		пересорты считаются как обычно, ошибки не будет.
+	</p>
+	{% endif %}
+
+	<h2>4. Очистить базу примеров</h2>
 	<p class="hint">Удаляет накопленные примеры. Текущая обученная модель продолжит работать.</p>
 	<form action="/training/clear" method="post">
 		<p><button type="submit">Очистить</button></p>
@@ -91,5 +122,6 @@
 
 	<p><a class="link" href="/">Назад к загрузке сверки</a></p>
 </main>
+<script src="/static/upload.js"></script>
 </body>
 </html>

@@ -73,9 +73,9 @@ class Settings:
     # Сколько веса мнение модели добавляет к оценке пары.
     verify_weight: float = 0.30
 
-    # Эмбеддинги имён: требуют onnxruntime и отдельных файлов модели.
-    # На VPS с 1 ГБ по умолчанию выключены.
-    embed_enabled: bool = False
+    # Эмбеддинги имён: включены по умолчанию и переключаются в интерфейсе.
+    # Если пакетов или файлов модели нет, программа тихо работает без них.
+    embed_enabled: bool = True
     embed_model_path: str = "models/rubert-tiny2-int8.onnx"
     embed_tokenizer_path: str = "models/rubert-tiny2-tokenizer.json"
     embed_cache_path: str = "data/embed-cache.json"
@@ -116,7 +116,7 @@ class Settings:
             verify_gray_low=_number("VERIFY_GRAY_LOW", 0.35),
             verify_gray_high=_number("VERIFY_GRAY_HIGH", 0.55),
             verify_weight=_number("VERIFY_WEIGHT", 0.30),
-            embed_enabled=_flag("EMBED_ENABLED", False),
+            embed_enabled=_flag("EMBED_ENABLED", True),
             embed_model_path=_text("EMBED_MODEL_PATH", "models/rubert-tiny2-int8.onnx"),
             embed_tokenizer_path=_text("EMBED_TOKENIZER_PATH", "models/rubert-tiny2-tokenizer.json"),
             embed_cache_path=_text("EMBED_CACHE_PATH", "data/embed-cache.json"),

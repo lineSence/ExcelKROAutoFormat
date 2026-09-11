@@ -15,7 +15,7 @@
 	<p class="error">{{ error }}</p>
 	{% endif %}
 
-	<form action="/upload" method="post" enctype="multipart/form-data">
+	<form action="/upload" method="post" enctype="multipart/form-data" data-inmemory="true">
 		<input type="file" name="file" accept=".xlsx" required />
 
 		<p>
@@ -47,12 +47,20 @@
 			Модель не найдена. Обучите её на странице обучения.
 			{% endif %}
 		</p>
+		<p class="hint">
+			Эмбеддинги имён:
+			{% if embed.enabled and embed.ready %}включены
+			{% elif embed.enabled %}включены, но файлы модели ещё не готовы
+			{% else %}выключены{% endif %}.
+			Переключается на странице обучения.
+		</p>
 
 		<button type="submit">Обработать</button>
 	</form>
 
 	<p class="hint">Предел размера файла: {{ max_upload_mb }} МБ.</p>
-	<p><a class="link" href="/training">Обучение модели</a></p>
+	<p><a class="link" href="/training">Обучение модели и настройки нейросети</a></p>
 </main>
+<script src="/static/upload.js"></script>
 </body>
 </html>
