@@ -4,14 +4,18 @@
 1. Каждый излишек ищет себе недостачу в той же группе.
 2. Пара возможна, если это один бренд (совпали два первых слова имени
    или имена похожи целиком) либо цены сопоставимы. Разные бренды с
-   разной ценой в пару не ставятся: так ручная сверка оставляет их
-   отдельными излишком и недостачей.
+   разной ценой в пару не ставятся.
 3. Излишек по деньгам должен закрывать недостачу: цена излишка не ниже
    цены недостачи. Такие пары берутся первыми.
 4. Количество в паре может не совпадать. Тогда к одной недостаче
    добавляются несколько излишков, пока количество не закроется.
-5. Излишки и недостачи без пары остаются излишками и недостачами.
-6. Решения пользователя по спорным парам (decisions) главнее расчёта.
+5. В грозди может быть больше двух строк: строка без пары присоединяется
+   к готовой грозди, если это тот же товар с уточнением в имени и той же ценой.
+6. Излишки и недостачи без пары остаются излишками и недостачами.
+7. Решения пользователя по спорным парам (decisions) главнее расчёта.
+
+Зелёная заливка и метка `не-` — ручной тег по внешним данным. Программа его
+не ставит и не воспроизводит.
 """
 
 from __future__ import annotations
@@ -175,13 +179,27 @@ def covers(plus: Item, minus: Item) -> bool:
     return plus.price + 1e-9 >= minus.price
 
 
+def same_line(first: Item, second: Item) -> bool:
+    """Тот же товар с уточнением в имени и той же ценой.
+
+    Так в одну гроздь попадают «Мальборо» и «Мальборо компакт Дабл микс».
+    """
+    short, long = sorted((first.key, second.key), key=len)
+    if not short or not long.startswith(short):
+        return False
+    high = max(first.price, second.price)
+    if high <= 0:
+        return False
+    return abs(first.price - second.price) / high <= 0.001
+
+
 def _quantity_bonus(first: Item, second: Item) -> float:
     return 0.80 if abs(first.diff) == abs(second.diff) else 0.0
 
 
-def _distance_bonus(plus: Item, minus: Item) -> float:
+def _distance_bonus(first: Item, second: Item) -> float:
     """Соседние строки связываются охотнее: список отсортирован по имени."""
-    gap = abs(plus.row - minus.row)
+    gap = abs(first.row - second.row)
     if gap <= 1:
         return 0.20
     if gap <= 3:
@@ -278,6 +296,22 @@ def build_clusters(
         taken_plus[p] = m
         free_minus[m] = max(0.0, free_minus[m] - abs(items[p].diff))
         union.union(p, m)
+
+    # Добор в гроздь: строка без пары присоединяется к уже собранной грозди,
+    # если это тот же товар с уточнением в имени и той же ценой.
+    paired = set(taken_plus) | set(taken_plus.values())
+    for index in range(len(items)):
+        if index in paired:
+            continue
+        best: tuple[float, int] | None = None
+        for other in paired:
+            if not same_line(items[index], items[other]):
+                continue
+            ratio = similarity(items[index].key, items[other].key)
+            if best is None or ratio > best[0]:
+                best = (ratio, other)
+        if best is not None:
+            union.union(best[1], index)
 
     for pair in doubtful:
         pair.linked = any(
