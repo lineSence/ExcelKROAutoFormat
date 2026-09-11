@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>ExcelKROAutoFormat</title>
+	<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<main class="card">
+	<h1>Форматирование сверки КРО</h1>
+	<p class="hint">Загрузите файл сверки из 1С в формате .xlsx. Имя склада берётся из имени файла.</p>
+
+	{% if error %}
+	<p class="error">{{ error }}</p>
+	{% endif %}
+
+	<form action="/upload" method="post" enctype="multipart/form-data">
+		<input type="file" name="file" accept=".xlsx" required />
+		<button type="submit">Обработать</button>
+	</form>
+
+	<p class="hint">Предел размера файла: {{ max_upload_mb }} МБ.</p>
+</main>
+</body>
+</html>

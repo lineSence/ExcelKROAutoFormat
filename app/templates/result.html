@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Готово — ExcelKROAutoFormat</title>
+	<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<main class="card wide">
+	<h1>Файл готов</h1>
+
+	<p>
+		<a class="button" href="/download/{{ token }}">Скачать {{ output_name }}</a>
+		<a class="link" href="/">Загрузить другой файл</a>
+	</p>
+
+	<h2>Итог</h2>
+	<ul>
+		<li>Склад: {{ summary.warehouse }}</li>
+		<li>Дата: {{ summary.date or "не найдена" }}</li>
+		<li>Групп товаров: {{ summary.groups }}</li>
+		<li>Пересорты, шт.: {{ summary.pieces }}</li>
+		<li>Пересорты, сумма: {{ summary.resort_sum }}</li>
+		<li>Недостача, сумма: {{ summary.shortage_sum }}</li>
+	</ul>
+
+	<h2>По группам</h2>
+	<table>
+		<tr><th>Группа</th><th>Пересорты, шт.</th><th>Пересорты, сумма</th><th>Недостача, сумма</th><th>Строк без пары</th></tr>
+		{% for row in groups %}
+		<tr><td>{{ row.group }}</td><td>{{ row.pieces }}</td><td>{{ row.resort_sum }}</td><td>{{ row.shortage_sum }}</td><td>{{ row.single_rows }}</td></tr>
+		{% endfor %}
+	</table>
+
+	{% if clusters %}
+	<h2>Состав гроздей</h2>
+	<table>
+		<tr><th>Группа</th><th>Гроздь</th><th>Строка</th><th>Наименование</th><th>F</th><th>J до</th><th>J после</th><th>Решение</th></tr>
+		{% for row in clusters %}
+		<tr><td>{{ row.group }}</td><td>{{ row.cluster }}</td><td>{{ row.row }}</td><td>{{ row.name }}</td><td>{{ row.diff }}</td><td>{{ row.sum_before }}</td><td>{{ row.sum_after }}</td><td>{{ row.decision }}</td></tr>
+		{% endfor %}
+	</table>
+	{% endif %}
+
+	{% if doubtful %}
+	<h2>Сомнительные совпадения</h2>
+	<table>
+		<tr><th>Группа</th><th>Первая строка</th><th>Вторая строка</th><th>Схожесть</th><th>Решение</th></tr>
+		{% for row in doubtful %}
+		<tr><td>{{ row.group }}</td><td>{{ row.first }}</td><td>{{ row.second }}</td><td>{{ row.ratio }}</td><td>{{ row.decision }}</td></tr>
+		{% endfor %}
+	</table>
+	{% endif %}
+</main>
+</body>
+</html>
