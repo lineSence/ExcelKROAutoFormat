@@ -31,6 +31,8 @@ from .resort import (
 MARK_NOT_PLUS = "не+"
 COL_CURRENCY_LABEL = 8   # H
 COL_GRAND_TOTAL = 9      # I
+TITLE_TARGET_ROW = 2     # В образце титул стоит во второй строке.
+SCAN_COLUMNS = 12
 
 
 @dataclass
@@ -59,32 +61,94 @@ def _number(value: object) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
+def _row_is_empty(sheet, row: int) -> bool:
+    return all(
+        sheet.cell(row=row, column=column).value in (None, "")
+        for column in range(1, SCAN_COLUMNS + 1)
+    )
+
+
+def _shift_range(text: str, deleted: list[int]) -> str | None:
+    """Пересчитывает адрес объединения после удаления строк."""
+    from openpyxl.utils.cell import range_boundaries
+
+    min_col, min_row, max_col, max_row = range_boundaries(text)
+    if any(min_row <= row <= max_row for row in deleted):
+        return None
+    top = min_row - sum(1 for row in deleted if row < min_row)
+    bottom = max_row - sum(1 for row in deleted if row < max_row)
+    left = get_column_letter(min_col)
+    right = get_column_letter(max_col)
+    return f"{left}{top}:{right}{bottom}"
+
+
+def drop_rows(sheet, rows: list[int]) -> None:
+    """Удаляет строки без потери данных.
+
+    openpyxl сдвигает объединённые ячейки неверно и теряет первую
+    строку данных группы. Поэтому сначала снимаем все объединения,
+    потом удаляем строки, потом ставим объединения на новые места.
+    """
+    targets = sorted({int(row) for row in rows if row})
+    if not targets:
+        return
+    ranges = [str(item) for item in sheet.merged_cells.ranges]
+    for text in ranges:
+        sheet.unmerge_cells(text)
+    for row in reversed(targets):
+        sheet.delete_rows(row, 1)
+    for text in ranges:
+        moved = _shift_range(text, targets)
+        if moved:
+            sheet.merge_cells(moved)
+
+
 def shift_header(sheet, document: Document) -> Document:
-    """Шаг 3. Удаляет строку «Организация:» и поднимает шапку."""
-    row = document.organization_row
-    if row is None:
+    """Шаг 3. Убирает строку «Организация:» и лишние строки сверху."""
+    rows: list[int] = []
+    if document.organization_row:
+        rows.append(document.organization_row)
+
+    # В образце над титулом остаётся одна пустая строка.
+    extra = document.title_row - TITLE_TARGET_ROW
+    row = 1
+    while extra > 0 and row < document.title_row:
+        if _row_is_empty(sheet, row) and row not in rows:
+            rows.append(row)
+            extra -= 1
+        row += 1
+
+    if not rows:
         return document
-    for merged in list(sheet.merged_cells.ranges):
-        if merged.min_row <= row <= merged.max_row:
-            sheet.unmerge_cells(str(merged))
-    sheet.delete_rows(row, 1)
+    drop_rows(sheet, rows)
     return parse(sheet)
 
 
-def fill_header(sheet, warehouse: str) -> None:
-    """Шаг 3.3 и 3.4: имя склада и очистка валюты."""
-    cell = sheet.cell(row=4, column=COL_TRAIT)
+def unmerge_cell(sheet, row: int, column: int) -> None:
+    """Снимает объединение, если ячейка входит в него."""
+    from openpyxl.utils.cell import range_boundaries
+
+    for merged in [str(item) for item in sheet.merged_cells.ranges]:
+        min_col, min_row, max_col, max_row = range_boundaries(merged)
+        if min_row <= row <= max_row and min_col <= column <= max_col:
+            sheet.unmerge_cells(merged)
+
+
+def fill_header(sheet, document: Document, warehouse: str) -> int:
+    """Шаг 3.3 и 3.4: имя склада и очистка валюты.
+
+    Всё пишется в строку со словом «Склад:», как в образце.
+    """
+    row = document.warehouse_row or 4
+    unmerge_cell(sheet, row, COL_TRAIT)
+    cell = sheet.cell(row=row, column=COL_TRAIT)
     cell.value = warehouse
     cell.font = Font(name="Arial", size=9, bold=True)
-    for column in range(COL_GRAND_TOTAL, COL_GRAND_TOTAL + 2):
-        neighbour = sheet.cell(row=4, column=column)
+    for column in range(COL_CURRENCY_LABEL, SCAN_COLUMNS + 1):
+        neighbour = sheet.cell(row=row, column=column)
         if str(neighbour.value or "").strip().lower() == "руб":
             neighbour.value = None
-    label = sheet.cell(row=4, column=COL_CURRENCY_LABEL)
-    if str(label.value or "").strip().startswith("Валюта"):
-        right = sheet.cell(row=4, column=COL_CURRENCY_LABEL + 1)
-        if str(right.value or "").strip().lower() == "руб":
-            right.value = None
+    return row
 
 
 def process_group(sheet, group: Group, settings) -> GroupResult:
@@ -117,8 +181,8 @@ def process_group(sheet, group: Group, settings) -> GroupResult:
             result.single_rows += 1
         if cluster.decision == DECISION_RESORT:
             result.resort_pieces += sum(abs(item.diff) for item in cluster.items) / 2
+            style.frame_block(sheet, [item.row for item in cluster.items], COL_DIFF)
             for item in cluster.items:
-                style.frame(sheet.cell(row=item.row, column=COL_DIFF))
                 _zero_sum(sheet, item, result)
         elif cluster.decision == DECISION_SURPLUS:
             for item in cluster.items:
@@ -126,13 +190,15 @@ def process_group(sheet, group: Group, settings) -> GroupResult:
                 sheet.cell(row=item.row, column=COL_TRAIT).value = MARK_NOT_PLUS
                 _zero_sum(sheet, item, result)
         elif cluster.decision == DECISION_SHORTAGE:
+            framed = []
             for item in cluster.items:
                 if item.diff < 0:
                     style.paint(sheet.cell(row=item.row, column=COL_DIFF), style.YELLOW)
                     style.paint(sheet.cell(row=item.row, column=COL_SUM_DIFF), style.YELLOW)
                 else:
-                    style.frame(sheet.cell(row=item.row, column=COL_DIFF))
+                    framed.append(item.row)
                     _zero_sum(sheet, item, result)
+            style.frame_block(sheet, framed, COL_DIFF)
 
     result.shortage_sum = sum(
         _number(sheet.cell(row=row, column=COL_SUM_DIFF).value) for row in group.data_rows
@@ -157,7 +223,7 @@ def highlight_rest(sheet, group: Group) -> None:
 
 
 def write_group_total(sheet, group: Group) -> str:
-    """Шаг 5: формула итога группы с диапазоном до строки перед итогом."""
+    """Шаг 5: формула итога группы."""
     for column in (4, 5, COL_DIFF, 11):
         sheet.cell(row=group.total_row, column=column).value = None
     last = max(group.first_data_row, group.total_row - 1)
@@ -168,9 +234,10 @@ def write_group_total(sheet, group: Group) -> str:
     return f"{letter}{group.total_row}"
 
 
-def write_grand_total(sheet, total_cells: list[str]) -> None:
-    """Шаг 6: общий итог в I4."""
-    cell = sheet.cell(row=4, column=COL_GRAND_TOTAL)
+def write_grand_total(sheet, total_cells: list[str], row: int) -> None:
+    """Шаг 6: общий итог в столбце I строки со словом «Склад:»."""
+    unmerge_cell(sheet, row, COL_GRAND_TOTAL)
+    cell = sheet.cell(row=row, column=COL_GRAND_TOTAL)
     cell.value = f"=SUM({','.join(total_cells)})"
     style.style_grand_total_cell(cell)
 
@@ -179,7 +246,7 @@ def format_workbook(sheet, warehouse: str, settings) -> FormatResult:
     """Полный проход шагов 2–9."""
     document = parse(sheet)
     document = shift_header(sheet, document)
-    fill_header(sheet, warehouse)
+    header_row = fill_header(sheet, document, warehouse)
 
     result = FormatResult(document=document, warehouse=warehouse)
     total_cells: list[str] = []
@@ -191,7 +258,7 @@ def format_workbook(sheet, warehouse: str, settings) -> FormatResult:
         result.groups.append(group_result)
 
     if total_cells:
-        write_grand_total(sheet, total_cells)
+        write_grand_total(sheet, total_cells, header_row)
 
     result.last_row = max(group.total_row for group in document.groups)
     style.apply_geometry(sheet, result.last_row)
