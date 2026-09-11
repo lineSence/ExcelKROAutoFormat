@@ -9,6 +9,8 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from . import style
+from .meta import SheetMeta
+from .meta import apply as apply_meta
 from .parse import (
     COL_CODE,
     COL_DIFF,
@@ -59,6 +61,8 @@ class FormatResult:
     last_row: int = 0
     # Работал ли второй слой проверки.
     verify_used: bool = False
+    # Последняя строка с учётом ручных блоков (продавцы, подписи).
+    bottom_row: int = 0
 
 
 def _number(value: object) -> float:
@@ -322,8 +326,9 @@ def format_workbook(
     warehouse: str,
     settings,
     decisions: dict[str, bool] | None = None,
+    sheet_meta: SheetMeta | None = None,
 ) -> FormatResult:
-    """Полный проход шагов 2–9."""
+    """Полный проход шагов 2–10."""
     document = parse(sheet)
     document = shift_header(sheet, document)
     header_row = fill_header(sheet, document, warehouse)
@@ -348,6 +353,9 @@ def format_workbook(
         write_grand_total(sheet, total_cells, header_row)
 
     result.last_row = max(group.total_row for group in document.groups)
+    # Шаг 10: ручные поля сверки пишутся до геометрии,
+    # чтобы высоты строк захватили и блок продавцов.
+    result.bottom_row = apply_meta(sheet, document, sheet_meta, result.last_row)
     style.apply_geometry(sheet, result.last_row)
     return result
 

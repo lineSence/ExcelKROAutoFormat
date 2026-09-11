@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
@@ -11,6 +11,7 @@ import openpyxl
 from ..config import Settings
 from . import report
 from .format import format_workbook, output_filename
+from .meta import SheetMeta
 from .parse import ParseError, warehouse_from_filename
 from .repair import RepairError, repair
 
@@ -28,6 +29,8 @@ class PipelineResult:
     source_path: Path | None = None
     source_name: str = ""
     decisions: dict[str, bool] | None = None
+    # Ручные поля сверки: нужны при каждой пересборке файла.
+    sheet_meta: SheetMeta = field(default_factory=SheetMeta)
 
 
 def work_dir(settings: Settings) -> Path:
@@ -62,6 +65,7 @@ def process(
     original_filename: str,
     settings: Settings | None = None,
     decisions: dict[str, bool] | None = None,
+    sheet_meta: SheetMeta | None = None,
 ) -> PipelineResult:
     """Обрабатывает файл сверки и возвращает путь к готовому файлу."""
     settings = settings or Settings.load()
@@ -74,7 +78,7 @@ def process(
     if not warehouse:
         raise ParseError("Из имени файла не вышло получить имя склада.")
 
-    format_result = format_workbook(sheet, warehouse, settings, decisions)
+    format_result = format_workbook(sheet, warehouse, settings, decisions, sheet_meta)
 
     output_name = output_filename(warehouse, format_result.document.doc_date)
     output_path = folder / output_name
@@ -90,4 +94,5 @@ def process(
         source_path=Path(input_path),
         source_name=original_filename,
         decisions=dict(decisions or {}),
+        sheet_meta=sheet_meta or SheetMeta(),
     )
