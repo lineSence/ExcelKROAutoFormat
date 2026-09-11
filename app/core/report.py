@@ -44,7 +44,11 @@ def cluster_rows(result: FormatResult) -> list[dict]:
 
 
 def doubtful_rows(result: FormatResult) -> list[dict]:
-    """Таблица спорных пересортов (6.10)."""
+    """Таблица спорных пересортов (6.10).
+
+    Поле `pair` нужно режиму обучения: ответ человека сразу становится
+    примером для модели.
+    """
     rows = []
     for group in result.groups:
         for pair in group.doubtful:
@@ -54,10 +58,22 @@ def doubtful_rows(result: FormatResult) -> list[dict]:
                     "first": f"{pair.first_name} (стр. {pair.first_row})",
                     "second": f"{pair.second_name} (стр. {pair.second_row})",
                     "ratio": pair.ratio,
+                    "model": pair.model_prob,
+                    "source": pair.source,
                     "decision": "связаны" if pair.linked else "не связаны",
                     "key": pair.key,
                     "answered": pair.answered,
                     "linked": pair.linked,
+                    "pair": {
+                        "plus_name": pair.first_name,
+                        "plus_diff": pair.first_diff,
+                        "plus_sum": pair.first_sum,
+                        "plus_row": pair.first_row,
+                        "minus_name": pair.second_name,
+                        "minus_diff": pair.second_diff,
+                        "minus_sum": pair.second_sum,
+                        "minus_row": pair.second_row,
+                    },
                 }
             )
     return rows
@@ -72,4 +88,5 @@ def summary(result: FormatResult) -> dict:
         "pieces": round(sum(row["pieces"] for row in rows), 1),
         "resort_sum": round(sum(row["resort_sum"] for row in rows), 2),
         "shortage_sum": round(sum(row["shortage_sum"] for row in rows), 2),
+        "verify_used": bool(getattr(result, "verify_used", False)),
     }
