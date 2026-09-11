@@ -1,0 +1,138 @@
+"""Тесты первой версии. Файл сверки собирается в коде теста."""
+
+from __future__ import annotations
+
+import sys
+import zipfile
+from pathlib import Path
+
+import openpyxl
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.config import Settings
+from app.core.format import output_filename
+from app.core.parse import parse, warehouse_from_filename
+from app.core.pipeline import process
+from app.core.repair import needs_repair, repair_by_inject
+from app.core.resort import normalize
+
+GROUPS = {
+    "Сигареты": [
+        ("Сигареты Parliament Aqua Blue", -3, -450.0),
+        ("Сигареты Parliament Aqua Blue КС", 3, 450.0),
+        ("Сигареты Winston XS Blue", -2, -300.0),
+        ("Сигареты Kent Nano White", 4, 600.0),
+    ],
+    "Стики": [
+        ("Стики Heets Amber", -1, -120.0),
+        ("Стики HEETS Amber Selection", 1, 120.0),
+    ],
+}
+
+
+def _build_source(path: Path) -> None:
+    """Собирает файл, похожий на выгрузку 1С."""
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "TDSheet"
+
+    sheet["A1"] = "Инвентаризация товаров № ИНВ-15 от 09.09.2026"
+    sheet["A2"] = "Организация: ООО Торг"
+    sheet["A3"] = "Склад:"
+    sheet["H3"] = "Валюта"
+    sheet["I3"] = "руб"
+
+    row = 5
+    for name, items in GROUPS.items():
+        sheet.cell(row=row, column=1).value = "№"
+        sheet.cell(row=row, column=2).value = name
+        sheet.cell(row=row, column=3).value = "Хар-ка"
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row + 1, end_column=2)
+        row += 2
+        for number, (item_name, diff, sum_diff) in enumerate(items, start=1):
+            sheet.cell(row=row, column=1).value = number
+            sheet.cell(row=row, column=2).value = item_name
+            sheet.cell(row=row, column=4).value = 10
+            sheet.cell(row=row, column=5).value = 10 - diff
+            sheet.cell(row=row, column=6).value = diff
+            sheet.cell(row=row, column=7).value = 150.0
+            sheet.cell(row=row, column=10).value = sum_diff
+            sheet.cell(row=row, column=11).value = f"Документ {number}"
+            row += 1
+        sheet.cell(row=row, column=4).value = len(items) * 10
+        sheet.cell(row=row, column=6).value = sum(item[1] for item in items)
+        sheet.cell(row=row, column=10).value = sum(item[2] for item in items)
+        row += 2
+
+    workbook.save(path)
+
+
+def _drop_shared_strings(path: Path) -> None:
+    """Убирает xl/sharedStrings.xml, как в выгрузке 1С."""
+    with zipfile.ZipFile(path) as archive:
+        items = [
+            (item, archive.read(item.filename))
+            for item in archive.infolist()
+            if item.filename != "xl/sharedStrings.xml"
+        ]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item, data in items:
+            archive.writestr(item, data)
+
+
+@pytest.fixture()
+def source_file(tmp_path: Path) -> Path:
+    path = tmp_path / "ОхтаМоллСМА без форматирования.xlsx"
+    _build_source(path)
+    _drop_shared_strings(path)
+    return path
+
+
+def test_warehouse_from_filename() -> None:
+    assert warehouse_from_filename("ОхтаМоллСМА без форматирования.xlsx") == "ОхтаМоллСМА"
+    assert warehouse_from_filename("БалтийскийТЦМДБ.xlsx") == "БалтийскийТЦМДБ"
+
+
+def test_output_filename() -> None:
+    assert output_filename("ОхтаМоллСМА", "09.09.2026") == "ОхтаМоллСМА 09.09.2026.xlsx"
+
+
+def test_normalize_folds_names() -> None:
+    words = ("сигареты", "стики")
+    first = normalize("Сигареты Parliament Aqua Blue", words)
+    second = normalize("Сигареты  Parliament Aqua Blue КС", words)
+    assert first
+    assert second.startswith(first)
+
+
+def test_repair_adds_shared_strings(source_file: Path, tmp_path: Path) -> None:
+    assert needs_repair(source_file) is True
+    repaired = repair_by_inject(source_file, tmp_path / "repaired.xlsx")
+    assert needs_repair(repaired) is False
+    openpyxl.load_workbook(repaired)
+
+
+def test_parse_finds_groups(source_file: Path, tmp_path: Path) -> None:
+    repaired = repair_by_inject(source_file, tmp_path / "r.xlsx")
+    sheet = openpyxl.load_workbook(repaired)["TDSheet"]
+    document = parse(sheet)
+    assert document.doc_date == "09.09.2026"
+    assert len(document.groups) == len(GROUPS)
+
+
+def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
+    settings = Settings.load()
+    settings.tmp_dir = str(tmp_path / "work")
+    result = process(source_file, source_file.name, settings)
+
+    assert result.output_name == "ОхтаМоллСМА 09.09.2026.xlsx"
+    assert result.output_path.is_file()
+    assert result.summary["groups"] == len(GROUPS)
+    assert result.summary["pieces"] > 0
+
+    sheet = openpyxl.load_workbook(result.output_path)["TDSheet"]
+    assert str(sheet["I4"].value).startswith("=SUM(")
+    assert sheet["C4"].value == "ОхтаМоллСМА"
+    assert sheet.auto_filter.ref.startswith("K1:K")
