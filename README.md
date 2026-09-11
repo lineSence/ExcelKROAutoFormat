@@ -48,6 +48,74 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 Тесты: `pytest`.
 
+## Быстрая установка на сервер
+
+Нужно: Ubuntu Server 22.04 или новее, доступ по SSH, право `sudo`.
+Замените `user@server` на свой адрес.
+
+### Шаг 1. Команды на сервере
+
+```bash
+ssh user@server
+sudo apt-get update
+sudo apt-get install -y git python3 python3-venv python3-pip rsync
+sudo mkdir -p /opt/excelkro
+sudo chown "$USER:$USER" /opt/excelkro
+git clone https://github.com/lineSence/ExcelKROAutoFormat.git /opt/excelkro
+cd /opt/excelkro
+chmod +x deploy/*.sh
+./deploy/install.sh
+curl -sS http://127.0.0.1:8000/health
+exit
+```
+
+Ответ `{"status":"ok","version":"0.1.0"}` значит, что служба работает.
+
+### Шаг 2. Команда на своём компьютере
+
+```bash
+./deploy/tunnel.sh user@server
+```
+
+Туннель держите открытым и откройте в браузере `http://127.0.0.1:8000`.
+
+### Обновление версии
+
+С своего компьютера, из папки репозитория:
+
+```bash
+./deploy/deploy.sh user@server
+```
+
+Или на сервере:
+
+```bash
+cd /opt/excelkro
+git pull
+venv/bin/pip install -r requirements.txt
+sudo systemctl restart excelkro
+```
+
+### Полезные команды службы
+
+```bash
+sudo systemctl status excelkro     # состояние
+sudo systemctl restart excelkro    # перезапуск
+sudo systemctl stop excelkro       # остановка
+journalctl -u excelkro -n 100      # последние записи журнала
+```
+
+Настройки лежат в `/opt/excelkro/.env` (образец — `deploy/.env.example`). После правки файла перезапустите службу.
+
+### Если не работает
+
+| Признак | Причина и действие |
+| --- | --- |
+| `curl` даёт ошибку соединения | Служба не запустилась. Смотрите `journalctl -u excelkro -n 100` |
+| Страница не открывается в браузере | Туннель закрыт. Запустите `./deploy/tunnel.sh user@server` заново |
+| Ошибка при `pip install` | Нет доступа в сеть с сервера. Нужен выход к PyPI или своё зеркало |
+| Порт 8000 занят | Измените `APP_PORT` в `.env` и порт в `deploy/app.service` |
+
 ## Выкладка на сервер
 
 ```bash
