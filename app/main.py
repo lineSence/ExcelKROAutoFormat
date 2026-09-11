@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import Settings
-from .core import learning
+from .core import learning, runtime
 from .core.parse import ParseError
 from .core.pipeline import PipelineResult, process, work_dir
 from .core.repair import RepairError
@@ -30,6 +30,13 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 VERIFY_MODES = ("off", "model")
 
+# Браузер иногда отдаёт пустое тело, если файл перезаписали после выбора
+# (ошибка вида «File changed» / ERR_UPLOAD_FILE_CHANGED).
+EMPTY_UPLOAD = (
+    "Файл не дошёл целиком: похоже, его изменили после выбора. "
+    "Закройте его в Excel и выберите заново."
+)
+
 RESULTS: dict[str, PipelineResult] = {}
 # Режим «только чёткие пересорты» по токену результата: нужен при пересборке.
 STRICT_FLAGS: dict[str, bool] = {}
@@ -43,9 +50,14 @@ def _mode(value: object) -> str:
     return text if text in VERIFY_MODES else "off"
 
 
+def _base() -> Settings:
+    """Настройки с учётом переключателей из интерфейса."""
+    return runtime.apply(settings)
+
+
 def _settings_for(strict: bool, verify: str = "off") -> Settings:
     """Настройки одного запроса с выбранными режимами."""
-    return replace(settings, strict_resort=bool(strict), verify_mode=_mode(verify))
+    return replace(_base(), strict_resort=bool(strict), verify_mode=_mode(verify))
 
 
 def _is_on(value: object) -> bool:
@@ -67,6 +79,7 @@ def index(request: Request):
             "strict": settings.strict_resort,
             "verify": _mode(settings.verify_mode),
             "model": model_status(settings),
+            "embed": runtime.embed_status(_base()),
         },
     )
 
@@ -84,6 +97,8 @@ async def upload(
     strict_on = _is_on(strict)
     verify_mode = _mode(verify)
 
+    if not content:
+        return _error(request, EMPTY_UPLOAD, strict_on, verify_mode)
     if len(content) > settings.max_upload_mb * 1024 * 1024:
         return _error(request, f"Файл больше {settings.max_upload_mb} МБ.", strict_on, verify_mode)
     if not str(file.filename or "").lower().endswith(".xlsx"):
@@ -233,6 +248,7 @@ def _training_page(
         name="training.html",
         context={
             "model": model_status(settings),
+            "embed": runtime.embed_status(_base()),
             "stats": learning.dataset_stats(settings.train_store_path),
             "message": message,
             "error": error,
@@ -257,6 +273,8 @@ async def training_samples(
     content = await file.read()
     name = str(file.filename or "образец.xlsx")
 
+    if not content:
+        return _training_page(request, error=EMPTY_UPLOAD, status_code=400)
     if len(content) > settings.max_upload_mb * 1024 * 1024:
         return _training_page(request, error=f"Файл больше {settings.max_upload_mb} МБ.", status_code=400)
     if not name.lower().endswith(".xlsx"):
@@ -306,6 +324,13 @@ def training_train(request: Request):
     return _training_page(request, message="Модель переобучена и сохранена.", report=report)
 
 
+@app.post("/training/embed")
+def training_embed(embed: str | None = Form(default=None)):
+    """Включает или выключает эмбеддинги имён без перезапуска службы."""
+    runtime.set_embed(settings, _is_on(embed))
+    return RedirectResponse(url="/training", status_code=303)
+
+
 @app.post("/training/clear")
 def training_clear():
     """Очищает накопленные примеры. Модель остаётся прежней."""
@@ -328,6 +353,7 @@ def _error(
             "strict": bool(strict),
             "verify": _mode(verify),
             "model": model_status(settings),
+            "embed": runtime.embed_status(_base()),
         },
         status_code=400,
     )
