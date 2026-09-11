@@ -24,6 +24,7 @@
 		<li>Пересорты, сумма: {{ summary.resort_sum }}</li>
 		<li>Недостача, сумма: {{ summary.shortage_sum }}</li>
 		<li>Подбор пар: {% if strict %}только чёткие пересорты (бренд с брендом, цена не учитывается){% else %}обычный (бренд или близкая цена){% endif %}</li>
+		<li>Проверка: {% if verify == "model" and summary.verify_used %}логика + нейросеть{% elif verify == "model" %}запрошена нейросеть, но модель не загружена{% else %}только детерминированная логика{% endif %}</li>
 	</ul>
 
 	<h2>По группам</h2>
@@ -40,17 +41,20 @@
 
 	{% if doubtful %}
 	<h2>Спорные пересорты</h2>
-	<p class="hint">Отметьте решение и нажмите «Применить». Файл будет построен заново.</p>
+	<p class="hint">Отметьте решение и нажмите «Применить». Файл будет построен заново, а каждый ответ сохранится в примеры для обучения.</p>
 	<form method="post" action="/confirm/{{ token }}">
 		<input type="hidden" name="strict" value="{% if strict %}on{% else %}off{% endif %}" />
+		<input type="hidden" name="verify" value="{{ verify }}" />
 		<table>
-			<tr><th>Группа</th><th>Первая строка</th><th>Вторая строка</th><th>Схожесть</th><th>Сейчас</th><th>Решение</th></tr>
+			<tr><th>Группа</th><th>Первая строка</th><th>Вторая строка</th><th>Схожесть</th><th>Модель</th><th>Причина</th><th>Сейчас</th><th>Решение</th></tr>
 			{% for row in doubtful %}
 			<tr>
 				<td>{{ row.group }}</td>
 				<td>{{ row.first }}</td>
 				<td>{{ row.second }}</td>
 				<td>{{ row.ratio }}</td>
+				<td>{% if row.model is not none %}{{ row.model }}{% else %}—{% endif %}</td>
+				<td>{{ row.source }}</td>
 				<td>{{ row.decision }}</td>
 				<td>
 					<label><input type="radio" name="pair-{{ row.key }}" value="skip" checked /> позже</label>
@@ -65,6 +69,8 @@
 	{% else %}
 	<p class="hint">Спорных пересортов нет.</p>
 	{% endif %}
+
+	<p><a class="link" href="/training">Обучение модели</a></p>
 </main>
 </body>
 </html>

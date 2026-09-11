@@ -26,10 +26,33 @@
 		</p>
 		<p class="hint">В пару ставятся только позиции одного бренда. Любые другие пересорты исключены, цена на подбор не влияет.</p>
 
+		<h2>Проверка пересортов</h2>
+		<p>
+			<label>
+				<input type="radio" name="verify" value="off" {% if verify != "model" %}checked{% endif %} />
+				Только детерминированная логика
+			</label>
+		</p>
+		<p>
+			<label>
+				<input type="radio" name="verify" value="model" {% if verify == "model" %}checked{% endif %} {% if not model.ready %}disabled{% endif %} />
+				Логика + нейросеть (второй слой проверки)
+			</label>
+		</p>
+		<p class="hint">
+			{% if model.ready %}
+			Модель готова: обучена на {{ model.samples }} примерах{% if model.trained_at %}, обновлена {{ model.trained_at }}{% endif %}.
+			Модель снимает явно ложные пары и отправляет сомнительные в раздел «Спорные пересорты».
+			{% else %}
+			Модель не найдена. Обучите её на странице обучения.
+			{% endif %}
+		</p>
+
 		<button type="submit">Обработать</button>
 	</form>
 
 	<p class="hint">Предел размера файла: {{ max_upload_mb }} МБ.</p>
+	<p><a class="link" href="/training">Обучение модели</a></p>
 </main>
 </body>
 </html>
