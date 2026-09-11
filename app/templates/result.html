@@ -1,76 +1,125 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-	<meta charset="utf-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<title>Готово — ExcelKROAutoFormat</title>
-	<link rel="stylesheet" href="/static/style.css" />
-</head>
-<body>
-<main class="card wide">
-	<h1>Файл готов</h1>
+{% extends "base.html" %}
+{% block title %}Файл готов — ExcelKROAutoFormat{% endblock %}
+{% block heading %}Файл готов{% endblock %}
+{% block subheading %}<p>{{ summary.warehouse }}{% if summary.date %} · {{ summary.date }}{% endif %}</p>{% endblock %}
 
-	<p>
-		<a class="button" href="/download/{{ token }}">Скачать {{ output_name }}</a>
-		<a class="link" href="/">Загрузить другой файл</a>
+{% block content %}
+<section class="card">
+	<div class="card-row">
+		<div class="actions">
+			<a class="button" href="/download/{{ token }}">Скачать {{ output_name }}</a>
+			<a class="button button-secondary" href="/">Загрузить другой файл</a>
+		</div>
+		<div class="actions">
+			{% if strict %}<span class="badge">только ч⑑ткие пересорты</span>{% else %}<span class="badge">обычный подбор</span>{% endif %}
+			{% if verify == "model" and summary.verify_used %}<span class="badge badge-ok">логика + нейросеть</span>
+			{% elif verify == "model" %}<span class="badge badge-warn">модель не загрузилась</span>
+			{% else %}<span class="badge">только логика</span>{% endif %}
+		</div>
+	</div>
+</section>
+
+<section class="card">
+	<h2>Итог</h2>
+	<div class="stats">
+		<div class="stat"><span class="stat-label">Групп товаров</span><span class="stat-value">{{ summary.groups }}</span></div>
+		<div class="stat"><span class="stat-label">Пересорты, шт.</span><span class="stat-value">{{ summary.pieces }}</span></div>
+		<div class="stat"><span class="stat-label">Пересорты, сумма</span><span class="stat-value">{{ summary.resort_sum }}</span></div>
+		<div class="stat"><span class="stat-label">Недостача, сумма</span><span class="stat-value">{{ summary.shortage_sum }}</span></div>
+	</div>
+</section>
+
+<section class="card" data-review>
+	<h2>Разбор неопределённостей</h2>
+	{% if doubtful %}
+	<p class="card-sub">
+		Программа не уверена в этих парах. Отметьте решения и примените — файл будет собран заново,
+		а каждый ответ попадёт в примеры для обучения. Клавиши: <b>1</b> — пересорт, <b>2</b> — нет, <b>3</b> — позже,
+		<b>↑</b>/<b>↓</b> — переход по карточкам.
 	</p>
 
-	<h2>Итог</h2>
-	<ul>
-		<li>Склад: {{ summary.warehouse }}</li>
-		<li>Дата: {{ summary.date or "не найдена" }}</li>
-		<li>Групп товаров: {{ summary.groups }}</li>
-		<li>Пересорты, шт.: {{ summary.pieces }}</li>
-		<li>Пересорты, сумма: {{ summary.resort_sum }}</li>
-		<li>Недостача, сумма: {{ summary.shortage_sum }}</li>
-		<li>Подбор пар: {% if strict %}только чёткие пересорты (бренд с брендом, цена не учитывается){% else %}обычный (бренд или близкая цена){% endif %}</li>
-		<li>Проверка: {% if verify == "model" and summary.verify_used %}логика + нейросеть{% elif verify == "model" %}запрошена нейросеть, но модель не загружена{% else %}только детерминированная логика{% endif %}</li>
-	</ul>
-
-	<h2>По группам</h2>
-	<table>
-		<tr><th>Группа</th><th>Пересорты, шт.</th><th>Пересорты, сумма</th><th>Недостача, сумма</th><th>Строк без пары</th></tr>
-		{% for row in groups %}
-		<tr><td>{{ row.group }}</td><td>{{ row.pieces }}</td><td>{{ row.resort_sum }}</td><td>{{ row.shortage_sum }}</td><td>{{ row.single_rows }}</td></tr>
-		{% endfor %}
-	</table>
-
-	{% if confirmed_count %}
-	<p class="hint">Подтверждено пар: {{ confirmed_count }}. Подтверждённые пары в таблице не показываются.</p>
-	{% endif %}
-
-	{% if doubtful %}
-	<h2>Спорные пересорты</h2>
-	<p class="hint">Отметьте решение и нажмите «Применить». Файл будет построен заново, а каждый ответ сохранится в примеры для обучения.</p>
 	<form method="post" action="/confirm/{{ token }}">
 		<input type="hidden" name="strict" value="{% if strict %}on{% else %}off{% endif %}" />
 		<input type="hidden" name="verify" value="{{ verify }}" />
-		<table>
-			<tr><th>Группа</th><th>Первая строка</th><th>Вторая строка</th><th>Схожесть</th><th>Модель</th><th>Причина</th><th>Сейчас</th><th>Решение</th></tr>
-			{% for row in doubtful %}
-			<tr>
-				<td>{{ row.group }}</td>
-				<td>{{ row.first }}</td>
-				<td>{{ row.second }}</td>
-				<td>{{ row.ratio }}</td>
-				<td>{% if row.model is not none %}{{ row.model }}{% else %}—{% endif %}</td>
-				<td>{{ row.source }}</td>
-				<td>{{ row.decision }}</td>
-				<td>
-					<label><input type="radio" name="pair-{{ row.key }}" value="skip" checked /> позже</label>
-					<label><input type="radio" name="pair-{{ row.key }}" value="yes" /> пересорт</label>
-					<label><input type="radio" name="pair-{{ row.key }}" value="no" /> не пересорт</label>
-				</td>
-			</tr>
-			{% endfor %}
-		</table>
-		<p><button class="button" type="submit">Применить решения</button></p>
+
+		<div class="review-toolbar">
+			<span class="review-progress">Решено: <span data-review-count>0 из {{ doubtful | length }}</span>{% if confirmed_count %} <span class="muted">· ранее подтверждено {{ confirmed_count }}</span>{% endif %}</span>
+			<span class="actions">
+				<button class="button-secondary button-small" type="button" data-review-all="yes">Все — пересорт</button>
+				<button class="button-secondary button-small" type="button" data-review-all="no">Все — не пересорт</button>
+				<button class="button-secondary button-small" type="button" data-review-all="skip">Сбросить</button>
+				<label class="hint"><input type="checkbox" data-review-filter /> только нерешённые</label>
+			</span>
+		</div>
+
+		{% for row in doubtful %}
+		<article class="pair" data-pair data-state="skip">
+			<div class="pair-head">
+				<span class="pair-index">{{ loop.index }}</span>
+				<span class="pair-group">{{ row.group }}</span>
+				<span class="pair-head-right">
+					<span class="badge">схожесть {{ row.ratio }}</span>
+					{% if row.model is not none %}<span class="badge">модель {{ row.model }}</span>{% endif %}
+					{% if row.linked %}<span class="badge badge-ok">сейчас: связаны</span>{% else %}<span class="badge badge-warn">сейчас: не связаны</span>{% endif %}
+					<span class="badge">{{ row.source }}</span>
+				</span>
+			</div>
+
+			<div class="pair-body">
+				<div class="pair-side">
+					<span class="pair-side-label">Излишек · строка {{ row.pair.plus_row }}</span>
+					<span class="pair-name">{{ row.pair.plus_name }}</span>
+					<span class="pair-numbers"><span>кол-во: {{ row.pair.plus_diff }}</span><span>сумма: {{ row.pair.plus_sum }}</span></span>
+				</div>
+				<div class="pair-side">
+					<span class="pair-side-label">Недостача · строка {{ row.pair.minus_row }}</span>
+					<span class="pair-name">{{ row.pair.minus_name }}</span>
+					<span class="pair-numbers"><span>кол-во: {{ row.pair.minus_diff }}</span><span>сумма: {{ row.pair.minus_sum }}</span></span>
+				</div>
+			</div>
+
+			<div class="pair-answer">
+				<span class="pair-answer-label">Это один и тот же товар?</span>
+				<span class="segmented">
+					<label class="is-yes"><input type="radio" name="pair-{{ row.key }}" value="yes" /> Пересорт</label>
+					<label class="is-no"><input type="radio" name="pair-{{ row.key }}" value="no" /> Не пересорт</label>
+					<label class="is-skip"><input type="radio" name="pair-{{ row.key }}" value="skip" checked /> Позже</label>
+				</span>
+			</div>
+		</article>
+		{% endfor %}
+
+		<div class="review-bar">
+			<span class="hint">Неразобранные пары останутся как сейчас.</span>
+			<button type="submit" data-review-submit>Применить и собрать файл</button>
+		</div>
 	</form>
 	{% else %}
-	<p class="hint">Спорных пересортов нет.</p>
+	<p class="review-empty">Спорных пар нет{% if confirmed_count %} — подтверждено {{ confirmed_count }}{% endif %}.</p>
 	{% endif %}
+</section>
 
-	<p><a class="link" href="/training">Обучение модели</a></p>
-</main>
-</body>
-</html>
+<section class="card">
+	<h2>По группам</h2>
+	<div class="table-wrap">
+		<table>
+			<thead>
+				<tr><th>Группа</th><th class="num">Пересорты, шт.</th><th class="num">Пересорты, сумма</th><th class="num">Недостача, сумма</th><th class="num">Строк без пары</th></tr>
+			</thead>
+			<tbody>
+				{% for row in groups %}
+				<tr>
+					<td>{{ row.group }}</td>
+					<td class="num">{{ row.pieces }}</td>
+					<td class="num">{{ row.resort_sum }}</td>
+					<td class="num">{{ row.shortage_sum }}</td>
+					<td class="num">{{ row.single_rows }}</td>
+				</tr>
+				{% endfor %}
+			</tbody>
+		</table>
+	</div>
+</section>
+{% endblock %}
+
+{% block scripts %}<script src="/static/review.js"></script>{% endblock %}

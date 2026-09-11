@@ -1,127 +1,91 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-	<meta charset="utf-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<title>Обучение — ExcelKROAutoFormat</title>
-	<link rel="stylesheet" href="/static/style.css" />
-</head>
-<body>
-<main class="card wide">
-	<h1>Обучение модели пересортов</h1>
-	<p class="hint">
-		Модель — второй слой проверки. Пары собирает детерминированная логика,
-		а модель снимает явно ложные пары и отмечает сомнительные для ручного ответа.
-	</p>
+{% extends "base.html" %}
+{% block title %}Модель и обучение — ExcelKROAutoFormat{% endblock %}
+{% block heading %}Модель и обучение{% endblock %}
+{% block subheading %}<p>Второй слой проверки пересортов: примеры, переобучение и настройки нейросети.</p>{% endblock %}
 
-	{% if error %}
-	<p class="error">{{ error }}</p>
-	{% endif %}
-	{% if message %}
-	<p class="hint">{{ message }}</p>
-	{% endif %}
-
+{% block content %}
+<section class="card">
 	<h2>Состояние</h2>
-	<ul>
-		<li>Модель: {% if model.ready %}готова{% else %}не обучена{% endif %}</li>
-		<li>Обучена на примерах: {{ model.samples or 0 }}</li>
-		<li>Обновлена: {{ model.trained_at or "—" }}</li>
-		<li>Накоплено примеров: {{ stats.total }} (пересортов {{ stats.positives }}, не пересортов {{ stats.negatives }})</li>
-		<li>Из ручных ответов на спорные пары: {{ stats.from_decisions }}</li>
-		<li>Эмбеддинги имён:
-			{% if embed.enabled and embed.ready %}включены
-			{% elif embed.enabled %}включены, но не готовы
-			{% else %}выключены{% endif %}</li>
-	</ul>
-
+	<div class="stats">
+		<div class="stat">
+			<span class="stat-label">Модель</span>
+			<span class="stat-value">{% if model.ready %}готова{% else %}не обучена{% endif %}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Примеров в базе</span>
+			<span class="stat-value">{{ stats.total }}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Пересорты / не пары</span>
+			<span class="stat-value">{{ stats.positives }} / {{ stats.negatives }}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Эмбеддинги имён</span>
+			<span class="stat-value">
+				{% if embed and embed.enabled and embed.ready %}работают
+				{% elif embed and embed.enabled %}не готовы
+				{% else %}выключены{% endif %}
+			</span>
+		</div>
+	</div>
+	{% if model.ready and model.trained_at %}
+	<p class="hint">Обучена {{ model.trained_at }} на {{ model.samples }} примерах. Файл: {{ model.path }}</p>
+	{% endif %}
 	{% if stats.sources %}
-	<h2>Источники примеров</h2>
-	<table>
-		<tr><th>Файл</th><th>Примеров</th></tr>
-		{% for name, count in stats.sources %}
-		<tr><td>{{ name }}</td><td>{{ count }}</td></tr>
+	<p class="hint">Источники примеров: {{ stats.sources | join(", ") }}</p>
+	{% endif %}
+</section>
+
+{% if report %}
+<section class="card">
+	<h2>Итог обучения</h2>
+	<ul class="facts">
+		{% for key, value in report.items() %}
+		<li><span>{{ key }}</span><span>{{ value }}</span></li>
 		{% endfor %}
-	</table>
-	{% endif %}
-
-	{% if report %}
-	<h2>Результат обучения</h2>
-	<ul>
-		<li>Примеров: {{ report.samples }} (пересортов {{ report.positives }})</li>
-		<li>Эпох: {{ report.epochs }}</li>
-		{% if report.train_metrics %}
-		<li>На обучении: точность {{ report.train_metrics.accuracy }},
-			прецизия {{ report.train_metrics.precision }},
-			полнота {{ report.train_metrics.recall }}</li>
-		{% endif %}
-		{% if report.holdout_metrics %}
-		<li>На отложенных файлах ({{ report.holdout_metrics.files | join(", ") }}):
-			точность {{ report.holdout_metrics.accuracy }},
-			прецизия {{ report.holdout_metrics.precision }},
-			полнота {{ report.holdout_metrics.recall }}</li>
-		{% else %}
-		<li>Проверка на отложенных файлах: нужно минимум два источника</li>
-		{% endif %}
 	</ul>
-	{% endif %}
+</section>
+{% endif %}
 
-	<h2>1. Загрузить ручной образец</h2>
-	<p class="hint">
-		Готовая сверка .xlsx, проверенная вручную. Пары в рамке читаются как
-		подтверждённые пересорты, остальные похожие пары — как отрицательные примеры,
-		зелёные строки (ручной тег «не-») пропускаются.
-		Сам файл не сохраняется: в базу попадают только поля пар.
-	</p>
+<section class="card">
+	<h2>1. Добавить примеры из ручной сверки</h2>
+	<p class="card-sub">Загрузите файл, разобранный руками: зелёные грозди станут примерами «пересорт», остальные пары — «не пересорт».</p>
 	<form action="/training/samples" method="post" enctype="multipart/form-data" data-inmemory="true">
-		<input type="file" name="file" accept=".xlsx" required />
-		<p><button type="submit">Добавить примеры</button></p>
+		<div class="field">
+			<input type="file" name="file" accept=".xlsx" required />
+			<p class="hint">До {{ max_upload_mb }} МБ. Файл читается в память браузера сразу при отправке — ошибка «File changed» больше не мешает.</p>
+		</div>
+		<div class="actions"><button type="submit">Загрузить образец</button></div>
 	</form>
-	<p class="hint">
-		Предел размера файла: {{ max_upload_mb }} МБ.
-		Файл читается в память браузера сразу при отправке, поэтому открытый
-		в Excel документ больше не вызывает ошибку «File changed».
-	</p>
+</section>
 
+<section class="card">
 	<h2>2. Переобучить модель</h2>
-	<p class="hint">
-		Нужно не меньше 40 примеров и оба класса. Обучение идёт в один поток на
-		чистом Python и занимает секунды: для VPS с одним ядром и 1 ГБ памяти это безопасно.
-	</p>
+	<p class="card-sub">Занимает несколько секунд. Нужно не меньше 40 примеров и оба вида ответов.</p>
 	<form action="/training/train" method="post">
-		<p><button class="button" type="submit">Обучить заново</button></p>
+		<div class="actions"><button type="submit">Обучить заново</button></div>
 	</form>
+</section>
 
+<section class="card">
 	<h2>3. Эмбеддинги имён</h2>
-	<p class="hint">
-		Маленькая нейросеть (rubert-tiny2, ONNX int8) добавляет к признакам пары
-		смысловую близость названий. Полезно на разных написаниях одного товара.
-		Векторы считаются одним потоком и кэшируются на диске.
-	</p>
-	<p class="hint">{{ embed.reason }}</p>
-	<form action="/training/embed" method="post">
-		{% if embed.enabled %}
-		<input type="hidden" name="embed" value="off" />
-		<p><button type="submit">Выключить эмбеддинги</button></p>
-		{% else %}
-		<input type="hidden" name="embed" value="on" />
-		<p><button type="submit">Включить эмбеддинги</button></p>
-		{% endif %}
-	</form>
-	{% if embed.enabled and not embed.ready %}
-	<p class="hint">
-		Пока файлы или пакеты не готовы, программа работает без эмбеддингов:
-		пересорты считаются как обычно, ошибки не будет.
-	</p>
+	<p class="card-sub">{{ embed.reason if embed else "Состояние неизвестно." }}</p>
+	{% if embed and embed.enabled and not embed.ready %}
+	<p class="alert alert-warn">Сейчас пересорты считаются без эмбеддингов — работе это не мешает.</p>
 	{% endif %}
-
-	<h2>4. Очистить базу примеров</h2>
-	<p class="hint">Удаляет накопленные примеры. Текущая обученная модель продолжит работать.</p>
-	<form action="/training/clear" method="post">
-		<p><button type="submit">Очистить</button></p>
+	<form action="/training/embed" method="post">
+		<input type="hidden" name="embed" value="{% if embed and embed.enabled %}off{% else %}on{% endif %}" />
+		<div class="actions">
+			<button class="button-secondary" type="submit">{% if embed and embed.enabled %}Выключить эмбеддинги{% else %}Включить эмбеддинги{% endif %}</button>
+		</div>
 	</form>
+</section>
 
-	<p><a class="link" href="/">Назад к загрузке сверки</a></p>
-</main>
-<script src="/static/upload.js"></script>
-</body>
-</html>
+<section class="card">
+	<h2>4. Очистить базу примеров</h2>
+	<p class="card-sub">Удаляет все накопленные примеры. Обученная модель при этом остаётся.</p>
+	<form action="/training/clear" method="post" onsubmit="return confirm('Удалить все накопленные примеры?');">
+		<div class="actions"><button class="button-danger" type="submit">Очистить</button></div>
+	</form>
+</section>
+{% endblock %}
