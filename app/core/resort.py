@@ -17,6 +17,11 @@
 Режим «только чёткие пересорты» (`strict_brand_only=True`): в пару ставятся
 только позиции одного бренда, цена в подборе не участвует вовсе.
 
+Второй слой (`verifier`, см. `verify.py`) — необязательный проверяющий. Он
+не придумывает пары, а судит те, что предложила детерминированная логика:
+слабую пару снимает, уверенную усиливает, сомнительную отправляет в
+спорные на ручное подтверждение. Решения пользователя главнее модели.
+
 Зелёная заливка и метка `не-` — ручной тег по внешним данным. Программа его
 не ставит и не воспроизводит.
 """
@@ -105,6 +110,13 @@ class DoubtfulPair:
     linked: bool
     key: str = ""
     answered: bool = False
+    # Сырые числа пары: нужны режиму обучения, чтобы сохранить ответ человека.
+    first_diff: float = 0.0
+    first_sum: float = 0.0
+    second_diff: float = 0.0
+    second_sum: float = 0.0
+    model_prob: float | None = None
+    source: str = "схожесть"
 
 
 def normalize(name: str, type_words: tuple[str, ...] = ()) -> str:
@@ -258,6 +270,25 @@ def pair_key(first_row: int, second_row: int) -> str:
     return f"{min(first_row, second_row)}-{max(first_row, second_row)}"
 
 
+def _doubtful(plus: Item, minus: Item, ratio: float, answered: bool, prob, source: str) -> DoubtfulPair:
+    return DoubtfulPair(
+        first_row=plus.row,
+        first_name=plus.name,
+        second_row=minus.row,
+        second_name=minus.name,
+        ratio=round(ratio, 3),
+        linked=False,
+        key=pair_key(plus.row, minus.row),
+        answered=answered,
+        first_diff=plus.diff,
+        first_sum=plus.sum_diff,
+        second_diff=minus.diff,
+        second_sum=minus.sum_diff,
+        model_prob=round(prob, 3) if prob is not None else None,
+        source=source,
+    )
+
+
 def build_clusters(
     items: list[Item],
     threshold: float,
@@ -265,11 +296,14 @@ def build_clusters(
     doubtful_max: float,
     decisions: dict[str, bool] | None = None,
     strict_brand_only: bool = False,
+    verifier=None,
 ) -> tuple[list[Cluster], list[DoubtfulPair]]:
     """Подбирает пары пересорта: каждый излишек к своей недостаче.
 
     При `strict_brand_only=True` разрешены только пары одного бренда,
     а цена не влияет ни на допуск пары, ни на её оценку.
+
+    `verifier` — второй слой проверки из `verify.py` или None.
     """
     union = _Union(len(items))
     plus = [index for index, item in enumerate(items) if item.diff > 0]
@@ -277,10 +311,12 @@ def build_clusters(
 
     choices = decisions or {}
     doubtful: list[DoubtfulPair] = []
+    seen_doubtful: set[str] = set()
     ranked: list[tuple[float, int, int]] = []
     for p in plus:
         for m in minus:
-            answer = choices.get(pair_key(items[p].row, items[m].row))
+            key = pair_key(items[p].row, items[m].row)
+            answer = choices.get(key)
             if answer is False:
                 continue
             if answer is not True:
@@ -290,21 +326,31 @@ def build_clusters(
                 elif not price_allowed(items[p], items[m], threshold):
                     continue
             score = brand_score(items[p], items[m]) if strict_brand_only else pair_score(items[p], items[m])
+
+            verdict = None
+            if verifier is not None and answer is not True:
+                verdict = verifier.check(items[p], items[m])
+                if not verdict.accept:
+                    # Модель уверена, что это разные товары: пара снята.
+                    continue
+                score += verdict.bonus
+
             if answer is True:
                 score += 10.0
             ranked.append((score, p, m))
+
             ratio = similarity(items[p].key, items[m].key)
-            if doubtful_min <= ratio <= doubtful_max:
+            gray = verdict is not None and verdict.gray
+            if (doubtful_min <= ratio <= doubtful_max or gray) and key not in seen_doubtful:
+                seen_doubtful.add(key)
                 doubtful.append(
-                    DoubtfulPair(
-                        first_row=items[p].row,
-                        first_name=items[p].name,
-                        second_row=items[m].row,
-                        second_name=items[m].name,
-                        ratio=round(ratio, 3),
-                        linked=False,
-                        key=pair_key(items[p].row, items[m].row),
-                        answered=pair_key(items[p].row, items[m].row) in choices,
+                    _doubtful(
+                        items[p],
+                        items[m],
+                        ratio,
+                        key in choices,
+                        verdict.prob if verdict is not None else None,
+                        "модель" if gray else "схожесть",
                     )
                 )
 
