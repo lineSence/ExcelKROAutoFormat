@@ -2,12 +2,16 @@
 
 Правило подбора пары повторяет ручную сверку:
 1. Каждый излишек ищет себе недостачу в той же группе.
-2. Имя важнее цены. Сначала берутся пары с похожим именем
-   и равным количеством, и только потом пары с близкой ценой.
-3. Количество в паре может не совпадать. Тогда к одной недостаче
+2. Пара возможна, если это один бренд (совпали два первых слова имени
+   или имена похожи целиком) либо цены сопоставимы. Разные бренды с
+   разной ценой в пару не ставятся: так ручная сверка оставляет их
+   отдельными излишком и недостачей.
+3. Излишек по деньгам должен закрывать недостачу: цена излишка не ниже
+   цены недостачи. Такие пары берутся первыми.
+4. Количество в паре может не совпадать. Тогда к одной недостаче
    добавляются несколько излишков, пока количество не закроется.
-4. Излишки и недостачи без пары остаются излишками и недостачами.
-5. Решения пользователя по спорным парам (decisions) главнее расчёта.
+5. Излишки и недостачи без пары остаются излишками и недостачами.
+6. Решения пользователя по спорным парам (decisions) главнее расчёта.
 """
 
 from __future__ import annotations
@@ -32,6 +36,10 @@ DECISION_RESORT = "пересорт"
 DECISION_SURPLUS = "излишек"
 DECISION_SHORTAGE = "недостача"
 DECISION_NONE = "без разбора"
+
+# Границы отношения цены излишка к цене недостачи для пары разных брендов.
+PRICE_GATE_LOW = 0.95
+PRICE_GATE_HIGH = 1.50
 
 
 @dataclass
@@ -114,25 +122,22 @@ def similarity(first: str, second: str) -> float:
 
 
 def _price_bonus(first: Item, second: Item) -> float:
-    """Награда за близкую цену. Цена вторична по отношению к имени."""
+    """Награда за близкую цену."""
     high = max(first.price, second.price)
     if high <= 0:
         return 0.0
     gap = abs(first.price - second.price) / high
     if gap <= 0.001:
-        return 0.20
+        return 0.30
     if gap <= 0.10:
-        return 0.12
+        return 0.15
     if gap <= 0.25:
         return 0.05
     return 0.0
 
 
 def _name_bonus(first: Item, second: Item) -> float:
-    """Награда за общее начало имени: бренд и вид товара.
-
-    Имя важнее цены, поэтому награда за имя выше награды за цену.
-    """
+    """Награда за общее начало имени: бренд и вид товара."""
     if len(first.words) >= 2 and first.words[:2] == second.words[:2]:
         return 1.00
     if first.words and second.words and first.words[0] == second.words[0]:
@@ -140,17 +145,63 @@ def _name_bonus(first: Item, second: Item) -> float:
     return 0.0
 
 
-def pair_score(first: Item, second: Item) -> float:
-    """Оценка пары «излишек — недостача»."""
-    return similarity(first.key, second.key) + _name_bonus(first, second) + _price_bonus(first, second)
+def same_brand(first: Item, second: Item, threshold: float) -> bool:
+    """Один бренд: совпали два первых слова имени либо имена похожи целиком.
+
+    Одно общее первое слово («зажигалка», «сувенир», «вода») брендом не
+    считается: ручная сверка такие позиции в пару не ставит.
+    """
+    if len(first.words) >= 2 and first.words[:2] == second.words[:2]:
+        return True
+    return similarity(first.key, second.key) >= threshold
+
+
+def price_ratio(plus: Item, minus: Item) -> float:
+    """Отношение цены излишка к цене недостачи."""
+    if minus.price <= 0:
+        return 0.0
+    return plus.price / minus.price
+
+
+def price_allowed(plus: Item, minus: Item, threshold: float) -> bool:
+    """Проверка цены для пары разных брендов."""
+    if same_brand(plus, minus, threshold):
+        return True
+    return PRICE_GATE_LOW <= price_ratio(plus, minus) <= PRICE_GATE_HIGH
+
+
+def covers(plus: Item, minus: Item) -> bool:
+    """Излишек закрывает недостачу по деньгам: пересорт без потери суммы."""
+    return plus.price + 1e-9 >= minus.price
 
 
 def _quantity_bonus(first: Item, second: Item) -> float:
     return 0.80 if abs(first.diff) == abs(second.diff) else 0.0
 
 
+def _distance_bonus(plus: Item, minus: Item) -> float:
+    """Соседние строки связываются охотнее: список отсортирован по имени."""
+    gap = abs(plus.row - minus.row)
+    if gap <= 1:
+        return 0.20
+    if gap <= 3:
+        return 0.10
+    return 0.0
+
+
+def pair_score(first: Item, second: Item) -> float:
+    """Оценка пары «излишек — недостача»."""
+    return (
+        1.5 * (similarity(first.key, second.key) + _name_bonus(first, second))
+        + _price_bonus(first, second)
+        + 0.5 * _quantity_bonus(first, second)
+        + (0.60 if covers(first, second) else 0.0)
+        + _distance_bonus(first, second)
+    )
+
+
 # Ниже этого порога пара не считается пересортом.
-MATCH_MIN_SCORE = 0.75
+MATCH_MIN_SCORE = 1.10
 
 
 class _Union:
@@ -191,10 +242,12 @@ def build_clusters(
     ranked: list[tuple[float, int, int]] = []
     for p in plus:
         for m in minus:
-            score = pair_score(items[p], items[m]) + _quantity_bonus(items[p], items[m])
             answer = choices.get(pair_key(items[p].row, items[m].row))
             if answer is False:
                 continue
+            if answer is not True and not price_allowed(items[p], items[m], threshold):
+                continue
+            score = pair_score(items[p], items[m])
             if answer is True:
                 score += 10.0
             ranked.append((score, p, m))
