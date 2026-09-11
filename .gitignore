@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# настройки
+.env
+
+# временные файлы обработки
+tmp/
+*.tmp
+
+# рабочие файлы Excel
+~$*.xlsx
+
+# тесты и покрытие
+.pytest_cache/
+.coverage
+htmlcov/
+
+# редакторы и ОС
+.vscode/
+.idea/
+.DS_Store
