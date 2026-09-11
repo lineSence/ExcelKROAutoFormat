@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 TITLE_PREFIX = "Инвентаризация товаров"
+TITLE_MARKS = (
+    "инвентаризация товаров",
+    "инвентаризационная опись",
+    "сличительная ведомость",
+    "инвентаризация",
+)
+SCAN_ROWS = 80
+SCAN_COLUMNS = 12
 HEADER_MARK_A = "№"
 HEADER_MARK_C = "Хар-ка"
 COL_CODE = 1       # A
@@ -46,7 +55,7 @@ class Group:
 class Document:
     """Разобранный файл сверки."""
 
-    title_row: int
+    title_row: int | None
     title_text: str
     doc_number: str | None
     doc_date: str | None
@@ -56,7 +65,31 @@ class Document:
 
 
 def _text(value: object) -> str:
-    return "" if value is None else str(value).strip()
+    if value is None:
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%d.%m.%Y")
+    return str(value).strip()
+
+
+def _fold(text: str) -> str:
+    """Убирает неразрывные пробелы, лишние пробелы и регистр."""
+    cleaned = text.replace("\xa0", " ").replace("\u202f", " ")
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
+
+
+def head_sample(sheet, rows: int = 12) -> list[str]:
+    """Первые непустые тексты листа. Нужны для разбора ошибок."""
+    sample: list[str] = []
+    for row in range(1, min(sheet.max_row, rows) + 1):
+        parts = []
+        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
+            text = _text(sheet.cell(row=row, column=column).value)
+            if text:
+                parts.append(f"{row}:{column}={text[:40]}")
+        if parts:
+            sample.append("; ".join(parts))
+    return sample
 
 
 def _is_number(value: object) -> bool:
@@ -73,18 +106,42 @@ def warehouse_from_filename(filename: str) -> str:
     return stem.split(" ")[0].strip()
 
 
-def find_title(sheet) -> tuple[int, str]:
-    for row in range(1, min(sheet.max_row, 40) + 1):
-        text = _text(sheet.cell(row=row, column=COL_CODE).value)
-        if text.startswith(TITLE_PREFIX):
-            return row, text
-    raise ParseError("В файле нет титула «Инвентаризация товаров».")
+def find_title(sheet) -> tuple[int | None, str]:
+    """Ищет титул в первых строках и в первых столбцах.
+
+    Титул в выгрузке 1С стоит не всегда в ячейке A1. Он бывает в другом
+    столбце, с неразрывными пробелами или в другом написании. Поэтому
+    поиск идёт по области, а не по одной ячейке. Если титула нет, файл всё
+    равно обрабатывается: дата берётся из шапки.
+    """
+    for row in range(1, min(sheet.max_row, SCAN_ROWS) + 1):
+        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
+            text = _text(sheet.cell(row=row, column=column).value)
+            if not text:
+                continue
+            folded = _fold(text)
+            if any(mark in folded for mark in TITLE_MARKS):
+                return row, text
+    return None, ""
 
 
-def find_label_row(sheet, label: str, limit: int = 40) -> int | None:
+def find_date(sheet) -> str | None:
+    """Первая дата вида ДД.ММ.ГГГГ в шапке файла."""
+    for row in range(1, min(sheet.max_row, SCAN_ROWS) + 1):
+        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
+            text = _text(sheet.cell(row=row, column=column).value)
+            match = DATE_PATTERN.search(text)
+            if match:
+                return match.group(1)
+    return None
+
+
+def find_label_row(sheet, label: str, limit: int = SCAN_ROWS) -> int | None:
+    needle = _fold(label)
     for row in range(1, min(sheet.max_row, limit) + 1):
-        if _text(sheet.cell(row=row, column=COL_CODE).value).startswith(label):
-            return row
+        for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
+            if _fold(_text(sheet.cell(row=row, column=column).value)).startswith(needle):
+                return row
     return None
 
 
@@ -92,10 +149,9 @@ def find_group_headers(sheet) -> list[int]:
     """Заголовок группы: A = «№» и C = «Хар-ка»."""
     rows = []
     for row in range(1, sheet.max_row + 1):
-        if (
-            _text(sheet.cell(row=row, column=COL_CODE).value) == HEADER_MARK_A
-            and _text(sheet.cell(row=row, column=COL_TRAIT).value) == HEADER_MARK_C
-        ):
+        code = _fold(_text(sheet.cell(row=row, column=COL_CODE).value))
+        trait = _fold(_text(sheet.cell(row=row, column=COL_TRAIT).value))
+        if code == HEADER_MARK_A and trait.startswith(_fold(HEADER_MARK_C)):
             rows.append(row)
     return rows
 
@@ -157,10 +213,19 @@ def parse(sheet) -> Document:
     title_row, title_text = find_title(sheet)
     number_match = NUMBER_PATTERN.search(title_text)
     date_match = DATE_PATTERN.search(title_text)
+    doc_date = date_match.group(1) if date_match else find_date(sheet)
 
     header_rows = find_group_headers(sheet)
     if not header_rows:
-        raise ParseError("В файле нет блоков групп товаров.")
+        sample = " | ".join(head_sample(sheet)[:6])
+        raise ParseError(
+            "В файле нет блоков групп товаров. Нужен заголовок со «№» в столбце A "
+            f"и «Хар-ка» в столбце C. Начало листа: {sample or 'лист пустой'}"
+        )
+    if doc_date is None:
+        raise ParseError(
+            "В файле нет даты вида ДД.ММ.ГГГГ. Дата нужна для имени выходного файла."
+        )
 
     groups: list[Group] = []
     for index, header_row in enumerate(header_rows):
@@ -175,7 +240,7 @@ def parse(sheet) -> Document:
         title_row=title_row,
         title_text=title_text,
         doc_number=number_match.group(1) if number_match else None,
-        doc_date=date_match.group(1) if date_match else None,
+        doc_date=doc_date,
         warehouse_row=find_label_row(sheet, "Склад:"),
         organization_row=find_label_row(sheet, "Организация:"),
         groups=groups,
