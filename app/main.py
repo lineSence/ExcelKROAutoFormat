@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -26,6 +27,17 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 RESULTS: dict[str, PipelineResult] = {}
+# Режим «только чёткие пересорты» по токену результата: нужен при пересборке.
+STRICT_FLAGS: dict[str, bool] = {}
+
+
+def _settings_for(strict: bool) -> Settings:
+    """Настройки одного запроса с выбранным режимом подбора пар."""
+    return replace(settings, strict_resort=bool(strict))
+
+
+def _is_on(value: object) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @app.get("/health")
@@ -38,12 +50,19 @@ def index(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"max_upload_mb": settings.max_upload_mb},
+        context={
+            "max_upload_mb": settings.max_upload_mb,
+            "strict": settings.strict_resort,
+        },
     )
 
 
 @app.post("/upload", response_class=HTMLResponse)
-async def upload(request: Request, file: UploadFile = File(...)):
+async def upload(
+    request: Request,
+    file: UploadFile = File(...),
+    strict: str | None = Form(default=None),
+):
     folder = work_dir(settings)
     source = folder / (file.filename or "input.xlsx")
     content = await file.read()
@@ -54,17 +73,18 @@ async def upload(request: Request, file: UploadFile = File(...)):
         return _error(request, "Нужен файл с расширением .xlsx.")
 
     source.write_bytes(content)
+    strict_on = _is_on(strict)
 
     try:
-        result = process(source, file.filename or source.name, settings)
+        result = process(source, file.filename or source.name, _settings_for(strict_on))
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
-        return _error(request, str(error))
+        return _error(request, str(error), strict_on)
     except Exception as error:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
-        return _error(request, f"Не удалось обработать файл: {error}")
+        return _error(request, f"Не удалось обработать файл: {error}", strict_on)
 
-    return _result_page(request, result)
+    return _result_page(request, result, strict_on)
 
 
 @app.post("/confirm/{token}", response_class=HTMLResponse)
@@ -85,22 +105,36 @@ async def confirm(request: Request, token: str):
         elif answer == "no":
             decisions[key[5:]] = False
 
+    # Режим подбора сохраняется с первого прогона.
+    strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
+
     try:
-        result = process(old.source_path, old.source_name, settings, decisions)
+        result = process(
+            old.source_path,
+            old.source_name,
+            _settings_for(strict_on),
+            decisions,
+        )
     except (ParseError, RepairError) as error:
-        return _error(request, str(error))
+        return _error(request, str(error), strict_on)
     except Exception as error:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
-        return _error(request, f"Не удалось обработать файл: {error}")
+        return _error(request, f"Не удалось обработать файл: {error}", strict_on)
 
     RESULTS.pop(token, None)
+    STRICT_FLAGS.pop(token, None)
     shutil.rmtree(old.output_path.parent, ignore_errors=True)
-    return _result_page(request, result)
+    return _result_page(request, result, strict_on)
 
 
-def _result_page(request: Request, result: PipelineResult) -> HTMLResponse:
+def _result_page(
+    request: Request,
+    result: PipelineResult,
+    strict: bool = False,
+) -> HTMLResponse:
     token = result.output_path.parent.name
     RESULTS[token] = result
+    STRICT_FLAGS[token] = bool(strict)
     # Подтверждённые пары в таблице не показываются.
     pending = [row for row in result.doubtful if not row.get("answered")]
     return templates.TemplateResponse(
@@ -113,6 +147,7 @@ def _result_page(request: Request, result: PipelineResult) -> HTMLResponse:
             "doubtful": pending,
             "confirmed_count": len(result.doubtful) - len(pending),
             "output_name": result.output_name,
+            "strict": bool(strict),
         },
     )
 
@@ -132,15 +167,20 @@ def download(token: str):
 @app.post("/cleanup/{token}")
 def cleanup(token: str) -> dict:
     result = RESULTS.pop(token, None)
+    STRICT_FLAGS.pop(token, None)
     if result is not None:
         shutil.rmtree(result.output_path.parent, ignore_errors=True)
     return {"status": "ok"}
 
 
-def _error(request: Request, message: str) -> HTMLResponse:
+def _error(request: Request, message: str, strict: bool = False) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"error": message, "max_upload_mb": settings.max_upload_mb},
+        context={
+            "error": message,
+            "max_upload_mb": settings.max_upload_mb,
+            "strict": bool(strict),
+        },
         status_code=400,
     )
