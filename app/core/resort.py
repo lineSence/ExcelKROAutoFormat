@@ -14,6 +14,9 @@
 6. Излишки и недостачи без пары остаются излишками и недостачами.
 7. Решения пользователя по спорным парам (decisions) главнее расчёта.
 
+Режим «только чёткие пересорты» (`strict_brand_only=True`): в пару ставятся
+только позиции одного бренда, цена в подборе не участвует вовсе.
+
 Зелёная заливка и метка `не-` — ручной тег по внешним данным. Программа его
 не ставит и не воспроизводит.
 """
@@ -179,14 +182,17 @@ def covers(plus: Item, minus: Item) -> bool:
     return plus.price + 1e-9 >= minus.price
 
 
-def same_line(first: Item, second: Item) -> bool:
-    """Тот же товар с уточнением в имени и той же ценой.
+def same_line(first: Item, second: Item, check_price: bool = True) -> bool:
+    """Тот же товар с уточнением в имени (и той же ценой).
 
     Так в одну гроздь попадают «Мальборо» и «Мальборо компакт Дабл микс».
+    В режиме только чётких пересортов цена не проверяется.
     """
     short, long = sorted((first.key, second.key), key=len)
     if not short or not long.startswith(short):
         return False
+    if not check_price:
+        return True
     high = max(first.price, second.price)
     if high <= 0:
         return False
@@ -214,6 +220,15 @@ def pair_score(first: Item, second: Item) -> float:
         + _price_bonus(first, second)
         + 0.5 * _quantity_bonus(first, second)
         + (0.60 if covers(first, second) else 0.0)
+        + _distance_bonus(first, second)
+    )
+
+
+def brand_score(first: Item, second: Item) -> float:
+    """Оценка пары без учёта цены: режим только чётких пересортов."""
+    return (
+        1.5 * (similarity(first.key, second.key) + _name_bonus(first, second))
+        + 0.5 * _quantity_bonus(first, second)
         + _distance_bonus(first, second)
     )
 
@@ -249,8 +264,13 @@ def build_clusters(
     doubtful_min: float,
     doubtful_max: float,
     decisions: dict[str, bool] | None = None,
+    strict_brand_only: bool = False,
 ) -> tuple[list[Cluster], list[DoubtfulPair]]:
-    """Подбирает пары пересорта: каждый излишек к своей недостаче."""
+    """Подбирает пары пересорта: каждый излишек к своей недостаче.
+
+    При `strict_brand_only=True` разрешены только пары одного бренда,
+    а цена не влияет ни на допуск пары, ни на её оценку.
+    """
     union = _Union(len(items))
     plus = [index for index, item in enumerate(items) if item.diff > 0]
     minus = [index for index, item in enumerate(items) if item.diff < 0]
@@ -263,9 +283,13 @@ def build_clusters(
             answer = choices.get(pair_key(items[p].row, items[m].row))
             if answer is False:
                 continue
-            if answer is not True and not price_allowed(items[p], items[m], threshold):
-                continue
-            score = pair_score(items[p], items[m])
+            if answer is not True:
+                if strict_brand_only:
+                    if not same_brand(items[p], items[m], threshold):
+                        continue
+                elif not price_allowed(items[p], items[m], threshold):
+                    continue
+            score = brand_score(items[p], items[m]) if strict_brand_only else pair_score(items[p], items[m])
             if answer is True:
                 score += 10.0
             ranked.append((score, p, m))
@@ -298,14 +322,14 @@ def build_clusters(
         union.union(p, m)
 
     # Добор в гроздь: строка без пары присоединяется к уже собранной грозди,
-    # если это тот же товар с уточнением в имени и той же ценой.
+    # если это тот же товар с уточнением в имени.
     paired = set(taken_plus) | set(taken_plus.values())
     for index in range(len(items)):
         if index in paired:
             continue
         best: tuple[float, int] | None = None
         for other in paired:
-            if not same_line(items[index], items[other]):
+            if not same_line(items[index], items[other], check_price=not strict_brand_only):
                 continue
             ratio = similarity(items[index].key, items[other].key)
             if best is None or ratio > best[0]:
