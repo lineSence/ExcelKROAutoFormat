@@ -12,7 +12,7 @@ from ..config import Settings
 from . import report
 from .format import format_workbook, output_filename
 from .parse import ParseError, warehouse_from_filename
-from .repair import repair
+from .repair import RepairError, repair
 
 
 @dataclass
@@ -36,7 +36,22 @@ def work_dir(settings: Settings) -> Path:
 def pick_sheet(workbook, settings: Settings):
     if settings.sheet_name in workbook.sheetnames:
         return workbook[settings.sheet_name]
+    if not workbook.sheetnames:
+        raise ParseError("В файле нет ни одного листа.")
     return workbook[workbook.sheetnames[0]]
+
+
+def load_sheet(repaired: Path, settings: Settings):
+    """Открывает книгу и даёт понятное сообщение при битом файле."""
+    try:
+        workbook = openpyxl.load_workbook(repaired)
+    except IndexError as error:
+        raise RepairError(
+            "В файле биты ссылки на стили или таблица текстов. "
+            "Пересохраните выгрузку в Excel или включите запасной ремонт: "
+            "REPAIR_MODE=libreoffice."
+        ) from error
+    return workbook, pick_sheet(workbook, settings)
 
 
 def process(input_path: str | Path, original_filename: str, settings: Settings | None = None) -> PipelineResult:
@@ -45,8 +60,7 @@ def process(input_path: str | Path, original_filename: str, settings: Settings |
     folder = work_dir(settings)
     repaired = repair(input_path, folder / "repaired.xlsx", settings.repair_mode)
 
-    workbook = openpyxl.load_workbook(repaired)
-    sheet = pick_sheet(workbook, settings)
+    workbook, sheet = load_sheet(repaired, settings)
 
     warehouse = warehouse_from_filename(original_filename)
     if not warehouse:

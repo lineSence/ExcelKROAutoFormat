@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -15,7 +16,7 @@ from app.config import Settings
 from app.core.format import output_filename
 from app.core.parse import parse, warehouse_from_filename
 from app.core.pipeline import process
-from app.core.repair import needs_repair, repair_by_inject
+from app.core.repair import describe, needs_repair, repair_by_inject
 from app.core.resort import normalize
 
 GROUPS = {
@@ -69,17 +70,42 @@ def _build_source(path: Path) -> None:
     workbook.save(path)
 
 
-def _drop_shared_strings(path: Path) -> None:
-    """Убирает xl/sharedStrings.xml, как в выгрузке 1С."""
+def _rewrite(path: Path, change) -> None:
     with zipfile.ZipFile(path) as archive:
-        items = [
-            (item, archive.read(item.filename))
-            for item in archive.infolist()
-            if item.filename != "xl/sharedStrings.xml"
-        ]
+        items = [(item, archive.read(item.filename)) for item in archive.infolist()]
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for item, data in items:
-            archive.writestr(item, data)
+            new_data = change(item.filename, data)
+            if new_data is None:
+                continue
+            archive.writestr(item, new_data)
+
+
+def _drop_shared_strings(path: Path) -> None:
+    """Убирает xl/sharedStrings.xml, как в выгрузке 1С."""
+    _rewrite(path, lambda name, data: None if name == "xl/sharedStrings.xml" else data)
+
+
+def _break_cell_styles(path: Path) -> None:
+    """Стили ячеек ссылаются за пределы cellXfs — болезнь выгрузки 1С."""
+
+    def change(name: str, data: bytes) -> bytes:
+        if name.startswith("xl/worksheets/"):
+            return re.sub(rb'<c r="B(\d+)"', rb'<c s="99" r="B\1"', data)
+        return data
+
+    _rewrite(path, change)
+
+
+def _break_fonts(path: Path) -> None:
+    """Записи стилей ссылаются на несуществующий шрифт."""
+
+    def change(name: str, data: bytes) -> bytes:
+        if name == "xl/styles.xml":
+            return re.sub(rb'fontId="\d+"', b'fontId="77"', data)
+        return data
+
+    _rewrite(path, change)
 
 
 @pytest.fixture()
@@ -87,6 +113,7 @@ def source_file(tmp_path: Path) -> Path:
     path = tmp_path / "ОхтаМоллСМА без форматирования.xlsx"
     _build_source(path)
     _drop_shared_strings(path)
+    _break_cell_styles(path)
     return path
 
 
@@ -107,10 +134,30 @@ def test_normalize_folds_names() -> None:
     assert second.startswith(first)
 
 
-def test_repair_adds_shared_strings(source_file: Path, tmp_path: Path) -> None:
+def test_broken_file_fails_without_repair(source_file: Path) -> None:
+    """Без ремонта openpyxl даёт именно list index out of range."""
+    with pytest.raises(IndexError):
+        openpyxl.load_workbook(source_file)
+
+
+def test_repair_fixes_styles_and_strings(source_file: Path, tmp_path: Path) -> None:
     assert needs_repair(source_file) is True
+    assert describe(source_file)["style_problems"] > 0
+
     repaired = repair_by_inject(source_file, tmp_path / "repaired.xlsx")
     assert needs_repair(repaired) is False
+
+    sheet = openpyxl.load_workbook(repaired)["TDSheet"]
+    assert sheet["A1"].value.startswith("Инвентаризация товаров")
+
+
+def test_repair_fixes_broken_fonts(tmp_path: Path) -> None:
+    path = tmp_path / "ОхтаМоллСМА без форматирования.xlsx"
+    _build_source(path)
+    _break_fonts(path)
+
+    assert needs_repair(path) is True
+    repaired = repair_by_inject(path, tmp_path / "repaired-fonts.xlsx")
     openpyxl.load_workbook(repaired)
 
 
