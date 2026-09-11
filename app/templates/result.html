@@ -33,24 +33,35 @@
 		{% endfor %}
 	</table>
 
-	{% if clusters %}
-	<h2>Состав гроздей</h2>
-	<table>
-		<tr><th>Группа</th><th>Гроздь</th><th>Строка</th><th>Наименование</th><th>F</th><th>J до</th><th>J после</th><th>Решение</th></tr>
-		{% for row in clusters %}
-		<tr><td>{{ row.group }}</td><td>{{ row.cluster }}</td><td>{{ row.row }}</td><td>{{ row.name }}</td><td>{{ row.diff }}</td><td>{{ row.sum_before }}</td><td>{{ row.sum_after }}</td><td>{{ row.decision }}</td></tr>
-		{% endfor %}
-	</table>
+	{% if confirmed_count %}
+	<p class="hint">Подтверждено пар: {{ confirmed_count }}. Подтверждённые пары в таблице не показываются.</p>
 	{% endif %}
 
 	{% if doubtful %}
-	<h2>Сомнительные совпадения</h2>
-	<table>
-		<tr><th>Группа</th><th>Первая строка</th><th>Вторая строка</th><th>Схожесть</th><th>Решение</th></tr>
-		{% for row in doubtful %}
-		<tr><td>{{ row.group }}</td><td>{{ row.first }}</td><td>{{ row.second }}</td><td>{{ row.ratio }}</td><td>{{ row.decision }}</td></tr>
-		{% endfor %}
-	</table>
+	<h2>Спорные пересорты</h2>
+	<p class="hint">Отметьте решение и нажмите «Применить». Файл будет построен заново.</p>
+	<form method="post" action="/confirm/{{ token }}">
+		<table>
+			<tr><th>Группа</th><th>Первая строка</th><th>Вторая строка</th><th>Схожесть</th><th>Сейчас</th><th>Решение</th></tr>
+			{% for row in doubtful %}
+			<tr>
+				<td>{{ row.group }}</td>
+				<td>{{ row.first }}</td>
+				<td>{{ row.second }}</td>
+				<td>{{ row.ratio }}</td>
+				<td>{{ row.decision }}</td>
+				<td>
+					<label><input type="radio" name="pair-{{ row.key }}" value="skip" checked /> позже</label>
+					<label><input type="radio" name="pair-{{ row.key }}" value="yes" /> пересорт</label>
+					<label><input type="radio" name="pair-{{ row.key }}" value="no" /> не пересорт</label>
+				</td>
+			</tr>
+			{% endfor %}
+		</table>
+		<p><button class="button" type="submit">Применить решения</button></p>
+	</form>
+	{% else %}
+	<p class="hint">Спорных пересортов нет.</p>
 	{% endif %}
 </main>
 </body>

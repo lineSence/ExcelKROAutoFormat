@@ -1,4 +1,4 @@
-"""Веб-слой: одна страница загрузки и выдача готового файла."""
+"""Веб-слой: страница загрузки, подтверждение спорных пар и выдача файла."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ settings = Settings.load()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
 logger = logging.getLogger("excelkro")
 
-app = FastAPI(title="ExcelKROAutoFormat", version="0.1.0")
+app = FastAPI(title="ExcelKROAutoFormat", version="0.2.0")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -64,8 +64,45 @@ async def upload(request: Request, file: UploadFile = File(...)):
         logger.exception("Неизвестная ошибка")
         return _error(request, f"Не удалось обработать файл: {error}")
 
+    return _result_page(request, result)
+
+
+@app.post("/confirm/{token}", response_class=HTMLResponse)
+async def confirm(request: Request, token: str):
+    """Применяет решения по спорным пересортам и строит файл заново."""
+    old = RESULTS.get(token)
+    if old is None or old.source_path is None or not old.source_path.is_file():
+        return _error(request, "Срок хранения истёк. Загрузите сверку заново.")
+
+    form = await request.form()
+    decisions: dict[str, bool] = dict(old.decisions or {})
+    for key, value in form.multi_items():
+        if not key.startswith("pair-"):
+            continue
+        answer = str(value).strip()
+        if answer == "yes":
+            decisions[key[5:]] = True
+        elif answer == "no":
+            decisions[key[5:]] = False
+
+    try:
+        result = process(old.source_path, old.source_name, settings, decisions)
+    except (ParseError, RepairError) as error:
+        return _error(request, str(error))
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Неизвестная ошибка")
+        return _error(request, f"Не удалось обработать файл: {error}")
+
+    RESULTS.pop(token, None)
+    shutil.rmtree(old.output_path.parent, ignore_errors=True)
+    return _result_page(request, result)
+
+
+def _result_page(request: Request, result: PipelineResult) -> HTMLResponse:
     token = result.output_path.parent.name
     RESULTS[token] = result
+    # Подтверждённые пары в таблице не показываются.
+    pending = [row for row in result.doubtful if not row.get("answered")]
     return templates.TemplateResponse(
         request=request,
         name="result.html",
@@ -73,8 +110,8 @@ async def upload(request: Request, file: UploadFile = File(...)):
             "token": token,
             "summary": result.summary,
             "groups": result.groups,
-            "clusters": result.clusters,
-            "doubtful": result.doubtful,
+            "doubtful": pending,
+            "confirmed_count": len(result.doubtful) - len(pending),
             "output_name": result.output_name,
         },
     )

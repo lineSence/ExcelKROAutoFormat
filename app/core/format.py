@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass, field
 
 from openpyxl.styles import Font
@@ -124,16 +125,6 @@ def shift_header(sheet, document: Document) -> Document:
     return parse(sheet)
 
 
-def unmerge_cell(sheet, row: int, column: int) -> None:
-    """Снимает объединение, если ячейка входит в него."""
-    from openpyxl.utils.cell import range_boundaries
-
-    for merged in [str(item) for item in sheet.merged_cells.ranges]:
-        min_col, min_row, max_col, max_row = range_boundaries(merged)
-        if min_row <= row <= max_row and min_col <= column <= max_col:
-            sheet.unmerge_cells(merged)
-
-
 def fill_header(sheet, document: Document, warehouse: str) -> int:
     """Шаг 3.3 и 3.4: имя склада и очистка валюты.
 
@@ -151,7 +142,59 @@ def fill_header(sheet, document: Document, warehouse: str) -> int:
     return row
 
 
-def process_group(sheet, group: Group, settings) -> GroupResult:
+def _row_snapshot(sheet, row: int) -> list[tuple]:
+    """Снимок строки: значения и оформление всех ячеек."""
+    cells = []
+    for column in range(1, SCAN_COLUMNS + 1):
+        cell = sheet.cell(row=row, column=column)
+        cells.append((cell.value, copy(cell._style)))
+    return cells
+
+
+def cluster_order(group: Group, clusters: list[Cluster]) -> list[int]:
+    """Новый порядок строк: члены одной грозди идут рядом."""
+    members: dict[int, list[int]] = {}
+    for cluster in clusters:
+        if len(cluster.items) < 2:
+            continue
+        rows = [item.row for item in cluster.items]
+        for row in rows:
+            members[row] = rows
+    order: list[int] = []
+    placed: set[int] = set()
+    for row in group.data_rows:
+        if row in placed:
+            continue
+        for member in members.get(row, [row]):
+            if member not in placed:
+                order.append(member)
+                placed.add(member)
+    return order
+
+
+def move_rows(sheet, group: Group, clusters: list[Cluster]) -> dict[int, int]:
+    """Шаг 4.5: ставит пары пересорта друг под другом.
+
+    Блок в рамке должен быть целым, поэтому строки одной грозди
+    переставляются к самой верхней строке грозди.
+    Возвращает соответствие «старая строка → новая строка».
+    """
+    targets = list(group.data_rows)
+    order = cluster_order(group, clusters)
+    if order == targets:
+        return {row: row for row in targets}
+    snapshots = {row: _row_snapshot(sheet, row) for row in order}
+    moved: dict[int, int] = {}
+    for target, source in zip(targets, order):
+        for column, (value, cell_style) in enumerate(snapshots[source], start=1):
+            cell = sheet.cell(row=target, column=column)
+            cell.value = value
+            cell._style = copy(cell_style)
+        moved[source] = target
+    return moved
+
+
+def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | None = None) -> GroupResult:
     """Шаг 4: грозди брендов и разбор расхождений."""
     items = []
     for row in group.data_rows:
@@ -173,7 +216,18 @@ def process_group(sheet, group: Group, settings) -> GroupResult:
         settings.similarity_threshold,
         settings.doubtful_min,
         settings.doubtful_max,
+        decisions,
     )
+
+    # Строки одной грозди ставятся рядом до окраски и рамки.
+    moved = move_rows(sheet, group, clusters)
+    for cluster in clusters:
+        for item in cluster.items:
+            item.row = moved.get(item.row, item.row)
+        cluster.items.sort(key=lambda item: item.row)
+    for pair in doubtful:
+        pair.first_row = moved.get(pair.first_row, pair.first_row)
+        pair.second_row = moved.get(pair.second_row, pair.second_row)
 
     result = GroupResult(name=group.name, clusters=clusters, doubtful=doubtful)
     for cluster in clusters:
@@ -182,23 +236,23 @@ def process_group(sheet, group: Group, settings) -> GroupResult:
         if cluster.decision == DECISION_RESORT:
             result.resort_pieces += sum(abs(item.diff) for item in cluster.items) / 2
             style.frame_block(sheet, [item.row for item in cluster.items], COL_DIFF)
-            for item in cluster.items:
-                _zero_sum(sheet, item, result)
+            if cluster.total_sum < 0:
+                # Сумма цен пары отрицательная: деньги теряются, суммы остаются.
+                for item in cluster.items:
+                    style.paint(sheet.cell(row=item.row, column=COL_DIFF), style.YELLOW)
+                    style.paint(sheet.cell(row=item.row, column=COL_SUM_DIFF), style.YELLOW)
+            else:
+                for item in cluster.items:
+                    _zero_sum(sheet, item, result)
         elif cluster.decision == DECISION_SURPLUS:
             for item in cluster.items:
                 style.paint(sheet.cell(row=item.row, column=COL_DIFF), style.ORANGE)
                 sheet.cell(row=item.row, column=COL_TRAIT).value = MARK_NOT_PLUS
                 _zero_sum(sheet, item, result)
         elif cluster.decision == DECISION_SHORTAGE:
-            framed = []
             for item in cluster.items:
-                if item.diff < 0:
-                    style.paint(sheet.cell(row=item.row, column=COL_DIFF), style.YELLOW)
-                    style.paint(sheet.cell(row=item.row, column=COL_SUM_DIFF), style.YELLOW)
-                else:
-                    framed.append(item.row)
-                    _zero_sum(sheet, item, result)
-            style.frame_block(sheet, framed, COL_DIFF)
+                style.paint(sheet.cell(row=item.row, column=COL_DIFF), style.YELLOW)
+                style.paint(sheet.cell(row=item.row, column=COL_SUM_DIFF), style.YELLOW)
 
     result.shortage_sum = sum(
         _number(sheet.cell(row=row, column=COL_SUM_DIFF).value) for row in group.data_rows
@@ -234,6 +288,16 @@ def write_group_total(sheet, group: Group) -> str:
     return f"{letter}{group.total_row}"
 
 
+def unmerge_cell(sheet, row: int, column: int) -> None:
+    """Снимает объединение, если ячейка входит в него."""
+    for merged in [str(item) for item in sheet.merged_cells.ranges]:
+        from openpyxl.utils.cell import range_boundaries
+
+        min_col, min_row, max_col, max_row = range_boundaries(merged)
+        if min_row <= row <= max_row and min_col <= column <= max_col:
+            sheet.unmerge_cells(merged)
+
+
 def write_grand_total(sheet, total_cells: list[str], row: int) -> None:
     """Шаг 6: общий итог в столбце I строки со словом «Склад:»."""
     unmerge_cell(sheet, row, COL_GRAND_TOTAL)
@@ -242,7 +306,12 @@ def write_grand_total(sheet, total_cells: list[str], row: int) -> None:
     style.style_grand_total_cell(cell)
 
 
-def format_workbook(sheet, warehouse: str, settings) -> FormatResult:
+def format_workbook(
+    sheet,
+    warehouse: str,
+    settings,
+    decisions: dict[str, bool] | None = None,
+) -> FormatResult:
     """Полный проход шагов 2–9."""
     document = parse(sheet)
     document = shift_header(sheet, document)
@@ -251,7 +320,7 @@ def format_workbook(sheet, warehouse: str, settings) -> FormatResult:
     result = FormatResult(document=document, warehouse=warehouse)
     total_cells: list[str] = []
     for group in document.groups:
-        group_result = process_group(sheet, group, settings)
+        group_result = process_group(sheet, group, settings, decisions)
         highlight_rest(sheet, group)
         group_result.total_cell = write_group_total(sheet, group)
         total_cells.append(group_result.total_cell)

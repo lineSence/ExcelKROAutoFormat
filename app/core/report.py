@@ -44,7 +44,7 @@ def cluster_rows(result: FormatResult) -> list[dict]:
 
 
 def doubtful_rows(result: FormatResult) -> list[dict]:
-    """Таблица сомнительных совпадений (6.10)."""
+    """Таблица спорных пересортов (6.10)."""
     rows = []
     for group in result.groups:
         for pair in group.doubtful:
@@ -55,6 +55,9 @@ def doubtful_rows(result: FormatResult) -> list[dict]:
                     "second": f"{pair.second_name} (стр. {pair.second_row})",
                     "ratio": pair.ratio,
                     "decision": "связаны" if pair.linked else "не связаны",
+                    "key": pair.key,
+                    "answered": pair.answered,
+                    "linked": pair.linked,
                 }
             )
     return rows
