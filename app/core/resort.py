@@ -1,4 +1,13 @@
-"""Поиск пересортов внутри группы (правило docs/06-resort-rules.md)."""
+"""Поиск пересортов внутри группы (правило docs/06-resort-rules.md).
+
+Правило подбора пары повторяет ручную сверку:
+1. Каждый излишек ищет себе недостачу в той же группе.
+2. Сначала берутся пары с равным количеством и похожим именем,
+   потом пары с близкой ценой.
+3. Количество в паре может не совпадать. Тогда к одной недостаче
+   добавляются несколько излишков, пока количество не закроется.
+4. Излишки и недостачи без пары остаются излишками и недостачами.
+"""
 
 from __future__ import annotations
 
@@ -35,10 +44,14 @@ class Item:
     key: str = ""
     words: tuple[str, ...] = ()
 
+    @property
+    def price(self) -> float:
+        return abs(self.sum_diff / self.diff) if self.diff else 0.0
+
 
 @dataclass
 class Cluster:
-    """Гроздь позиций одного бренда."""
+    """Гроздь позиций одной пары пересорта."""
 
     items: list[Item] = field(default_factory=list)
     decision: str = DECISION_NONE
@@ -46,6 +59,10 @@ class Cluster:
     @property
     def total_diff(self) -> float:
         return sum(item.diff for item in self.items)
+
+    @property
+    def total_sum(self) -> float:
+        return sum(item.sum_diff for item in self.items)
 
     @property
     def brand(self) -> str:
@@ -93,13 +110,57 @@ def similarity(first: str, second: str) -> float:
     return SequenceMatcher(None, first, second).ratio()
 
 
-def _linked(first: Item, second: Item, threshold: float) -> tuple[bool, float]:
-    ratio = similarity(first.key, second.key)
+def _price_bonus(first: Item, second: Item) -> float:
+    """Награда за близкую цену. Ручная сверка так и делает."""
+    high = max(first.price, second.price)
+    if high <= 0:
+        return 0.0
+    gap = abs(first.price - second.price) / high
+    if gap <= 0.001:
+        return 0.40
+    if gap <= 0.10:
+        return 0.25
+    if gap <= 0.25:
+        return 0.10
+    return 0.0
+
+
+def _name_bonus(first: Item, second: Item) -> float:
+    """Награда за общее начало имени: бренд и вид товара."""
     if len(first.words) >= 2 and first.words[:2] == second.words[:2]:
-        return True, ratio
+        return 0.70
     if first.words and second.words and first.words[0] == second.words[0]:
-        return ratio >= threshold, ratio
-    return False, ratio
+        return 0.40
+    return 0.0
+
+
+def pair_score(first: Item, second: Item) -> float:
+    """Оценка пары «излишек — недостача»."""
+    return similarity(first.key, second.key) + _name_bonus(first, second) + _price_bonus(first, second)
+
+
+def _quantity_bonus(first: Item, second: Item) -> float:
+    return 0.50 if abs(first.diff) == abs(second.diff) else 0.0
+
+
+# Ниже этого порога пара не считается пересортом.
+MATCH_MIN_SCORE = 0.75
+
+
+class _Union:
+    def __init__(self, size: int) -> None:
+        self.parent = list(range(size))
+
+    def find(self, index: int) -> int:
+        while self.parent[index] != index:
+            self.parent[index] = self.parent[self.parent[index]]
+            index = self.parent[index]
+        return index
+
+    def union(self, first: int, second: int) -> None:
+        root_first, root_second = self.find(first), self.find(second)
+        if root_first != root_second:
+            self.parent[root_second] = root_first
 
 
 def build_clusters(
@@ -108,56 +169,67 @@ def build_clusters(
     doubtful_min: float,
     doubtful_max: float,
 ) -> tuple[list[Cluster], list[DoubtfulPair]]:
-    """Собирает грозди одного бренда. Связь переходная."""
-    parent = list(range(len(items)))
-
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(first: int, second: int) -> None:
-        root_first, root_second = find(first), find(second)
-        if root_first != root_second:
-            parent[root_second] = root_first
+    """Подбирает пары пересорта: каждый излишек к своей недостаче."""
+    union = _Union(len(items))
+    plus = [index for index, item in enumerate(items) if item.diff > 0]
+    minus = [index for index, item in enumerate(items) if item.diff < 0]
 
     doubtful: list[DoubtfulPair] = []
-    for i in range(len(items)):
-        for j in range(i + 1, len(items)):
-            linked, ratio = _linked(items[i], items[j], threshold)
-            if linked:
-                union(i, j)
+    ranked: list[tuple[float, int, int]] = []
+    for p in plus:
+        for m in minus:
+            score = pair_score(items[p], items[m]) + _quantity_bonus(items[p], items[m])
+            ranked.append((score, p, m))
+            ratio = similarity(items[p].key, items[m].key)
             if doubtful_min <= ratio <= doubtful_max:
                 doubtful.append(
                     DoubtfulPair(
-                        first_row=items[i].row,
-                        first_name=items[i].name,
-                        second_row=items[j].row,
-                        second_name=items[j].name,
+                        first_row=items[p].row,
+                        first_name=items[p].name,
+                        second_row=items[m].row,
+                        second_name=items[m].name,
                         ratio=round(ratio, 3),
-                        linked=linked,
+                        linked=False,
                     )
                 )
 
+    ranked.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
+
+    free_minus = {index: abs(items[index].diff) for index in minus}
+    taken_plus: dict[int, int] = {}
+    for score, p, m in ranked:
+        if score < MATCH_MIN_SCORE:
+            break
+        if p in taken_plus or free_minus.get(m, 0) <= 0:
+            continue
+        taken_plus[p] = m
+        free_minus[m] = max(0.0, free_minus[m] - abs(items[p].diff))
+        union.union(p, m)
+
+    for pair in doubtful:
+        pair.linked = any(
+            items[p].row == pair.first_row and items[m].row == pair.second_row
+            for p, m in taken_plus.items()
+        )
+
     buckets: dict[int, Cluster] = {}
     for index, item in enumerate(items):
-        buckets.setdefault(find(index), Cluster()).items.append(item)
-    clusters = list(buckets.values())
+        buckets.setdefault(union.find(index), Cluster()).items.append(item)
+    clusters = [buckets[key] for key in sorted(buckets)]
     for cluster in clusters:
+        cluster.items.sort(key=lambda item: item.row)
         cluster.decision = decide(cluster)
     return clusters, doubtful
 
 
 def decide(cluster: Cluster) -> str:
-    """Таблица 6.5: пересорт, излишек или недостача."""
-    total = cluster.total_diff
-    if total < 0:
-        return DECISION_SHORTAGE
+    """Пересорт, излишек или недостача."""
     if cluster.has_minus and cluster.has_plus:
         return DECISION_RESORT
-    if total > 0:
+    if cluster.total_diff > 0:
         return DECISION_SURPLUS
+    if cluster.total_diff < 0:
+        return DECISION_SHORTAGE
     return DECISION_NONE
 
 
