@@ -1,15 +1,17 @@
 """Шаг 1. Ремонт файла .xlsx из 1С.
 
-Выгрузка 1С ломается двумя группами причин.
+Выгрузка 1С ломается тремя группами причин.
 
-1. Таблица текстов. В архиве нет части xl/sharedStrings.xml или она не объявлена
-   в [Content_Types].xml или в xl/_rels/workbook.xml.rels.
-2. Стили. Ячейки и записи стилей ссылаются на номера за пределами списков
-   cellXfs, fonts, fills, borders. Именно это даёт ошибку openpyxl
-   «list index out of range».
+1. Имя части с текстами написано с другим регистром: xl/SharedStrings.xml
+   вместо xl/sharedStrings.xml. Excel читает такой файл, openpyxl — нет.
+   Все тексты пропадают, лист остаётся только с числами.
+2. Таблицы текстов нет вовсе или она не объявлена в [Content_Types].xml
+   или в xl/_rels/workbook.xml.rels.
+3. Стили. Ячейки и записи стилей ссылаются на номера за пределами списков
+   cellXfs, fonts, fills, borders. Это даёт ошибку «list index out of range».
 
-Ремонт исправляет обе группы. Стили, ширины и границы, которые в файле
-корректны, сохраняются без изменений. Битые ссылки становятся нулевыми.
+Ремонт исправляет все три группы. Верные стили, ширины и границы
+сохраняются без изменений. Битые ссылки становятся нулевыми.
 """
 
 from __future__ import annotations
@@ -61,6 +63,26 @@ class RepairError(Exception):
     """Файл не удалось подготовить к чтению."""
 
 
+# --- имена частей -----------------------------------------------------
+
+
+def _find_part(names: list[str], wanted: str) -> str | None:
+    """Имя части без оглядки на регистр."""
+    lowered = wanted.lower()
+    for name in names:
+        if name.lower() == lowered:
+            return name
+    return None
+
+
+def _sheet_parts(names: list[str]) -> list[str]:
+    return [
+        name
+        for name in names
+        if name.lower().startswith("xl/worksheets/") and name.lower().endswith(".xml")
+    ]
+
+
 # --- таблица текстов ------------------------------------------------------
 
 
@@ -70,13 +92,13 @@ def _free_relationship_id(rels_xml: str) -> str:
 
 
 def _add_content_type(xml: str) -> str:
-    if "sharedStrings.xml" in xml:
+    if "sharedstrings.xml" in xml.lower():
         return xml
     return xml.replace("</Types>", CONTENT_TYPE_OVERRIDE + "</Types>")
 
 
 def _add_relationship(xml: str) -> str:
-    if "sharedStrings.xml" in xml:
+    if "sharedstrings.xml" in xml.lower():
         return xml
     rel_id = _free_relationship_id(xml)
     relationship = (
@@ -84,14 +106,6 @@ def _add_relationship(xml: str) -> str:
         ' Target="sharedStrings.xml"/>'
     )
     return xml.replace("</Relationships>", relationship + "</Relationships>")
-
-
-def _sheet_parts(names: list[str]) -> list[str]:
-    return [
-        name
-        for name in names
-        if name.startswith("xl/worksheets/") and name.endswith(".xml")
-    ]
 
 
 def _max_shared_index(archive: zipfile.ZipFile) -> int:
@@ -224,9 +238,10 @@ def _fix_sheet_styles(sheet_xml: str, cell_xfs: int) -> tuple[str, int]:
 def _style_problems(archive: zipfile.ZipFile) -> int:
     """Считает битые ссылки стилей в архиве."""
     names = archive.namelist()
-    if STYLES_PART not in names:
+    styles_name = _find_part(names, STYLES_PART)
+    if styles_name is None:
         return 0
-    styles_xml = archive.read(STYLES_PART).decode("utf-8", errors="replace")
+    styles_xml = archive.read(styles_name).decode("utf-8", errors="replace")
     _, fixes = _fix_styles(styles_xml)
     cell_xfs = _style_limits(styles_xml)["cellXfs"]
     for name in _sheet_parts(names):
@@ -240,56 +255,64 @@ def _style_problems(archive: zipfile.ZipFile) -> int:
 
 
 def _declared(archive: zipfile.ZipFile, part: str) -> bool:
-    if part not in archive.namelist():
+    name = _find_part(archive.namelist(), part)
+    if name is None:
         return False
-    return b"sharedStrings.xml" in archive.read(part)
+    return b"sharedstrings.xml" in archive.read(name).lower()
 
 
 def needs_repair(path: str | Path) -> bool:
     """Проверяет признаки поломки выгрузки 1С."""
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
-        if SHARED_STRINGS_PART not in names:
+        shared_name = _find_part(names, SHARED_STRINGS_PART)
+        if shared_name is None:
             return _max_shared_index(archive) >= 0 or _style_problems(archive) > 0
+        if shared_name != SHARED_STRINGS_PART:
+            return True
         if not _declared(archive, CONTENT_TYPES_PART):
             return True
         if not _declared(archive, WORKBOOK_RELS_PART):
             return True
         needed = _max_shared_index(archive) + 1
-        if needed > _count_shared_items(archive.read(SHARED_STRINGS_PART)):
+        if needed > _count_shared_items(archive.read(shared_name)):
             return True
         return _style_problems(archive) > 0
 
 
 def repair_by_inject(source: str | Path, target: str | Path) -> Path:
-    """Пересобирает архив: таблица текстов и ссылки стилей."""
+    """Пересобирает архив: имена частей, таблица текстов, ссылки стилей."""
     source = Path(source)
     target = Path(target)
 
     with zipfile.ZipFile(source) as archive:
         names = archive.namelist()
-        if CONTENT_TYPES_PART not in names:
+        content_types_name = _find_part(names, CONTENT_TYPES_PART)
+        if content_types_name is None:
             raise RepairError("В архиве нет [Content_Types].xml. Это не файл .xlsx.")
         if not needs_repair(source):
             if source != target:
                 shutil.copyfile(source, target)
             return target
 
-        existing = archive.read(SHARED_STRINGS_PART) if SHARED_STRINGS_PART in names else None
+        shared_name = _find_part(names, SHARED_STRINGS_PART)
+        existing = archive.read(shared_name) if shared_name else None
         shared_strings = _build_shared_strings(existing, _max_shared_index(archive) + 1)
 
+        styles_name = _find_part(names, STYLES_PART)
         styles_xml = None
         cell_xfs = 0
-        if STYLES_PART in names:
+        if styles_name is not None:
             styles_xml, _ = _fix_styles(
-                archive.read(STYLES_PART).decode("utf-8", errors="replace")
+                archive.read(styles_name).decode("utf-8", errors="replace")
             )
             cell_xfs = _style_limits(styles_xml)["cellXfs"]
 
+        rels_name = _find_part(names, WORKBOOK_RELS_PART)
         items = [
             (item, archive.read(item.filename))
             for item in archive.infolist()
-            if item.filename != SHARED_STRINGS_PART
+            if item.filename != shared_name
         ]
 
     sheet_names = set(_sheet_parts([item.filename for item, _ in items]))
@@ -297,11 +320,11 @@ def repair_by_inject(source: str | Path, target: str | Path) -> Path:
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as new_archive:
         for item, data in items:
             name = item.filename
-            if name == CONTENT_TYPES_PART:
-                data = _add_content_type(data.decode("utf-8")).encode("utf-8")
-            elif name == WORKBOOK_RELS_PART:
-                data = _add_relationship(data.decode("utf-8")).encode("utf-8")
-            elif name == STYLES_PART and styles_xml is not None:
+            if name == content_types_name:
+                data = _add_content_type(data.decode("utf-8-sig")).encode("utf-8")
+            elif rels_name is not None and name == rels_name:
+                data = _add_relationship(data.decode("utf-8-sig")).encode("utf-8")
+            elif styles_name is not None and name == styles_name and styles_xml is not None:
                 data = styles_xml.encode("utf-8")
             elif name in sheet_names and cell_xfs > 0:
                 fixed, _ = _fix_sheet_styles(data.decode("utf-8", errors="replace"), cell_xfs)
@@ -345,19 +368,19 @@ def describe(path: str | Path) -> dict:
     """Короткая сводка о состоянии файла. Полезно для разбора ошибок."""
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
+        shared_name = _find_part(names, SHARED_STRINGS_PART)
+        styles_name = _find_part(names, STYLES_PART)
         styles_xml = (
-            archive.read(STYLES_PART).decode("utf-8", errors="replace")
-            if STYLES_PART in names
+            archive.read(styles_name).decode("utf-8", errors="replace")
+            if styles_name
             else ""
         )
         return {
-            "has_shared_strings": SHARED_STRINGS_PART in names,
+            "shared_part_name": shared_name,
             "declared_in_content_types": _declared(archive, CONTENT_TYPES_PART),
             "declared_in_rels": _declared(archive, WORKBOOK_RELS_PART),
             "shared_items": (
-                _count_shared_items(archive.read(SHARED_STRINGS_PART))
-                if SHARED_STRINGS_PART in names
-                else 0
+                _count_shared_items(archive.read(shared_name)) if shared_name else 0
             ),
             "shared_needed": _max_shared_index(archive) + 1,
             "style_limits": _style_limits(styles_xml) if styles_xml else {},

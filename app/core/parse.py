@@ -30,6 +30,12 @@ COL_DOC = 11       # K
 
 DATE_PATTERN = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 NUMBER_PATTERN = re.compile(r"№\s*([\w\-]+)")
+MONTHS = {
+    "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
+    "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11,
+    "декабр": 12,
+}
+WORD_DATE_PATTERN = re.compile(r"(\d{1,2})\s+([А-Яа-яЁё]+)\s+(\d{4})")
 
 
 class ParseError(Exception):
@@ -125,14 +131,27 @@ def find_title(sheet) -> tuple[int | None, str]:
     return None, ""
 
 
-def find_date(sheet) -> str | None:
-    """Первая дата вида ДД.ММ.ГГГГ в шапке файла."""
-    for row in range(1, min(sheet.max_row, SCAN_ROWS) + 1):
+def date_from_text(text: str) -> str | None:
+    """Дата из строки. Понимает «09.09.2026» и «09 сентября 2026 г.»."""
+    match = DATE_PATTERN.search(text)
+    if match:
+        return match.group(1)
+    word = WORD_DATE_PATTERN.search(text)
+    if word:
+        name = _fold(word.group(2))
+        for stem, number in MONTHS.items():
+            if name.startswith(stem):
+                return f"{int(word.group(1)):02d}.{number:02d}.{word.group(3)}"
+    return None
+
+
+def find_date(sheet, limit: int = SCAN_ROWS) -> str | None:
+    """Первая дата в шапке файла. Строки данных не просматриваются."""
+    for row in range(1, min(sheet.max_row, limit) + 1):
         for column in range(1, min(sheet.max_column, SCAN_COLUMNS) + 1):
-            text = _text(sheet.cell(row=row, column=column).value)
-            match = DATE_PATTERN.search(text)
-            if match:
-                return match.group(1)
+            found = date_from_text(_text(sheet.cell(row=row, column=column).value))
+            if found:
+                return found
     return None
 
 
@@ -212,8 +231,7 @@ def parse(sheet) -> Document:
     """Собирает описание файла: титул, шапка, блоки групп."""
     title_row, title_text = find_title(sheet)
     number_match = NUMBER_PATTERN.search(title_text)
-    date_match = DATE_PATTERN.search(title_text)
-    doc_date = date_match.group(1) if date_match else find_date(sheet)
+    doc_date = date_from_text(title_text)
 
     header_rows = find_group_headers(sheet)
     if not header_rows:
@@ -222,6 +240,8 @@ def parse(sheet) -> Document:
             "В файле нет блоков групп товаров. Нужен заголовок со «№» в столбце A "
             f"и «Хар-ка» в столбце C. Начало листа: {sample or 'лист пустой'}"
         )
+    if doc_date is None:
+        doc_date = find_date(sheet, limit=max(1, header_rows[0] - 1))
     if doc_date is None:
         raise ParseError(
             "В файле нет даты вида ДД.ММ.ГГГГ. Дата нужна для имени выходного файла."
