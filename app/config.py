@@ -55,6 +55,8 @@ class Settings:
     doubtful_max: float = 0.90
     type_words: tuple[str, ...] = field(default_factory=tuple)
     report_cluster_members: bool = True
+    # Разрешить только чёткие пересорты: бренд с брендом, цена не важна.
+    strict_resort: bool = False
     log_level: str = "INFO"
 
     @classmethod
@@ -78,5 +80,6 @@ class Settings:
             doubtful_max=_number("DOUBTFUL_MATCH_MAX", 0.90),
             type_words=words,
             report_cluster_members=_flag("REPORT_CLUSTER_MEMBERS", True),
+            strict_resort=_flag("STRICT_RESORT", False),
             log_level=_text("LOG_LEVEL", "INFO"),
         )
