@@ -217,6 +217,7 @@ def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | No
         settings.doubtful_min,
         settings.doubtful_max,
         decisions,
+        strict_brand_only=bool(getattr(settings, "strict_resort", False)),
     )
 
     # Строки одной грозди ставятся рядом до окраски и рамки.
