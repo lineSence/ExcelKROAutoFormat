@@ -17,6 +17,15 @@
 
 	<form action="/upload" method="post" enctype="multipart/form-data">
 		<input type="file" name="file" accept=".xlsx" required />
+
+		<p>
+			<label>
+				<input type="checkbox" name="strict" value="on" {% if strict %}checked{% endif %} />
+				Разрешить только чёткие пересорты
+			</label>
+		</p>
+		<p class="hint">В пару ставятся только позиции одного бренда. Любые другие пересорты исключены, цена на подбор не влияет.</p>
+
 		<button type="submit">Обработать</button>
 	</form>
 
