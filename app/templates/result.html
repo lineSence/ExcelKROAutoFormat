@@ -23,6 +23,7 @@
 		<li>Пересорты, шт.: {{ summary.pieces }}</li>
 		<li>Пересорты, сумма: {{ summary.resort_sum }}</li>
 		<li>Недостача, сумма: {{ summary.shortage_sum }}</li>
+		<li>Подбор пар: {% if strict %}только чёткие пересорты (бренд с брендом, цена не учитывается){% else %}обычный (бренд или близкая цена){% endif %}</li>
 	</ul>
 
 	<h2>По группам</h2>
@@ -41,6 +42,7 @@
 	<h2>Спорные пересорты</h2>
 	<p class="hint">Отметьте решение и нажмите «Применить». Файл будет построен заново.</p>
 	<form method="post" action="/confirm/{{ token }}">
+		<input type="hidden" name="strict" value="{% if strict %}on{% else %}off{% endif %}" />
 		<table>
 			<tr><th>Группа</th><th>Первая строка</th><th>Вторая строка</th><th>Схожесть</th><th>Сейчас</th><th>Решение</th></tr>
 			{% for row in doubtful %}
