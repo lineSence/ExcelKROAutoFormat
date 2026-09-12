@@ -22,7 +22,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from openpyxl.styles import Alignment, Border, Font, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles.colors import Color
 from openpyxl.utils.cell import range_boundaries
 
 from . import style
@@ -43,6 +44,25 @@ EQUAL_WEIGHT = 1
 
 FONT = Font(name="Arial", size=9)
 FONT_BOLD = Font(name="Arial", size=9, bold=True)
+
+# Оформление блока продавцов повторяет образец один в один:
+# Arial 8, ФИО на светло-зелёной заливке (индекс 43 старой палитры 1С),
+# тонкие рамки цвета из индекса 60, числа веса — вправо с отступом.
+SELLER_FONT = Font(name="Arial", size=8)
+SELLER_FILL = PatternFill(fill_type="solid", fgColor=Color(indexed=43))
+SELLER_BORDER = Border(
+    left=Side(style="thin", color=Color(indexed=60)),
+    right=Side(style="thin", color=Color(indexed=60)),
+    top=Side(style="thin", color=Color(indexed=60)),
+    bottom=Side(style="thin", color=Color(indexed=60)),
+)
+SELLER_NAME_ALIGN = Alignment(vertical="top", wrap_text=True)
+SELLER_WEIGHT_ALIGN = Alignment(
+    horizontal="right", vertical="top", wrap_text=True, indent=2
+)
+SELLER_TOTAL_ALIGN = Alignment(horizontal="right", vertical="top", wrap_text=True)
+SELLER_SHARE_ALIGN = Alignment(horizontal="left")
+SELLER_ROW_HEIGHT = 12
 
 
 def unmerge_cell(sheet, row: int, column: int) -> None:
@@ -247,6 +267,51 @@ def write_prev_date(sheet, document: Document, text: str) -> None:
     sheet.cell(row=row, column=COL_NAME).number_format = style.DATE_FORMAT
 
 
+def _weight_format(value) -> str:
+    """В образце веса целые, но допускаем получасы."""
+    if isinstance(value, float) and value != int(value):
+        return "0.00"
+    return "0"
+
+
+def _style_seller_cell(sheet, row: int, column: int, kind: str) -> None:
+    """Один в один повторяет оформление таблицы продавцов из образца."""
+    cell = sheet.cell(row=row, column=column)
+    cell.font = SELLER_FONT
+    if kind == "name":
+        cell.fill = SELLER_FILL
+        cell.border = SELLER_BORDER
+        cell.alignment = SELLER_NAME_ALIGN
+    elif kind == "weight":
+        cell.border = SELLER_BORDER
+        cell.alignment = SELLER_WEIGHT_ALIGN
+        cell.number_format = _weight_format(cell.value)
+    elif kind == "total":
+        cell.border = SELLER_BORDER
+        cell.alignment = SELLER_TOTAL_ALIGN
+        cell.number_format = "0"
+    else:  # формулы доли в столбце C — без рамок и заливки
+        cell.alignment = SELLER_SHARE_ALIGN
+    sheet.row_dimensions[row].height = SELLER_ROW_HEIGHT
+
+
+def grand_total_row(sheet, document: Document) -> int:
+    """Строка с итогом по складу в столбце I.
+
+    В образцах ставка делит именно эту сумму (I4, а если руками
+    добавлена строка с неучтёнкой — то I5). Берём самую нижнюю
+    заполненную ячейку I выше шапки таблицы.
+    """
+    warehouse = document.warehouse_row or 4
+    header = document.groups[0].header_row if document.groups else warehouse + 2
+    found = None
+    for row in range(1, max(header - 1, 1) + 1):
+        value = sheet.cell(row=row, column=COL_TOTAL_WITH_EXTRA).value
+        if value not in (None, ""):
+            found = row
+    return found or warehouse
+
+
 def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) -> int:
     """Блок продавцов. Возвращает номер последней занятой строки.
 
@@ -258,7 +323,7 @@ def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) ->
     if not sellers:
         return first_row - 1
 
-    rate_row = (document.warehouse_row or 4) + 1
+    rate_row = grand_total_row(sheet, document)
     number_rows = [first_row + 1 + index * 2 for index in range(len(sellers))]
     total_row = number_rows[-1] + 1
 
@@ -266,21 +331,25 @@ def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) ->
         name_row = first_row + index * 2
         number_row = number_rows[index]
         _write(sheet, name_row, COL_NAME, seller.name)
+        _style_seller_cell(sheet, name_row, COL_NAME, "name")
         if index == 0:
-            # Ставка на единицу веса: сумма с неучтёнкой делится на итог весов.
+            # Ставка на единицу веса: итог по складу делится на сумму весов.
             _write(sheet, name_row, COL_TRAIT, f"=I{rate_row}/B{total_row}")
+            _style_seller_cell(sheet, name_row, COL_TRAIT, "share")
         weight = data.weight(seller)
         if weight is not None:
             _write(sheet, number_row, COL_NAME, weight)
+        _style_seller_cell(sheet, number_row, COL_NAME, "weight")
         _write(sheet, number_row, COL_TRAIT, f"=C{first_row}*B{number_row}")
+        _style_seller_cell(sheet, number_row, COL_TRAIT, "share")
 
     _write(
         sheet,
         total_row,
         COL_NAME,
         "=SUM({})".format(",".join(f"B{row}" for row in number_rows)),
-        bold=True,
     )
+    _style_seller_cell(sheet, total_row, COL_NAME, "total")
     return total_row
 
 
