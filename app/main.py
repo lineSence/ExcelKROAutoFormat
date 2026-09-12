@@ -1,20 +1,22 @@
-"""Веб-слой: страница загрузки, подтверждение спорных пар и выдача файла."""
+"""Веб-слой: загрузка, подтверждение спорных пар, выдача файла, справочники."""
 
 from __future__ import annotations
 
 import logging
 import re
 import shutil
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import __version__
 from .config import Settings
+from .core import refs, refs_sync
 from .core.guard import UploadTooLarge
 from .core.parse import ParseError
 from .core.pipeline import PipelineResult, process, sweep, work_dir
@@ -25,7 +27,24 @@ settings = Settings.load()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
 logger = logging.getLogger("excelkro")
 
-app = FastAPI(title="ExcelKROAutoFormat", version=__version__)
+scheduler = refs_sync.Scheduler(
+    settings.refs_state_path,
+    settings.refs_dir,
+    settings.refs_tick_seconds,
+)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Планировщик копий справочников живёт вместе со службой."""
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.stop()
+
+
+app = FastAPI(title="ExcelKROAutoFormat", version=__version__, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -211,6 +230,7 @@ def _result_page(
             "confirmed_count": len(result.doubtful) - len(pending),
             "output_name": result.output_name,
             "strict": bool(strict),
+            "refs": result.refs,
         },
     )
 
@@ -231,6 +251,64 @@ def download(token: str):
 def cleanup(token: str) -> dict:
     _forget(token)
     return {"status": "ok"}
+
+
+# --- Справочники ------------------------------------------------------------
+
+
+def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLResponse:
+    state = refs_sync.load_state(settings.refs_state_path)
+    planning, schedule = refs_sync.local_paths(settings.refs_dir)
+    books = refs.load_books(str(planning), str(schedule))
+    return templates.TemplateResponse(
+        request=request,
+        name="refs.html",
+        context={
+            "state": state,
+            "week_days": refs_sync.WEEK_DAYS,
+            "times_text": ", ".join(state.times),
+            "stores": books.stores,
+            "people": len(books.by_surname),
+            "checker": settings.default_checker,
+            "cells": settings.refs_cells(),
+            "local_dir": settings.refs_dir,
+            "note": note,
+            "error": error,
+        },
+    )
+
+
+@app.get("/refs", response_class=HTMLResponse)
+def refs_page(request: Request):
+    """Страница справочников: пути, расписание копий, состояние."""
+    return _refs_page(request)
+
+
+@app.post("/refs/save", response_class=HTMLResponse)
+async def refs_save(request: Request):
+    """Сохраняет пути к книгам и расписание копирования."""
+    form = await request.form()
+    state = refs_sync.load_state(settings.refs_state_path)
+    state.planning_source = str(form.get("planning_source") or "").strip()
+    state.schedule_source = str(form.get("schedule_source") or "").strip()
+    state.days = refs_sync.parse_days(list(form.getlist("days")))
+    times = str(form.get("times") or "").replace(";", ",").split(",")
+    state.times = refs_sync.parse_times(times)
+    state.enabled = _is_on(form.get("enabled"))
+    refs_sync.save_state(settings.refs_state_path, state)
+
+    if not state.times:
+        return _refs_page(request, error="Время копирования не разобрано. Пример: 07:30, 19:00.")
+    return RedirectResponse(url="/refs", status_code=303)
+
+
+@app.post("/refs/refresh", response_class=HTMLResponse)
+def refs_refresh(request: Request):
+    """Кнопка «Обновить справочники»: копирует книги и читает их заново."""
+    state = scheduler.run_now()
+    if state.last_error:
+        return _refs_page(request, error=state.last_error)
+    return _refs_page(request, note=f"Справочники обновлены {state.last_run}.")
 
 
 def _error(
