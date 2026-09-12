@@ -5,12 +5,11 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -27,24 +26,7 @@ settings = Settings.load()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
 logger = logging.getLogger("excelkro")
 
-scheduler = refs_sync.Scheduler(
-    settings.refs_state_path,
-    settings.refs_dir,
-    settings.refs_tick_seconds,
-)
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    """Планировщик копий справочников живёт вместе со службой."""
-    scheduler.start()
-    try:
-        yield
-    finally:
-        scheduler.stop()
-
-
-app = FastAPI(title="ExcelKROAutoFormat", version=__version__, lifespan=lifespan)
+app = FastAPI(title="ExcelKROAutoFormat", version=__version__)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -96,6 +78,7 @@ async def _save_upload(file: UploadFile, target: Path, limit_mb: int) -> int:
     """Пишет загрузку на диск по частям и обрывает её при превышении предела."""
     limit = limit_mb * 1024 * 1024
     size = 0
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
         with target.open("wb") as sink:
             while True:
@@ -257,21 +240,31 @@ def cleanup(token: str) -> dict:
 
 
 def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLResponse:
+    """Страница справочников: две книги и их состояние."""
     state = refs_sync.load_state(settings.refs_state_path)
     planning, schedule = refs_sync.local_paths(settings.refs_dir)
-    books = refs.load_books(str(planning), str(schedule))
+    stores = 0
+    people = 0
+    try:
+        books = refs.load_books(str(planning), str(schedule))
+        stores = books.stores
+        people = len(books.by_surname)
+    except Exception:  # noqa: BLE001
+        logger.exception("Справочники не разобраны")
+        if not error:
+            error = "Загруженные книги не разобраны. Подробности — в журнале службы."
     return templates.TemplateResponse(
         request=request,
         name="refs.html",
         context={
             "state": state,
-            "week_days": refs_sync.WEEK_DAYS,
-            "times_text": ", ".join(state.times),
-            "stores": books.stores,
-            "people": len(books.by_surname),
+            "books": refs_sync.book_status(settings.refs_dir),
+            "stores": stores,
+            "people": people,
             "checker": settings.default_checker,
             "cells": settings.refs_cells(),
             "local_dir": settings.refs_dir,
+            "max_upload_mb": settings.max_upload_mb,
             "note": note,
             "error": error,
         },
@@ -280,35 +273,42 @@ def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLRespons
 
 @app.get("/refs", response_class=HTMLResponse)
 def refs_page(request: Request):
-    """Страница справочников: пути, расписание копий, состояние."""
     return _refs_page(request)
 
 
-@app.post("/refs/save", response_class=HTMLResponse)
-async def refs_save(request: Request):
-    """Сохраняет пути к книгам и расписание копирования."""
-    form = await request.form()
+@app.post("/refs/upload", response_class=HTMLResponse)
+async def refs_upload(
+    request: Request,
+    planning: UploadFile | None = File(default=None),
+    schedule: UploadFile | None = File(default=None),
+):
+    """Ручная загрузка книг справочников из браузера."""
     state = refs_sync.load_state(settings.refs_state_path)
-    state.planning_source = str(form.get("planning_source") or "").strip()
-    state.schedule_source = str(form.get("schedule_source") or "").strip()
-    state.days = refs_sync.parse_days(list(form.getlist("days")))
-    times = str(form.get("times") or "").replace(";", ",").split(",")
-    state.times = refs_sync.parse_times(times)
-    state.enabled = _is_on(form.get("enabled"))
-    refs_sync.save_state(settings.refs_state_path, state)
+    saved: list[str] = []
 
-    if not state.times:
-        return _refs_page(request, error="Время копирования не разобрано. Пример: 07:30, 19:00.")
-    return RedirectResponse(url="/refs", status_code=303)
+    for kind, sent in (("planning", planning), ("schedule", schedule)):
+        if sent is None or not (sent.filename or "").strip():
+            continue
+        name = _safe_name(sent.filename)
+        if not name.lower().endswith(".xlsx"):
+            return _refs_page(request, error=f"Нужен файл .xlsx, получен: {name}")
+        target = refs_sync.book_target(settings.refs_dir, kind)
+        try:
+            await _save_upload(sent, target, settings.max_upload_mb)
+        except UploadTooLarge:
+            return _refs_page(
+                request,
+                error=f"Файл {name} больше {settings.max_upload_mb} МБ.",
+            )
+        except OSError:
+            logger.exception("Не удалось сохранить справочник")
+            return _refs_page(request, error="Файл не сохранён. Подробности — в журнале службы.")
+        state = refs_sync.mark_upload(state, kind, name, settings.refs_state_path)
+        saved.append(name)
 
-
-@app.post("/refs/refresh", response_class=HTMLResponse)
-def refs_refresh(request: Request):
-    """Кнопка «Обновить справочники»: копирует книги и читает их заново."""
-    state = scheduler.run_now()
-    if state.last_error:
-        return _refs_page(request, error=state.last_error)
-    return _refs_page(request, note=f"Справочники обновлены {state.last_run}.")
+    if not saved:
+        return _refs_page(request, error="Файлы не выбраны.")
+    return _refs_page(request, note="Загружено: " + ", ".join(saved) + ".")
 
 
 def _error(
