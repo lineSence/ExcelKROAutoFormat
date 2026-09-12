@@ -4,11 +4,29 @@ After=network.target
 
 [Service]
 Type=simple
+User=excelkro
+Group=excelkro
 WorkingDirectory=/opt/excelkro
 EnvironmentFile=/opt/excelkro/.env
-ExecStart=/opt/excelkro/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/excelkro/venv/bin/uvicorn app.main:app --host ${APP_HOST} --port ${APP_PORT}
 Restart=always
 RestartSec=3
+
+# Ограничения прав: служба принимает файлы извне.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+StateDirectory=excelkro
+ReadWritePaths=/var/lib/excelkro
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target
