@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Справочники — ExcelKROAutoFormat</title>
+	<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<main class="card">
+	<h1>Справочники</h1>
+	<p class="hint">
+		Причина инвентаризации, администратор и ревизоры берутся из двух книг Excel
+		в сетевой папке. Служба держит их местную копию в папке {{ local_dir }}.
+	</p>
+
+	{% if error %}
+	<p class="error">{{ error }}</p>
+	{% endif %}
+	{% if note %}
+	<p class="hint">{{ note }}</p>
+	{% endif %}
+
+	<h2>Состояние</h2>
+	<table>
+		<tbody>
+		<tr><td>Последнее обновление</td><td>{{ state.last_run or "не было" }}</td></tr>
+		<tr><td>Итог</td><td>{{ state.last_status or "—" }}{% if state.last_error %}: {{ state.last_error }}{% endif %}</td></tr>
+		<tr><td>Складов в справочниках</td><td>{{ stores }}</td></tr>
+		<tr><td>Фамилий с полным ФИО</td><td>{{ people }}</td></tr>
+		<tr><td>Проверяющий по умолчанию</td><td>{{ checker }}</td></tr>
+		<tr><td>Ячейки записи</td><td>
+			причина {{ cells.reason or "—" }},
+			администратор {{ cells.admin or "—" }},
+			проверяющий {{ cells.checker or "—" }},
+			ревизоры {{ cells.auditors or "—" }}
+		</td></tr>
+		</tbody>
+	</table>
+
+	<form action="/refs/refresh" method="post">
+		<button type="submit">Обновить справочники</button>
+	</form>
+
+	<h2>Пути и расписание</h2>
+	<form action="/refs/save" method="post">
+		<p>
+			<label>Книга планирования (причины)<br />
+				<input type="text" name="planning_source" size="70"
+					value="{{ state.planning_source }}"
+					placeholder="/mnt/refs/НОВ ПЛАНИРОВАНИЕ.xlsx" />
+			</label>
+		</p>
+		<p>
+			<label>Книга графика (распределение ревизоров)<br />
+				<input type="text" name="schedule_source" size="70"
+					value="{{ state.schedule_source }}"
+					placeholder="/mnt/refs/График Ревизий.xlsx" />
+			</label>
+		</p>
+		<p class="hint">Путь указывается один раз и сохраняется.</p>
+
+		<p>
+			<label>
+				<input type="checkbox" name="enabled" value="on" {% if state.enabled %}checked{% endif %} />
+				Копировать по расписанию
+			</label>
+		</p>
+
+		<p>Дни недели:</p>
+		<p>
+			{% for number, title in week_days %}
+			<label style="margin-right: 12px;">
+				<input type="checkbox" name="days" value="{{ number }}"
+					{% if number in state.days %}checked{% endif %} />
+				{{ title }}
+			</label>
+			{% endfor %}
+		</p>
+
+		<p>
+			<label>Время копирования (через запятую)<br />
+				<input type="text" name="times" size="30" value="{{ times_text }}" placeholder="07:30, 19:00" />
+			</label>
+		</p>
+
+		<button type="submit">Сохранить</button>
+	</form>
+
+	<p class="hint"><a href="/">Назад к загрузке сверки</a></p>
+</main>
+</body>
+</html>
