@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from copy import copy
 from dataclasses import dataclass, field
 
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 
 from . import style
 from .parse import (
+    COL_BOOK,
     COL_CODE,
     COL_DIFF,
+    COL_DOC,
+    COL_FACT,
     COL_NAME,
     COL_SUM_DIFF,
     COL_TRAIT,
@@ -35,6 +38,9 @@ COL_GRAND_TOTAL = 9      # I
 TITLE_TARGET_ROW = 2     # В образце титул стоит во второй строке.
 SCAN_COLUMNS = 12
 
+# В строке итога группы числа 1С не нужны: остаётся только сумма в J.
+TOTAL_ROW_CLEAR_COLUMNS = (COL_FACT, COL_BOOK, COL_DIFF, COL_DOC)
+
 
 @dataclass
 class GroupResult:
@@ -44,10 +50,16 @@ class GroupResult:
     clusters: list[Cluster] = field(default_factory=list)
     doubtful: list[DoubtfulPair] = field(default_factory=list)
     zeroed_sum: float = 0.0
-    shortage_sum: float = 0.0
+    # Остаток сумм группы после разбора (может быть и положительным).
+    remainder_sum: float = 0.0
     resort_pieces: float = 0.0
     single_rows: int = 0
     total_cell: str = ""
+
+    @property
+    def shortage_sum(self) -> float:
+        """Старое имя поля `remainder_sum`."""
+        return self.remainder_sum
 
 
 @dataclass
@@ -71,8 +83,6 @@ def _row_is_empty(sheet, row: int) -> bool:
 
 def _shift_range(text: str, deleted: list[int]) -> str | None:
     """Пересчитывает адрес объединения после удаления строк."""
-    from openpyxl.utils.cell import range_boundaries
-
     min_col, min_row, max_col, max_row = range_boundaries(text)
     if any(min_row <= row <= max_row for row in deleted):
         return None
@@ -147,7 +157,7 @@ def _row_snapshot(sheet, row: int) -> list[tuple]:
     cells = []
     for column in range(1, SCAN_COLUMNS + 1):
         cell = sheet.cell(row=row, column=column)
-        cells.append((cell.value, copy(cell._style)))
+        cells.append((cell.value, style.read_style(cell)))
     return cells
 
 
@@ -186,10 +196,10 @@ def move_rows(sheet, group: Group, clusters: list[Cluster]) -> dict[int, int]:
     snapshots = {row: _row_snapshot(sheet, row) for row in order}
     moved: dict[int, int] = {}
     for target, source in zip(targets, order):
-        for column, (value, cell_style) in enumerate(snapshots[source], start=1):
+        for column, (value, saved) in enumerate(snapshots[source], start=1):
             cell = sheet.cell(row=target, column=column)
             cell.value = value
-            cell._style = copy(cell_style)
+            style.apply_style(cell, saved)
         moved[source] = target
     return moved
 
@@ -218,6 +228,10 @@ def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | No
         settings.doubtful_max,
         decisions,
         strict_brand_only=bool(getattr(settings, "strict_resort", False)),
+        price_gate_low=settings.price_gate_low,
+        price_gate_high=settings.price_gate_high,
+        match_min_score=settings.match_min_score,
+        doubtful_limit=settings.doubtful_limit,
     )
 
     # Строки одной грозди ставятся рядом до окраски и рамки.
@@ -255,7 +269,7 @@ def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | No
                 style.paint(sheet.cell(row=item.row, column=COL_DIFF), style.YELLOW)
                 style.paint(sheet.cell(row=item.row, column=COL_SUM_DIFF), style.YELLOW)
 
-    result.shortage_sum = sum(
+    result.remainder_sum = sum(
         _number(sheet.cell(row=row, column=COL_SUM_DIFF).value) for row in group.data_rows
     )
     return result
@@ -279,7 +293,7 @@ def highlight_rest(sheet, group: Group) -> None:
 
 def write_group_total(sheet, group: Group) -> str:
     """Шаг 5: формула итога группы."""
-    for column in (4, 5, COL_DIFF, 11):
+    for column in TOTAL_ROW_CLEAR_COLUMNS:
         sheet.cell(row=group.total_row, column=column).value = None
     last = max(group.first_data_row, group.total_row - 1)
     letter = get_column_letter(COL_SUM_DIFF)
@@ -292,8 +306,6 @@ def write_group_total(sheet, group: Group) -> str:
 def unmerge_cell(sheet, row: int, column: int) -> None:
     """Снимает объединение, если ячейка входит в него."""
     for merged in [str(item) for item in sheet.merged_cells.ranges]:
-        from openpyxl.utils.cell import range_boundaries
-
         min_col, min_row, max_col, max_row = range_boundaries(merged)
         if min_row <= row <= max_row and min_col <= column <= max_col:
             sheet.unmerge_cells(merged)
