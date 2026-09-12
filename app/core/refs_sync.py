@@ -1,12 +1,13 @@
-"""Копии справочников с сетевой папки и расписание обновления.
+"""Местные копии справочников и их обновление.
 
-Файлы лежат в сетевой папке компании и постоянно меняются. Служба держит
-местную копию и обновляет её:
+Главный способ: ручная загрузка двух книг Excel из браузера на странице
+`/refs`. Файлы ложатся в папку службы и живут там до следующей загрузки.
 
-- по расписанию (дни недели и время выбираются на странице настроек);
-- по кнопке «Обновить справочники».
+Запасной способ (пока не включён в интерфейсе): копирование из сетевой
+папки по расписанию. Код сохранён для будущего: он нужен, когда сервер
+получит доступ к папке компании.
 
-Расписание и пути хранятся в одном файле JSON, чтобы переживать перезапуск.
+Состояние хранится в одном файле JSON, чтобы переживать перезапуск службы.
 """
 
 from __future__ import annotations
@@ -36,18 +37,30 @@ WEEK_DAYS = (
 PLANNING_FILE = "planning.xlsx"
 SCHEDULE_FILE = "schedule.xlsx"
 
+# Виды книг: ключ формы — имя местной копии — название для страницы.
+BOOK_KINDS = {
+    "planning": (PLANNING_FILE, "книга планирования"),
+    "schedule": (SCHEDULE_FILE, "книга графика"),
+}
+
 
 @dataclass
 class SyncState:
-    """Состояние обновления справочников."""
+    """Состояние справочников."""
 
-    # Пути к исходным книгам в сетевой папке. Задаются один раз.
+    # Имена файлов, как их загрузил человек, и время загрузки.
+    planning_name: str = ""
+    planning_loaded: str = ""
+    schedule_name: str = ""
+    schedule_loaded: str = ""
+    # Пути к книгам в сетевой папке. Пока не используются.
     planning_source: str = ""
     schedule_source: str = ""
     # Дни недели (0 — понедельник) и время вида "07:30".
     days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     times: list[str] = field(default_factory=lambda: ["07:30"])
-    enabled: bool = True
+    # Копирование по расписанию по умолчанию выключено.
+    enabled: bool = False
     last_run: str = ""
     last_status: str = ""
     last_error: str = ""
@@ -124,6 +137,52 @@ def local_paths(local_dir: str | Path) -> tuple[Path, Path]:
     return folder / PLANNING_FILE, folder / SCHEDULE_FILE
 
 
+def book_target(local_dir: str | Path, kind: str) -> Path:
+    """Куда ложится загруженная книга выбранного вида."""
+    if kind not in BOOK_KINDS:
+        raise ValueError(f"неизвестный вид книги: {kind}")
+    name, _ = BOOK_KINDS[kind]
+    return Path(local_dir) / name
+
+
+def mark_upload(
+    state: SyncState,
+    kind: str,
+    file_name: str,
+    state_path: str | Path,
+) -> SyncState:
+    """Запоминает имя и время ручной загрузки книги."""
+    stamp = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+    if kind == "planning":
+        state.planning_name = file_name
+        state.planning_loaded = stamp
+    elif kind == "schedule":
+        state.schedule_name = file_name
+        state.schedule_loaded = stamp
+    else:
+        raise ValueError(f"неизвестный вид книги: {kind}")
+    state.last_run = stamp
+    state.last_status = "загружено вручную"
+    state.last_error = ""
+    save_state(state_path, state)
+    refs.forget_books()
+    return state
+
+
+def book_status(local_dir: str | Path) -> dict[str, dict]:
+    """Есть ли местные копии и каков их размер."""
+    report: dict[str, dict] = {}
+    for kind, (name, title) in BOOK_KINDS.items():
+        file = Path(local_dir) / name
+        found = file.is_file()
+        report[kind] = {
+            "title": title,
+            "found": found,
+            "size_mb": round(file.stat().st_size / 1048576, 2) if found else 0.0,
+        }
+    return report
+
+
 def _copy_one(source: str, target: Path) -> str:
     """Копирует одну книгу. Отдаёт текст ошибки или пустую строку."""
     if not source:
@@ -143,7 +202,7 @@ def _copy_one(source: str, target: Path) -> str:
 
 
 def refresh(state: SyncState, local_dir: str | Path, state_path: str | Path) -> SyncState:
-    """Копирует обе книги и сбрасывает кеш разбора."""
+    """Копирует обе книги из сетевой папки и сбрасывает кеш разбора."""
     planning, schedule = local_paths(local_dir)
     troubles = []
     for source, target, title in (
@@ -178,7 +237,7 @@ def due(state: SyncState, now: dt.datetime, last: dt.datetime | None) -> bool:
 
 
 class Scheduler:
-    """Отдельный поток: следит за расписанием копий."""
+    """Отдельный поток: следит за расписанием копий. Пока не запускается."""
 
     def __init__(
         self,
