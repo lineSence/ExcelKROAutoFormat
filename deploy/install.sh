@@ -3,27 +3,38 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/excelkro}"
+DATA_DIR="${DATA_DIR:-/var/lib/excelkro}"
 SERVICE_NAME="excelkro"
+SERVICE_USER="excelkro"
 
 echo "1. Системные пакеты"
 sudo apt-get update
 sudo apt-get install -y python3 python3-venv python3-pip rsync
 
-echo "2. Папка приложения: ${APP_DIR}"
-sudo mkdir -p "${APP_DIR}"
-sudo chown "$(id -u):$(id -g)" "${APP_DIR}"
+echo "2. Служебный пользователь: ${SERVICE_USER}"
+if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+	sudo useradd --system --home "${DATA_DIR}" --shell /usr/sbin/nologin "${SERVICE_USER}"
+fi
 
-echo "3. Окружение Python"
+echo "3. Папки приложения и данных"
+sudo mkdir -p "${APP_DIR}" "${DATA_DIR}/work"
+sudo chown "$(id -u):$(id -g)" "${APP_DIR}"
+sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}"
+sudo chmod 750 "${DATA_DIR}"
+
+echo "4. Окружение Python"
 python3 -m venv "${APP_DIR}/venv"
 "${APP_DIR}/venv/bin/pip" install --upgrade pip
 "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 
-echo "4. Файл настроек"
+echo "5. Файл настроек"
 if [ ! -f "${APP_DIR}/.env" ]; then
 	cp "${APP_DIR}/deploy/.env.example" "${APP_DIR}/.env"
 fi
+sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.env"
+sudo chmod 640 "${APP_DIR}/.env"
 
-echo "5. Служба systemd"
+echo "6. Служба systemd"
 sudo cp "${APP_DIR}/deploy/app.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 sudo systemctl daemon-reload
 sudo systemctl enable --now "${SERVICE_NAME}"
