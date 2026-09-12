@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import copy
+
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 YELLOW = "FFFFFF00"
@@ -34,6 +36,35 @@ ROW_HEIGHT = 12
 # в файле ширина хранится вместе с отступами ячейки.
 # Поэтому к нужной ширине добавляется эта поправка.
 WIDTH_PADDING = 0.83
+
+# Свойства оформления, которые переносятся при перестановке строк.
+# Используются только открытые свойства openpyxl: скрытое `cell._style`
+# меняется от версии к версии.
+STYLE_FIELDS = (
+    "font",
+    "fill",
+    "border",
+    "alignment",
+    "protection",
+    "number_format",
+)
+
+
+def read_style(cell) -> dict:
+    """Снимок оформления ячейки."""
+    return {name: copy(getattr(cell, name)) for name in STYLE_FIELDS}
+
+
+def apply_style(cell, saved: dict) -> None:
+    """Ставит ранее снятое оформление на ячейку."""
+    for name in STYLE_FIELDS:
+        if name in saved:
+            setattr(cell, name, copy(saved[name]))
+
+
+def copy_style(source, target) -> None:
+    """Переносит оформление с одной ячейки на другую."""
+    apply_style(target, read_style(source))
 
 
 def fill(color: str) -> PatternFill:
