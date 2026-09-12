@@ -2,6 +2,7 @@
 {% block title %}Файл готов — ExcelKROAutoFormat{% endblock %}
 {% block heading %}Файл готов{% endblock %}
 {% block subheading %}<p>{{ summary.warehouse }}{% if summary.date %} · {{ summary.date }}{% endif %}</p>{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/meta.css" />{% endblock %}
 
 {% block content %}
 {% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
@@ -40,9 +41,34 @@
 		</div>
 
 		<div class="field">
-			<label class="field-label" for="meta-sellers">Продавцы</label>
-			<textarea id="meta-sellers" name="sellers" rows="6" placeholder="По одному ФИО в строке">{{ meta.sellers }}</textarea>
-			<span class="hint">Строки для чисел и формулы долей ставятся автоматически; сами числа вносятся в Excel.</span>
+			<span class="field-label">Распределение недостачи</span>
+			<span class="segmented" data-share-mode>
+				<label><input type="radio" name="share_mode" value="hours" {% if meta.by_hours %}checked{% endif %} /> По часам</label>
+				<label><input type="radio" name="share_mode" value="equal" {% if not meta.by_hours %}checked{% endif %} /> Поровну</label>
+			</span>
+			<span class="hint" data-share-hint></span>
+		</div>
+
+		<div class="field">
+			<span class="field-label">Продавцы</span>
+			<div class="row-list" data-rows="sellers">
+				{% for seller in meta.sellers %}
+				<div class="row-item" data-row>
+					<input type="text" name="sellers" value="{{ seller.name }}" placeholder="Фамилия Имя Отчество" />
+					<input class="row-hours" type="number" name="seller_hours" value="{{ seller.hours }}" min="0" step="0.5" placeholder="часы" data-hours />
+					<button class="button-secondary button-small" type="button" data-row-remove title="Убрать строку">✕</button>
+				</div>
+				{% endfor %}
+				<div class="row-item" data-row>
+					<input type="text" name="sellers" value="" placeholder="Фамилия Имя Отчество" />
+					<input class="row-hours" type="number" name="seller_hours" value="" min="0" step="0.5" placeholder="часы" data-hours />
+					<button class="button-secondary button-small" type="button" data-row-remove title="Убрать строку">✕</button>
+				</div>
+			</div>
+			<div class="actions">
+				<button class="button-secondary button-small" type="button" data-row-add="sellers">Добавить продавца</button>
+			</div>
+			<span class="hint">Каждый продавец — в своей строке. Формулы долей и итог ставятся автоматически.</span>
 		</div>
 
 		<h3 class="card-sub">Мини-таблица подписей</h3>
@@ -58,8 +84,22 @@
 		</div>
 
 		<div class="field">
-			<label class="field-label" for="meta-auditors">Ревизоры</label>
-			<textarea id="meta-auditors" name="auditors" rows="3" placeholder="По одному ФИО в строке">{{ meta.auditors }}</textarea>
+			<span class="field-label">Ревизоры</span>
+			<div class="row-list" data-rows="auditors">
+				{% for name in meta.auditors %}
+				<div class="row-item" data-row>
+					<input type="text" name="auditors" value="{{ name }}" placeholder="Фамилия Имя Отчество" />
+					<button class="button-secondary button-small" type="button" data-row-remove title="Убрать строку">✕</button>
+				</div>
+				{% endfor %}
+				<div class="row-item" data-row>
+					<input type="text" name="auditors" value="" placeholder="Фамилия Имя Отчество" />
+					<button class="button-secondary button-small" type="button" data-row-remove title="Убрать строку">✕</button>
+				</div>
+			</div>
+			<div class="actions">
+				<button class="button-secondary button-small" type="button" data-row-add="auditors">Добавить ревизора</button>
+			</div>
 		</div>
 
 		<div class="field">
@@ -180,18 +220,5 @@
 
 {% block scripts %}
 <script src="/static/review.js"></script>
-<script>
-	// Поле ФИО ночного продавца нужно только при ответе «да».
-	(function () {
-		var toggle = document.querySelector("[data-night-toggle]")
-		var name = document.querySelector("[data-night-name]")
-		if (!toggle || !name) return
-		var sync = function () {
-			name.disabled = !toggle.checked
-			if (!toggle.checked) name.value = ""
-		}
-		toggle.addEventListener("change", sync)
-		sync()
-	})()
-</script>
+<script src="/static/meta.js"></script>
 {% endblock %}

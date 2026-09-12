@@ -25,12 +25,15 @@
 	text-align: right;
 }
 
-.row-item .row-hours:disabled {
+/* Режим «поровну»: часы видны, но помечены как неактивные. */
+.row-item .row-hours[readonly] {
 	background: var(--surface-soft);
 	color: var(--muted);
+	opacity: 0.7;
 }
 
 .row-item [data-row-remove] {
 	flex: 0 0 auto;
 	line-height: 1;
+	padding: 6px 10px;
 }
