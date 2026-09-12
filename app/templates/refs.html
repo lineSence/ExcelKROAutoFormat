@@ -1,93 +1,85 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-	<meta charset="utf-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<title>Справочники — ExcelKROAutoFormat</title>
-	<link rel="stylesheet" href="/static/style.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Справочники</title>
+  <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-<main class="card">
-	<h1>Справочники</h1>
-	<p class="hint">
-		Причина инвентаризации, администратор и ревизоры берутся из двух книг Excel
-		в сетевой папке. Служба держит их местную копию в папке {{ local_dir }}.
-	</p>
+  <main class="wrap">
+    <h1>Справочники</h1>
+    <p class="hint">
+      Две книги Excel с компьютера или сетевой папки компании: планирование (причина
+      инвентаризации) и график ревизий (администратор и ревизоры). Откройте папку
+      компании в Проводнике, выберите свежие файлы и загрузите их здесь. Обновлять
+      нужно тогда, когда книги меняются.
+    </p>
 
-	{% if error %}
-	<p class="error">{{ error }}</p>
-	{% endif %}
-	{% if note %}
-	<p class="hint">{{ note }}</p>
-	{% endif %}
+    {% if note %}<p class="ok">{{ note }}</p>{% endif %}
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
-	<h2>Состояние</h2>
-	<table>
-		<tbody>
-		<tr><td>Последнее обновление</td><td>{{ state.last_run or "не было" }}</td></tr>
-		<tr><td>Итог</td><td>{{ state.last_status or "—" }}{% if state.last_error %}: {{ state.last_error }}{% endif %}</td></tr>
-		<tr><td>Складов в справочниках</td><td>{{ stores }}</td></tr>
-		<tr><td>Фамилий с полным ФИО</td><td>{{ people }}</td></tr>
-		<tr><td>Проверяющий по умолчанию</td><td>{{ checker }}</td></tr>
-		<tr><td>Ячейки записи</td><td>
-			причина {{ cells.reason or "—" }},
-			администратор {{ cells.admin or "—" }},
-			проверяющий {{ cells.checker or "—" }},
-			ревизоры {{ cells.auditors or "—" }}
-		</td></tr>
-		</tbody>
-	</table>
+    <form class="card" method="post" action="/refs/upload" enctype="multipart/form-data">
+      <h2>Загрузка книг</h2>
+      <label>
+        Книга планирования («НОВ ПЛАНИРОВАНИЕ»)
+        <input type="file" name="planning" accept=".xlsx" />
+      </label>
+      <label>
+        Книга графика («График Ревизий», лист «Переучеты»)
+        <input type="file" name="schedule" accept=".xlsx" />
+      </label>
+      <p class="hint">Предел размера одного файла: {{ max_upload_mb }} МБ. Можно загружать по одной книге.</p>
+      <button type="submit">Загрузить справочники</button>
+    </form>
 
-	<form action="/refs/refresh" method="post">
-		<button type="submit">Обновить справочники</button>
-	</form>
+    <section class="card">
+      <h2>Состояние</h2>
+      <table>
+        <tbody>
+          <tr>
+            <th>Книга планирования</th>
+            <td>
+              {% if books.planning.found %}
+                {{ state.planning_name or "planning.xlsx" }} — {{ books.planning.size_mb }} МБ
+                {% if state.planning_loaded %}, загружена {{ state.planning_loaded }}{% endif %}
+              {% else %}не загружена{% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th>Книга графика</th>
+            <td>
+              {% if books.schedule.found %}
+                {{ state.schedule_name or "schedule.xlsx" }} — {{ books.schedule.size_mb }} МБ
+                {% if state.schedule_loaded %}, загружена {{ state.schedule_loaded }}{% endif %}
+              {% else %}не загружена{% endif %}
+            </td>
+          </tr>
+          <tr><th>Складов в справочниках</th><td>{{ stores }}</td></tr>
+          <tr><th>Фамилий с полным ФИО</th><td>{{ people }}</td></tr>
+          <tr><th>Проверяющий по умолчанию</th><td>{{ checker }}</td></tr>
+          <tr><th>Папка хранения</th><td><code>{{ local_dir }}</code></td></tr>
+        </tbody>
+      </table>
+    </section>
 
-	<h2>Пути и расписание</h2>
-	<form action="/refs/save" method="post">
-		<p>
-			<label>Книга планирования (причины)<br />
-				<input type="text" name="planning_source" size="70"
-					value="{{ state.planning_source }}"
-					placeholder="/mnt/refs/НОВ ПЛАНИРОВАНИЕ.xlsx" />
-			</label>
-		</p>
-		<p>
-			<label>Книга графика (распределение ревизоров)<br />
-				<input type="text" name="schedule_source" size="70"
-					value="{{ state.schedule_source }}"
-					placeholder="/mnt/refs/График Ревизий.xlsx" />
-			</label>
-		</p>
-		<p class="hint">Путь указывается один раз и сохраняется.</p>
+    <section class="card">
+      <h2>Куда пишутся данные</h2>
+      <table>
+        <tbody>
+          <tr><th>Причина инвентаризации</th><td>{{ cells.reason }}</td></tr>
+          <tr><th>Администратор (управляющий группой магазинов)</th><td>{{ cells.admin }}</td></tr>
+          <tr><th>Проверяющий</th><td>{{ cells.checker }}</td></tr>
+          <tr><th>Ревизоры</th><td>{{ cells.auditors }}</td></tr>
+        </tbody>
+      </table>
+      <p class="hint">
+        Ревизоры берутся из распределения полным ФИО. Если пара «склад + дата» не найдена,
+        поля остаются пустыми; служебные сообщения в сверку не пишутся.
+      </p>
+    </section>
 
-		<p>
-			<label>
-				<input type="checkbox" name="enabled" value="on" {% if state.enabled %}checked{% endif %} />
-				Копировать по расписанию
-			</label>
-		</p>
-
-		<p>Дни недели:</p>
-		<p>
-			{% for number, title in week_days %}
-			<label style="margin-right: 12px;">
-				<input type="checkbox" name="days" value="{{ number }}"
-					{% if number in state.days %}checked{% endif %} />
-				{{ title }}
-			</label>
-			{% endfor %}
-		</p>
-
-		<p>
-			<label>Время копирования (через запятую)<br />
-				<input type="text" name="times" size="30" value="{{ times_text }}" placeholder="07:30, 19:00" />
-			</label>
-		</p>
-
-		<button type="submit">Сохранить</button>
-	</form>
-
-	<p class="hint"><a href="/">Назад к загрузке сверки</a></p>
-</main>
+    <p><a href="/">Назад к обработке сверки</a></p>
+  </main>
 </body>
 </html>
