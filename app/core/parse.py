@@ -21,6 +21,10 @@ COL_DOC = 11       # K
 
 DATE_PATTERN = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 NUMBER_PATTERN = re.compile(r"№\s*([\w\-]+)")
+SPACES = re.compile(r"\s+")
+# Служебные хвосты в имени файла выгрузки: «без цен», «(1)» и так далее.
+TAIL_MARKERS = (" без ", " сверка", " инвентаризация")
+COPY_SUFFIX = re.compile(r"\s*\(\d+\)\s*$")
 
 MONTHS = {
     "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
@@ -87,13 +91,21 @@ def _is_number(value: object) -> bool:
 
 
 def warehouse_from_filename(filename: str) -> str:
-    """Имя склада из имени входного файла (решение R11)."""
+    """Имя склада из имени входного файла (решение R11).
+
+    Имя склада берётся целиком: «Красные Ворота без цен.xlsx» →
+    «Красные Ворота». Служебные хвосты, дата и «(1)» отбрасываются.
+    """
     stem = Path(filename).stem.strip()
     lowered = stem.lower()
-    cut = lowered.find(" без ")
-    if cut > 0:
-        return stem[:cut].strip()
-    return stem.split(" ")[0].strip()
+    cuts = [lowered.find(marker) for marker in TAIL_MARKERS]
+    cuts = [cut for cut in cuts if cut > 0]
+    if cuts:
+        stem = stem[: min(cuts)]
+    stem = DATE_PATTERN.sub(" ", stem)
+    stem = COPY_SUFFIX.sub("", stem)
+    stem = SPACES.sub(" ", stem).strip(" -_–—")
+    return stem
 
 
 def find_title(sheet) -> tuple[int, str]:

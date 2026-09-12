@@ -1,9 +1,11 @@
-"""Тесты первой версии. Файл сверки собирается в коде теста."""
+"""Тесты ядра. Файл сверки собирается в коде теста."""
 
 from __future__ import annotations
 
+import os
 import re
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -15,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Settings
 from app.core.format import output_filename
 from app.core.parse import parse, warehouse_from_filename
-from app.core.pipeline import process
+from app.core.pipeline import process, sweep
 from app.core.repair import describe, needs_repair, repair_by_inject
 from app.core.resort import normalize
 
@@ -120,6 +122,9 @@ def source_file(tmp_path: Path) -> Path:
 def test_warehouse_from_filename() -> None:
     assert warehouse_from_filename("ОхтаМоллСМА без форматирования.xlsx") == "ОхтаМоллСМА"
     assert warehouse_from_filename("БалтийскийТЦМДБ.xlsx") == "БалтийскийТЦМДБ"
+    # Имя из нескольких слов берётся целиком.
+    assert warehouse_from_filename("Красные Ворота.xlsx") == "Красные Ворота"
+    assert warehouse_from_filename("Красные Ворота 09.09.2026 (1).xlsx") == "Красные Ворота"
 
 
 def test_output_filename() -> None:
@@ -135,8 +140,11 @@ def test_normalize_folds_names() -> None:
 
 
 def test_broken_file_fails_without_repair(source_file: Path) -> None:
-    """Без ремонта openpyxl даёт именно list index out of range."""
-    with pytest.raises(IndexError):
+    """Без ремонта openpyxl файл не открывает.
+
+    Тип ошибки зависит от версии openpyxl, поэтому проверяется любая из трёх.
+    """
+    with pytest.raises((IndexError, KeyError, ValueError)):
         openpyxl.load_workbook(source_file)
 
 
@@ -183,3 +191,31 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert str(sheet["I4"].value).startswith("=SUM(")
     assert sheet["C4"].value == "ОхтаМоллСМА"
     assert sheet.auto_filter.ref.startswith("K1:K")
+
+
+def test_process_uses_given_folder(source_file: Path, tmp_path: Path) -> None:
+    """Веб-слой даёт свою папку: лишние папки не создаются."""
+    settings = Settings.load()
+    settings.tmp_dir = str(tmp_path / "work")
+    folder = Path(settings.tmp_dir) / "one"
+    result = process(source_file, source_file.name, settings, folder=folder)
+
+    assert result.output_path.parent == folder
+    assert [item.name for item in Path(settings.tmp_dir).iterdir()] == ["one"]
+
+
+def test_sweep_removes_old_folders(tmp_path: Path) -> None:
+    settings = Settings.load()
+    settings.tmp_dir = str(tmp_path / "work")
+    settings.result_ttl_minutes = 1
+
+    old = Path(settings.tmp_dir) / "old"
+    fresh = Path(settings.tmp_dir) / "fresh"
+    old.mkdir(parents=True)
+    fresh.mkdir(parents=True)
+    past = time.time() - 3600
+    os.utime(old, (past, past))
+
+    assert sweep(settings) == 1
+    assert not old.exists()
+    assert fresh.exists()

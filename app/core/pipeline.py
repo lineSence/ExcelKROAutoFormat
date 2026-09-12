@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +14,11 @@ import openpyxl
 from ..config import Settings
 from . import report
 from .format import format_workbook, output_filename
+from .guard import check_archive
 from .parse import ParseError, warehouse_from_filename
 from .repair import RepairError, repair
+
+logger = logging.getLogger("excelkro.pipeline")
 
 
 @dataclass
@@ -36,11 +42,36 @@ def work_dir(settings: Settings) -> Path:
     return folder
 
 
+def sweep(settings: Settings) -> int:
+    """Удаляет рабочие папки старше срока хранения. Возвращает число папок."""
+    root = Path(settings.tmp_dir)
+    if not root.is_dir():
+        return 0
+    deadline = time.time() - max(settings.result_ttl_minutes, 1) * 60
+    removed = 0
+    for folder in root.iterdir():
+        try:
+            if not folder.is_dir() or folder.stat().st_mtime >= deadline:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+        removed += 1
+    if removed:
+        logger.info("Удалено старых рабочих папок: %s", removed)
+    return removed
+
+
 def pick_sheet(workbook, settings: Settings):
     if settings.sheet_name in workbook.sheetnames:
         return workbook[settings.sheet_name]
     if not workbook.sheetnames:
         raise ParseError("В файле нет ни одного листа.")
+    logger.warning(
+        "Лист %s не найден. Взят первый лист: %s",
+        settings.sheet_name,
+        workbook.sheetnames[0],
+    )
     return workbook[workbook.sheetnames[0]]
 
 
@@ -48,7 +79,7 @@ def load_sheet(repaired: Path, settings: Settings):
     """Открывает книгу и даёт понятное сообщение при битом файле."""
     try:
         workbook = openpyxl.load_workbook(repaired)
-    except IndexError as error:
+    except (IndexError, KeyError, ValueError) as error:
         raise RepairError(
             "В файле биты ссылки на стили или таблица текстов. "
             "Пересохраните выгрузку в Excel или включите запасной ремонт: "
@@ -62,10 +93,18 @@ def process(
     original_filename: str,
     settings: Settings | None = None,
     decisions: dict[str, bool] | None = None,
+    folder: str | Path | None = None,
 ) -> PipelineResult:
-    """Обрабатывает файл сверки и возвращает путь к готовому файлу."""
+    """Обрабатывает файл сверки и возвращает путь к готовому файлу.
+
+    `folder` — готовая рабочая папка. Веб-слой передаёт ту же папку, в которую
+    сохранил загруженный файл, чтобы лишние папки не оставались на диске.
+    """
     settings = settings or Settings.load()
-    folder = work_dir(settings)
+    folder = Path(folder) if folder is not None else work_dir(settings)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    check_archive(input_path, settings.max_unpacked_mb)
     repaired = repair(input_path, folder / "repaired.xlsx", settings.repair_mode)
 
     workbook, sheet = load_sheet(repaired, settings)
