@@ -1,4 +1,4 @@
-"""Тесты справочников: чтение книг, поиск пары и расписание копий."""
+"""Тесты справочников: чтение книг, поиск пары и ручная загрузка."""
 
 from __future__ import annotations
 
@@ -112,20 +112,37 @@ def test_full_name_keeps_ambiguous():
 def test_state_round_trip(tmp_path):
     path = tmp_path / "state.json"
     state = refs_sync.SyncState(
-        planning_source="/mnt/refs/plan.xlsx",
-        schedule_source="/mnt/refs/grafik.xlsx",
+        planning_name="НОВ ПЛАНИРОВАНИЕ.xlsx",
         days=[0, 2],
         times=["7:5", "19:00"],
     )
     refs_sync.save_state(path, state)
     back = refs_sync.load_state(path)
-    assert back.planning_source == "/mnt/refs/plan.xlsx"
+    assert back.planning_name == "НОВ ПЛАНИРОВАНИЕ.xlsx"
     assert back.days == [0, 2]
     assert back.times == ["07:05", "19:00"]
 
 
+def test_book_status_sees_loaded_files(tmp_path):
+    make_planning(refs_sync.book_target(tmp_path, "planning"))
+    report = refs_sync.book_status(tmp_path)
+    assert report["planning"]["found"] is True
+    assert report["schedule"]["found"] is False
+
+
+def test_mark_upload_saves_state(tmp_path):
+    state_path = tmp_path / "state.json"
+    state = refs_sync.SyncState()
+    result = refs_sync.mark_upload(state, "schedule", "График.xlsx", state_path)
+    assert result.schedule_name == "График.xlsx"
+    assert result.schedule_loaded
+    assert result.last_status == "загружено вручную"
+    assert refs_sync.load_state(state_path).schedule_name == "График.xlsx"
+
+
 def test_due_respects_days_and_times():
-    state = refs_sync.SyncState(days=[2], times=["07:30"])
+    # Расписание пока не используется, но правила должны работать.
+    state = refs_sync.SyncState(days=[2], times=["07:30"], enabled=True)
     # Среда после 07:30 — копия нужна.
     assert refs_sync.due(state, dt.datetime(2026, 9, 9, 7, 31), None) is True
     # Та же среда, копия уже была.
@@ -135,28 +152,3 @@ def test_due_respects_days_and_times():
     # Расписание выключено.
     state.enabled = False
     assert refs_sync.due(state, dt.datetime(2026, 9, 9, 7, 31), None) is False
-
-
-def test_refresh_copies_books(tmp_path):
-    source = tmp_path / "net"
-    source.mkdir()
-    make_planning(source / "plan.xlsx")
-    make_schedule(source / "grafik.xlsx")
-    local = tmp_path / "local"
-    state_path = tmp_path / "state.json"
-    state = refs_sync.SyncState(
-        planning_source=str(source / "plan.xlsx"),
-        schedule_source=str(source / "grafik.xlsx"),
-    )
-    result = refs_sync.refresh(state, local, state_path)
-    planning, schedule = refs_sync.local_paths(local)
-    assert planning.is_file() and schedule.is_file()
-    assert result.last_status == "готово"
-    assert result.last_error == ""
-
-
-def test_refresh_reports_missing_file(tmp_path):
-    state = refs_sync.SyncState(planning_source=str(tmp_path / "нету.xlsx"))
-    result = refs_sync.refresh(state, tmp_path / "local", tmp_path / "state.json")
-    assert result.last_status == "ошибка"
-    assert "планирование" in result.last_error
