@@ -70,6 +70,32 @@ class Settings:
     strict_resort: bool = False
     log_level: str = "INFO"
 
+    # --- Справочники (причина, администратор, ревизоры) ---
+    # Папка местных копий книг и файл расписания.
+    refs_dir: str = "/var/lib/excelkro/refs"
+    refs_state_path: str = "/var/lib/excelkro/refs/state.json"
+    # Проверяющий всегда один и тот же.
+    default_checker: str = "Разумовский"
+    # Порог схожести имён складов и допустимый сдвиг даты в графике.
+    refs_match_min_score: float = 0.90
+    refs_days_around: int = 3
+    # Адреса ячеек готового файла. Пустое значение — в файл не писать.
+    refs_cell_reason: str = "C5"
+    refs_cell_admin: str = "L2"
+    refs_cell_checker: str = "L3"
+    refs_cell_auditors: str = "L4"
+    # Шаг проверки расписания копирования, секунды.
+    refs_tick_seconds: int = 30
+
+    def refs_cells(self) -> dict[str, str]:
+        """Карта «поле → ячейка» для записи в готовый файл."""
+        return {
+            "reason": self.refs_cell_reason.strip(),
+            "admin": self.refs_cell_admin.strip(),
+            "checker": self.refs_cell_checker.strip(),
+            "auditors": self.refs_cell_auditors.strip(),
+        }
+
     @classmethod
     def load(cls) -> "Settings":
         load_dotenv(os.environ.get("EXCELKRO_ENV_FILE", ".env"))
@@ -78,6 +104,7 @@ class Settings:
             for word in _text("TYPE_WORDS", DEFAULT_TYPE_WORDS).split(",")
             if word.strip()
         )
+        refs_dir = _text("REFS_DIR", "/var/lib/excelkro/refs")
         return cls(
             app_host=_text("APP_HOST", "127.0.0.1"),
             app_port=int(_number("APP_PORT", 8000)),
@@ -99,4 +126,14 @@ class Settings:
             report_cluster_members=_flag("REPORT_CLUSTER_MEMBERS", True),
             strict_resort=_flag("STRICT_RESORT", False),
             log_level=_text("LOG_LEVEL", "INFO"),
+            refs_dir=refs_dir,
+            refs_state_path=_text("REFS_STATE_PATH", str(Path(refs_dir) / "state.json")),
+            default_checker=_text("DEFAULT_CHECKER", "Разумовский"),
+            refs_match_min_score=_number("REFS_MATCH_MIN_SCORE", 0.90),
+            refs_days_around=int(_number("REFS_DAYS_AROUND", 3)),
+            refs_cell_reason=_text("REFS_CELL_REASON", "C5"),
+            refs_cell_admin=_text("REFS_CELL_ADMIN", "L2"),
+            refs_cell_checker=_text("REFS_CELL_CHECKER", "L3"),
+            refs_cell_auditors=_text("REFS_CELL_AUDITORS", "L4"),
+            refs_tick_seconds=int(_number("REFS_TICK_SECONDS", 30)),
         )
