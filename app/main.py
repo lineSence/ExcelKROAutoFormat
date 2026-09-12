@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import __version__
 from .config import Settings
-from .core import refs, refs_sync
+from .core import refs_sync
 from .core.guard import UploadTooLarge
 from .core.parse import ParseError
 from .core.pipeline import PipelineResult, process, sweep, work_dir
@@ -240,27 +240,14 @@ def cleanup(token: str) -> dict:
 
 
 def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLResponse:
-    """Страница справочников: две книги и их состояние."""
+    """Страница справочников. Книги здесь не разбираются: только состояние."""
     state = refs_sync.load_state(settings.refs_state_path)
-    planning, schedule = refs_sync.local_paths(settings.refs_dir)
-    stores = 0
-    people = 0
-    try:
-        books = refs.load_books(str(planning), str(schedule))
-        stores = books.stores
-        people = len(books.by_surname)
-    except Exception:  # noqa: BLE001
-        logger.exception("Справочники не разобраны")
-        if not error:
-            error = "Загруженные книги не разобраны. Подробности — в журнале службы."
     return templates.TemplateResponse(
         request=request,
         name="refs.html",
         context={
             "state": state,
             "books": refs_sync.book_status(settings.refs_dir),
-            "stores": stores,
-            "people": people,
             "checker": settings.default_checker,
             "cells": settings.refs_cells(),
             "local_dir": settings.refs_dir,
@@ -282,7 +269,7 @@ async def refs_upload(
     planning: UploadFile | None = File(default=None),
     schedule: UploadFile | None = File(default=None),
 ):
-    """Ручная загрузка книг справочников из браузера."""
+    """Ручная загрузка книг справочников. Книги только сохраняются."""
     state = refs_sync.load_state(settings.refs_state_path)
     saved: list[str] = []
 
@@ -308,7 +295,23 @@ async def refs_upload(
 
     if not saved:
         return _refs_page(request, error="Файлы не выбраны.")
-    return _refs_page(request, note="Загружено: " + ", ".join(saved) + ".")
+    return _refs_page(
+        request,
+        note="Загружено: " + ", ".join(saved) + ". Книги разберутся при первой сверке.",
+    )
+
+
+@app.post("/refs/check", response_class=HTMLResponse)
+def refs_check(request: Request):
+    """Разбирает загруженные книги по кнопке и показывает итог."""
+    state = refs_sync.load_state(settings.refs_state_path)
+    state = refs_sync.measure(state, settings.refs_dir, settings.refs_state_path)
+    if state.last_status == "ошибка":
+        return _refs_page(request, error="Книги не разобраны. Подробности — в журнале службы.")
+    return _refs_page(
+        request,
+        note=f"Разбор готов: складов {state.stores}, фамилий {state.people}.",
+    )
 
 
 def _error(

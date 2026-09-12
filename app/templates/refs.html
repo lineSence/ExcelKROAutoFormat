@@ -55,12 +55,25 @@
               {% else %}не загружена{% endif %}
             </td>
           </tr>
-          <tr><th>Складов в справочниках</th><td>{{ stores }}</td></tr>
-          <tr><th>Фамилий с полным ФИО</th><td>{{ people }}</td></tr>
+          <tr>
+            <th>Итог разбора</th>
+            <td>
+              {% if state.parsed %}
+                складов {{ state.stores }}, фамилий {{ state.people }} ({{ state.parsed }})
+              {% else %}книги ещё не разобраны{% endif %}
+            </td>
+          </tr>
           <tr><th>Проверяющий по умолчанию</th><td>{{ checker }}</td></tr>
           <tr><th>Папка хранения</th><td><code>{{ local_dir }}</code></td></tr>
         </tbody>
       </table>
+      <form method="post" action="/refs/check">
+        <button type="submit">Разобрать справочники</button>
+      </form>
+      <p class="hint">
+        Разбор больших книг занимает время, поэтому страница показывает сохранённый итог.
+        Для работы сверки кнопка не нужна: книги разберутся сами при первой обработке.
+      </p>
     </section>
 
     <section class="card">

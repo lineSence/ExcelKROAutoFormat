@@ -1,13 +1,13 @@
-"""Местные копии справочников и их обновление.
+"""Местные копии справочников и их состояние.
 
 Главный способ: ручная загрузка двух книг Excel из браузера на странице
 `/refs`. Файлы ложатся в папку службы и живут там до следующей загрузки.
 
-Запасной способ (пока не включён в интерфейсе): копирование из сетевой
-папки по расписанию. Код сохранён для будущего: он нужен, когда сервер
-получит доступ к папке компании.
+Число складов и фамилий считается один раз после загрузки и хранится в состоянии:
+разбор больших книг тяжёлый, и делать его на каждый показ страницы нельзя.
 
-Состояние хранится в одном файле JSON, чтобы переживать перезапуск службы.
+Запасной способ (пока не включён в интерфейсе): копирование из сетевой
+папки по расписанию. Код сохранён для будущего.
 """
 
 from __future__ import annotations
@@ -53,6 +53,10 @@ class SyncState:
     planning_loaded: str = ""
     schedule_name: str = ""
     schedule_loaded: str = ""
+    # Итог разбора: число складов, число фамилий с полным ФИО и его итог.
+    stores: int = 0
+    people: int = 0
+    parsed: str = ""
     # Пути к книгам в сетевой папке. Пока не используются.
     planning_source: str = ""
     schedule_source: str = ""
@@ -164,8 +168,33 @@ def mark_upload(
     state.last_run = stamp
     state.last_status = "загружено вручную"
     state.last_error = ""
+    # Старый итог разбора больше не верен.
+    state.stores = 0
+    state.people = 0
+    state.parsed = ""
     save_state(state_path, state)
     refs.forget_books()
+    return state
+
+
+def measure(state: SyncState, local_dir: str | Path, state_path: str | Path) -> SyncState:
+    """Разбирает загруженные книги один раз и запоминает итог."""
+    planning, schedule = local_paths(local_dir)
+    try:
+        books = refs.load_books(str(planning), str(schedule), force=True)
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Не удалось разобрать справочники")
+        state.stores = 0
+        state.people = 0
+        state.parsed = ""
+        state.last_status = "ошибка"
+        state.last_error = f"разбор не выполнен: {type(error).__name__}"
+        save_state(state_path, state)
+        return state
+    state.stores = books.stores
+    state.people = len(books.by_surname)
+    state.parsed = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+    save_state(state_path, state)
     return state
 
 
@@ -216,6 +245,9 @@ def refresh(state: SyncState, local_dir: str | Path, state_path: str | Path) -> 
     state.last_run = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
     state.last_error = "; ".join(troubles)
     state.last_status = "ошибка" if troubles else "готово"
+    state.stores = 0
+    state.people = 0
+    state.parsed = ""
     save_state(state_path, state)
     refs.forget_books()
     if troubles:
