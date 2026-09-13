@@ -22,6 +22,39 @@
 	</div>
 </section>
 
+{% if refs %}
+<section class="card">
+	<h2>Данные справочников</h2>
+	<p class="card-sub">Заполнено автоматически по паре «склад + дата» из планирования и графика.</p>
+	<ul class="facts">
+		<li><span>Причина инвентаризации</span><span>{{ refs.reason or "не определена" }}</span></li>
+		<li><span>Администратор</span><span>{{ refs.admin or "не определён" }}</span></li>
+		<li><span>Проверяющий</span><span>{{ refs.checker or "—" }}</span></li>
+		<li><span>Ревизоры</span><span>{% if refs.auditors %}{{ refs.auditors | join(", ") }}{% else %}не определены{% endif %}</span></li>
+	</ul>
+	{% if refs.counts %}
+	<p class="hint">
+		В справочниках прочитано: магазинов в планировании {{ refs.counts.plans or 0 }},
+		записей в графике {{ refs.counts.visits or 0 }}, фамилий с полным ФИО {{ refs.counts.people or 0 }}.
+	</p>
+	{% endif %}
+	{% if refs.problems %}
+	<h3 class="card-sub">Ошибки справочников</h3>
+	<ul>
+		{% for line in refs.problems %}
+		<li class="error">{{ line }}</li>
+		{% endfor %}
+	</ul>
+	<p class="hint">
+		Поля в файле остались пустыми — заполните их вручную ниже. Тот же список
+		сохраняется в блоке ошибок на странице <a class="link" href="/refs">Справочники</a>.
+	</p>
+	{% elif not refs.found %}
+	<p class="hint">Пара «склад + дата» в распределении не найдена. Поля в файле остались пустыми — заполните их вручную ниже. <a class="link" href="/refs">Справочники</a></p>
+	{% endif %}
+</section>
+{% endif %}
+
 <section class="card">
 	<h2>Данные сверки</h2>
 	<p class="card-sub">Заполните перед выгрузкой — поля попадут в файл так же, как в образцах.</p>
@@ -216,6 +249,25 @@
 		</table>
 	</div>
 </section>
+
+{% if clusters %}
+<section class="card">
+	<h2>Состав гроздей</h2>
+	<p class="card-sub">Какие строки программа собрала в одну гроздь пересорта. Отключается настройкой REPORT_CLUSTER_MEMBERS.</p>
+	<div class="table-wrap">
+		<table>
+			<thead>
+				<tr>{% for name in clusters[0].keys() %}<th>{{ name }}</th>{% endfor %}</tr>
+			</thead>
+			<tbody>
+				{% for row in clusters %}
+				<tr>{% for value in row.values() %}<td>{{ value }}</td>{% endfor %}</tr>
+				{% endfor %}
+			</tbody>
+		</table>
+	</div>
+</section>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
