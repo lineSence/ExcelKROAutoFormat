@@ -3,7 +3,8 @@
 В образцах эти данные вносятся руками после разбора пересортов:
 
 * причина инвентаризации — столбец C в строке под «Склад:» (в образце C5);
-* дата предыдущей инвентаризации — столбец B под титулом (в образце B3);
+* дата предыдущей инвентаризации — столбец B под титулом (в образце B3),
+  выравнивание по левому краю, иначе Excel прижимает дату вправо;
 * продавцы — блок внизу файла: строка ФИО, под ней строка с весом
   (часы или единица при делении поровну), рядом формула доли;
   в конце — итог весов.
@@ -35,6 +36,8 @@ from .parse import COL_NAME, COL_TRAIT, Document
 COL_VALUE_START = COL_TRAIT       # C — значение мини-таблицы
 COL_VALUE_END = 7                 # G — ФИО целиком влезает в C:G
 COL_TOTAL_WITH_EXTRA = 9          # I — сумма с неучтёнкой
+# Пустая ячейка неучтёнки стоит строкой ниже общего итога.
+EXTRA_ROW_OFFSET = 1
 GAP_BEFORE_SIGNATURES = 1         # пустая строка между блоками
 NIGHT_ABSENT = "нет"
 TRUE_WORDS = ("1", "true", "yes", "on", "да")
@@ -48,6 +51,9 @@ EQUAL_WEIGHT = 1
 
 FONT = Font(name="Arial", size=9)
 FONT_BOLD = Font(name="Arial", size=9, bold=True)
+
+# Дата предыдущей инвентаризации в образце прижата влево.
+PREV_DATE_ALIGN = Alignment(horizontal="left", vertical="center")
 
 # Оформление блока продавцов повторяет образец один в один:
 # Arial 8, ФИО на светло-зелёной заливке (индекс 43 старой палитры 1С),
@@ -262,13 +268,19 @@ def write_reason(sheet, document: Document, reason: str) -> None:
 
 
 def write_prev_date(sheet, document: Document, text: str) -> None:
-    """Дата предыдущей инвентаризации — столбец B под титулом."""
+    """Дата предыдущей инвентаризации — столбец B под титулом.
+
+    В образце дата прижата влево, поэтому выравнивание задаётся явно:
+    Excel сам прижимает даты вправо, как любое другое число.
+    """
     value = _date_value(text)
     if value is None:
         return
     row = document.title_row + 1
     _write(sheet, row, COL_NAME, value)
-    sheet.cell(row=row, column=COL_NAME).number_format = style.DATE_FORMAT
+    cell = sheet.cell(row=row, column=COL_NAME)
+    cell.number_format = style.DATE_FORMAT
+    cell.alignment = PREV_DATE_ALIGN
 
 
 def _weight_format(value) -> str:
@@ -302,18 +314,11 @@ def _style_seller_cell(sheet, row: int, column: int, kind: str) -> None:
 def grand_total_row(sheet, document: Document) -> int:
     """Строка с итогом по складу в столбце I.
 
-    В образцах ставка делит именно эту сумму (I4, а если руками
-    добавлена строка с неучтёнкой — то I5). Берём самую нижнюю
-    заполненную ячейку I выше шапки таблицы.
+    Итог по группам всегда стоит в строке со словом «Склад:» (в образце
+    I4), а строкой ниже — пустая ячейка неучтёнки (I5). Ставка
+    продавцов делит сумму этих двух ячеек.
     """
-    warehouse = document.warehouse_row or 4
-    header = document.groups[0].header_row if document.groups else warehouse + 2
-    found = None
-    for row in range(1, max(header - 1, 1) + 1):
-        value = sheet.cell(row=row, column=COL_TOTAL_WITH_EXTRA).value
-        if value not in (None, ""):
-            found = row
-    return found or warehouse
+    return document.warehouse_row or 4
 
 
 def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) -> int:
@@ -328,6 +333,7 @@ def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) ->
         return first_row - 1
 
     rate_row = grand_total_row(sheet, document)
+    extra_row = rate_row + EXTRA_ROW_OFFSET
     number_rows = [first_row + 1 + index * 2 for index in range(len(sellers))]
     total_row = number_rows[-1] + 1
 
@@ -337,8 +343,14 @@ def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) ->
         _write(sheet, name_row, COL_NAME, seller.name)
         _style_seller_cell(sheet, name_row, COL_NAME, "name")
         if index == 0:
-            # Ставка на единицу веса: итог по складу делится на сумму весов.
-            _write(sheet, name_row, COL_TRAIT, f"=I{rate_row}/B{total_row}")
+            # Ставка на единицу веса: итог по складу вместе с неучтёнкой
+            # делится на сумму весов. Пустая ячейка неучтёнки SUM не мешает.
+            _write(
+                sheet,
+                name_row,
+                COL_TRAIT,
+                f"=SUM(I{rate_row}:I{extra_row})/B{total_row}",
+            )
             _style_seller_cell(sheet, name_row, COL_TRAIT, "share")
         weight = data.weight(seller)
         if weight is not None:
