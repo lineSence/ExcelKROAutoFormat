@@ -7,7 +7,8 @@
 Порядок работы:
 
 1. Кандидаты берутся из уже разобранной сверки (строки с излишком).
-2. Фото и список имён уходят в модель зрения одним запросом.
+2. Снимок уходит в хранилище файлов GigaChat, затем его идентификатор и
+   список имён — одним запросом на генерацию.
 3. Модель возвращает прочитанный с пачки текст и до трёх номеров строк.
 4. Ответ сверяется с кандидатами по имени (`resort.normalize`,
    `resort.similarity`): если модель назвала строку, которой нет в списке,
@@ -15,31 +16,40 @@
 5. Результат — подсказка человеку. В файл сверки ничего не пишется:
    решение человека главнее модели.
 
+Провайдер — GigaChat (Сбер): доступен из России, у версии для физических лиц
+есть бесплатные токены. Авторизация двухшаговая: ключ авторизации (Basic)
+меняется на токен доступа на 30 минут, токен держится в памяти процесса.
+Версия API (`scope`) подбирается сама: сначала версия для физлиц, затем B2B
+и корпоративная, найденное значение запоминается в файле настроек.
+
 Настройки не берутся из `.env`: они задаются на странице «Фото товара» и
 хранятся в `data/runtime.json` рядом с переключателем эмбеддингов. Там же
-лежит ключ API — вводится один раз в интерфейсе, перезапуск не нужен.
+лежит ключ авторизации — вводится один раз в интерфейсе, перезапуск не нужен.
 
-Провайдер один — Gemini (Google AI Studio, бесплатный тир). Сетевой вызов
-сделан на `urllib` из стандартной библиотеки: новых зависимостей нет,
-на сервере с 1 ГБ памяти ничего не разворачивается.
+Сетевые вызовы сделаны на `urllib` из стандартной библиотеки: новых
+зависимостей нет, на сервере с 1 ГБ памяти ничего не разворачивается.
+Проверка сертификата по умолчанию отключена: у Сбера цепочка Минцифры,
+которой в системном хранилище обычно нет.
 
-Модуль всегда отвечает объектом `PhotoResult`. Нет ключа, нет сети, лимит
-бесплатного тира, битый ответ — всё это возвращается полем `error`, а не
-исключением: страница должна открываться в любом случае.
+Модуль всегда отвечает объектом `PhotoResult`. Нет ключа, нет сети, кончились
+токены, битый ответ — всё это возвращается полем `error`, а не исключением:
+страница должна открываться в любом случае.
 """
 
 from __future__ import annotations
 
-import base64
 import datetime as dt
 import hashlib
 import json
 import logging
 import mimetypes
 import re
+import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,25 +57,34 @@ from . import resort, runtime
 
 logger = logging.getLogger("excelkro.vision")
 
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+BASE_URL = "https://gigachat.devices.sberbank.ru/api/v1"
+
+# Версии API GigaChat. Ключ авторизации выдаётся под одну из них, поэтому
+# перебираем по очереди и запоминаем ту, которая ответила.
+SCOPES = ("GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP")
 
 # Значения по умолчанию. Всё это меняется на странице «Фото товара».
 DEFAULTS: dict = {
     "vision_enabled": False,
-    "vision_model": "gemini-flash-lite-latest",
+    "vision_model": "GigaChat-2",
+    # Ключ авторизации из личного кабинета GigaChat (строка Basic).
     "vision_api_key": "",
+    "vision_scope": SCOPES[0],
+    "vision_verify_ssl": False,
     # Сколько строк-излишков показывать модели за один запрос.
     "vision_max_rows": 40,
     "vision_max_photo_mb": 8,
     "vision_timeout": 60,
     "vision_retries": 2,
-    # Пауза между снимками: бесплатный тир считает обращения в минуту.
+    # Пауза между снимками: у бесплатной версии есть предел обращений.
     "vision_pause_seconds": 4.0,
     # Ниже этой схожести запасной подбор по тексту строку не предлагает.
     "vision_text_min_score": 0.55,
     "vision_cache_limit": 2000,
 }
 
+BOOL_KEYS = ("vision_enabled", "vision_verify_ssl")
 # Ключи, которые хранятся числом с плавающей точкой.
 FLOAT_KEYS = ("vision_pause_seconds", "vision_text_min_score")
 INT_KEYS = (
@@ -79,6 +98,14 @@ INT_KEYS = (
 MAX_CANDIDATES = 3
 JSON_FENCE = re.compile(r"^```(?:json)?|```$", re.MULTILINE)
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")
+# GigaChat принимает картинки в этих форматах.
+UPLOAD_TYPES = {
+    "image/jpeg": "image/jpeg",
+    "image/jpg": "image/jpeg",
+    "image/png": "image/png",
+    "image/tiff": "image/tiff",
+    "image/bmp": "image/bmp",
+}
 
 # Ответ модели: только JSON, без пояснений.
 PROMPT = """На фото товар из магазина табака и электронных сигарет.
@@ -163,27 +190,29 @@ def load_config(settings) -> dict:
         if key not in stored:
             continue
         value = stored[key]
-        if key == "vision_enabled":
+        if key in BOOL_KEYS:
             config[key] = bool(value)
         elif key in INT_KEYS or key in FLOAT_KEYS:
             config[key] = _number(key, value)
         else:
             config[key] = str(value or "").strip()
+    if config["vision_scope"] not in SCOPES:
+        config["vision_scope"] = SCOPES[0]
     return config
 
 
 def save_config(settings, values: dict) -> dict:
     """Пишет настройки в файл переключателей. Чужие ключи не трогаются.
 
-    Пустой ключ API означает «оставить как было»: форма не показывает ключ
-    целиком, поэтому пустое поле не должно его стирать.
+    Пустой ключ авторизации означает «оставить как было»: форма не показывает
+    ключ целиком, поэтому пустое поле не должно его стирать.
     """
     path = runtime.runtime_path(settings)
     stored = runtime.load(path)
     for key, value in values.items():
         if key not in DEFAULTS:
             continue
-        if key == "vision_enabled":
+        if key in BOOL_KEYS:
             stored[key] = bool(value)
         elif key in INT_KEYS or key in FLOAT_KEYS:
             stored[key] = _number(key, value)
@@ -198,7 +227,7 @@ def save_config(settings, values: dict) -> dict:
 
 
 def forget_key(settings) -> dict:
-    """Убирает ключ API из файла настроек."""
+    """Убирает ключ авторизации из файла настроек."""
     path = runtime.runtime_path(settings)
     stored = runtime.load(path)
     stored["vision_api_key"] = ""
@@ -212,6 +241,19 @@ def mask_key(key: str) -> str:
     if not text:
         return ""
     return f"…{text[-4:]}" if len(text) > 4 else "…"
+
+
+def _remember_scope(settings, scope: str) -> None:
+    """Запоминает версию API, которая приняла ключ."""
+    if scope not in SCOPES:
+        return
+    path = runtime.runtime_path(settings)
+    stored = runtime.load(path)
+    if stored.get("vision_scope") == scope:
+        return
+    stored["vision_scope"] = scope
+    runtime.save(stored, path)
+    logger.info("Версия API GigaChat: %s", scope)
 
 
 def _data_dir(settings) -> Path:
@@ -237,7 +279,10 @@ def status(settings, config: dict | None = None) -> dict:
     if not enabled:
         reason = "Выключено: фото товара разбирает человек."
     elif not has_key:
-        reason = "Включено, но ключ API не введён. Введите его в настройках ниже."
+        reason = (
+            "Включено, но ключ авторизации GigaChat не введён. "
+            "Введите его в настройках ниже."
+        )
     else:
         reason = f"Включено, модель {model}."
 
@@ -253,6 +298,7 @@ def status(settings, config: dict | None = None) -> dict:
         "has_key": has_key,
         "key_tail": mask_key(config["vision_api_key"]),
         "model": model,
+        "scope": str(config["vision_scope"]),
         "reason": reason,
         "cached": stored,
         "cache_path": str(cache),
@@ -389,115 +435,286 @@ def clear_cache(settings) -> int:
 # --- Клиент модели -----------------------------------------------------------
 
 
-class GeminiVision:
-    """Клиент Google AI Studio. Один запрос — одно фото."""
+class GigaChatVision:
+    """Клиент GigaChat: токен доступа, загрузка снимка, запрос на генерацию.
+
+    Исключений наружу не отдаёт: каждый метод возвращает пару
+    «результат, описание ошибки».
+    """
 
     def __init__(
         self,
-        api_key: str,
-        model: str = "gemini-flash-lite-latest",
+        auth_key: str,
+        model: str = "GigaChat-2",
         timeout: int = 60,
         retries: int = 2,
+        scope: str = SCOPES[0],
+        verify_ssl: bool = False,
     ) -> None:
-        self.api_key = api_key
+        self.auth_key = auth_key
         self.model = model
         self.timeout = timeout
         self.retries = retries
+        self.scope = scope if scope in SCOPES else SCOPES[0]
+        self.verify_ssl = verify_ssl
+        # Токен живёт 30 минут; держим его в объекте клиента.
+        self._token = ""
+        self._until = 0.0
 
-    def _post(self, payload: dict) -> tuple[str, str]:
-        """Возвращает пару «текст ответа, ошибка». Исключений не бросает."""
-        request = urllib.request.Request(
-            API_URL.format(model=self.model),
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": self.api_key,
-            },
-        )
+    # -- сеть --
 
+    def _context(self) -> ssl.SSLContext:
+        if self.verify_ssl:
+            return ssl.create_default_context()
+        # У Сбера цепочка Минцифры, которой в системном хранилище обычно нет.
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+
+    def _open(self, request: urllib.request.Request) -> tuple[bytes, str, int]:
+        """Один запрос без повторов: тело ответа, ошибка, код."""
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout, context=self._context()
+            ) as answer:
+                return answer.read(), "", int(answer.status or 200)
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", "replace")[:300]
+            return b"", f"GigaChat ответил ошибкой {error.code}: {detail}", error.code
+        except (urllib.error.URLError, TimeoutError, ValueError) as error:
+            return b"", f"Нет связи с GigaChat: {error}", 0
+
+    def _repeat(self, build) -> tuple[bytes, str]:
+        """Повторяет запрос при 429 и сбоях службы."""
         delay = 2.0
         last = ""
         for attempt in range(self.retries + 1):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as answer:
-                    data = json.loads(answer.read().decode("utf-8"))
-                return _first_text(data), ""
-            except urllib.error.HTTPError as error:
-                detail = error.read().decode("utf-8", "replace")[:300]
-                last = f"Модель ответила ошибкой {error.code}: {detail}"
-                # 429 — исчерпан бесплатный лимит, 5xx — сбой на стороне службы.
-                if error.code not in (429, 500, 503) or attempt == self.retries:
-                    return "", last
-            except (urllib.error.URLError, TimeoutError, ValueError) as error:
-                last = f"Нет связи с моделью: {error}"
-                if attempt == self.retries:
-                    return "", last
+            body, error, code = self._open(build())
+            if not error:
+                return body, ""
+            last = error
+            if code not in (429, 500, 502, 503, 504, 0) or attempt == self.retries:
+                return b"", last
             time.sleep(delay)
             delay *= 2
+        return b"", last
+
+    # -- авторизация --
+
+    def _ask_token(self, scope: str) -> tuple[str, str]:
+        def build() -> urllib.request.Request:
+            return urllib.request.Request(
+                OAUTH_URL,
+                data=urllib.parse.urlencode({"scope": scope}).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "RqUID": str(uuid.uuid4()),
+                    "Authorization": f"Basic {self.auth_key}",
+                },
+            )
+
+        body, error = self._repeat(build)
+        if error:
+            return "", error
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except ValueError:
+            return "", "Ответ службы авторизации не разобран."
+        token = str(data.get("access_token") or "")
+        if not token:
+            return "", "Служба авторизации не выдала токен доступа."
+        # Срок приходит метками времени в миллисекундах.
+        try:
+            self._until = float(data.get("expires_at", 0)) / 1000.0
+        except (TypeError, ValueError):
+            self._until = 0.0
+        if self._until <= 0:
+            self._until = time.time() + 25 * 60
+        return token, ""
+
+    def token(self) -> tuple[str, str]:
+        """Токен доступа. Версию API подбирает сама, если ключ не от неё."""
+        if not self.auth_key:
+            return "", "Ключ авторизации GigaChat не введён."
+        # Обновляем с запасом: токен живёт 30 минут.
+        if self._token and time.time() < self._until - 300:
+            return self._token, ""
+
+        order = [self.scope] + [scope for scope in SCOPES if scope != self.scope]
+        last = ""
+        for scope in order:
+            token, error = self._ask_token(scope)
+            if token:
+                self._token = token
+                self.scope = scope
+                return token, ""
+            last = error
+            # Ключ выдан под другую версию API — пробуем следующую.
+            if "scope" not in error and " 400" not in error and " 401" not in error:
+                break
         return "", last
 
-    def ask(self, image: bytes, mime: str, prompt: str) -> tuple[str, str]:
-        return self._post(
-            {
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": prompt},
-                            {
-                                "inline_data": {
-                                    "mime_type": mime,
-                                    "data": base64.b64encode(image).decode("ascii"),
-                                }
-                            },
-                        ]
-                    }
-                ],
-                # Ответ должен быть повторяемым: температура нулевая.
-                "generationConfig": {
-                    "temperature": 0,
-                    "maxOutputTokens": 800,
-                    "responseMimeType": "application/json",
+    # -- запросы --
+
+    def _upload(self, image: bytes, mime: str, name: str) -> tuple[str, str]:
+        """Кладёт снимок в хранилище файлов. Возвращает идентификатор."""
+        token, error = self.token()
+        if error:
+            return "", error
+
+        boundary = f"----excelkro{uuid.uuid4().hex}"
+        line = f"--{boundary}\r\n".encode("utf-8")
+        parts = [
+            line,
+            b'Content-Disposition: form-data; name="purpose"\r\n\r\ngeneral\r\n',
+            line,
+            f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'.encode(
+                "utf-8"
+            ),
+            f"Content-Type: {mime}\r\n\r\n".encode("utf-8"),
+            image,
+            f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ]
+        body = b"".join(parts)
+
+        def build() -> urllib.request.Request:
+            return urllib.request.Request(
+                f"{BASE_URL}/files",
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {token}",
                 },
-            }
+            )
+
+        answer, error = self._repeat(build)
+        if error:
+            return "", error
+        try:
+            data = json.loads(answer.decode("utf-8"))
+        except ValueError:
+            return "", "Ответ хранилища файлов не разобран."
+        file_id = str(data.get("id") or "")
+        return (file_id, "") if file_id else ("", "Снимок не принят хранилищем.")
+
+    def _forget_file(self, file_id: str) -> None:
+        """Убирает снимок из хранилища. Неудача здесь ничего не ломает."""
+        token, error = self.token()
+        if error or not file_id:
+            return
+        request = urllib.request.Request(
+            f"{BASE_URL}/files/{file_id}/delete",
+            data=b"",
+            method="POST",
+            headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
         )
+        self._open(request)
+
+    def _chat(self, payload: dict) -> tuple[str, str]:
+        token, error = self.token()
+        if error:
+            return "", error
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        def build() -> urllib.request.Request:
+            return urllib.request.Request(
+                f"{BASE_URL}/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+        answer, error = self._repeat(build)
+        if error:
+            return "", error
+        try:
+            data = json.loads(answer.decode("utf-8"))
+        except ValueError:
+            return "", "Ответ GigaChat не разобран."
+        return _first_text(data), ""
+
+    def ask(self, image: bytes, mime: str, prompt: str) -> tuple[str, str]:
+        """Загружает снимок и спрашивает модель. Снимок затем удаляется."""
+        upload_mime = UPLOAD_TYPES.get(mime, "image/jpeg")
+        file_id, error = self._upload(image, upload_mime, "photo")
+        if error:
+            return "", error
+        try:
+            return self._chat(
+                {
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt,
+                            "attachments": [file_id],
+                        }
+                    ],
+                    # Ответ должен быть повторяемым: температура минимальная.
+                    "temperature": 0.1,
+                    "max_tokens": 800,
+                }
+            )
+        finally:
+            self._forget_file(file_id)
 
     def ping(self) -> tuple[str, str]:
         """Проверка ключа и модели: короткий запрос без картинки."""
-        return self._post(
+        return self._chat(
             {
-                "contents": [{"parts": [{"text": "Ответь одним словом: готово"}]}],
-                "generationConfig": {"temperature": 0, "maxOutputTokens": 16},
+                "model": self.model,
+                "messages": [{"role": "user", "content": "Ответь одним словом: готово"}],
+                "temperature": 0.1,
+                "max_tokens": 16,
             }
         )
 
 
 def _first_text(data: dict) -> str:
     """Достаёт текст первого ответа. Пустой ответ — пустая строка."""
-    for candidate in data.get("candidates") or []:
-        for part in (candidate.get("content") or {}).get("parts") or []:
-            text = part.get("text")
-            if text:
-                return str(text)
+    for choice in data.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        text = (choice.get("message") or {}).get("content")
+        if text:
+            return str(text)
     return ""
+
+
+def _client(config: dict, retries: int | None = None) -> GigaChatVision:
+    return GigaChatVision(
+        auth_key=str(config["vision_api_key"]),
+        model=str(config["vision_model"]),
+        timeout=int(config["vision_timeout"]),
+        retries=int(config["vision_retries"]) if retries is None else retries,
+        scope=str(config["vision_scope"]),
+        verify_ssl=bool(config["vision_verify_ssl"]),
+    )
 
 
 def check(settings, config: dict | None = None) -> tuple[bool, str]:
     """Проверяет связь с моделью по кнопке на странице."""
     config = config or load_config(settings)
-    api_key = str(config["vision_api_key"])
-    if not api_key:
-        return False, "Ключ API не введён."
-    client = GeminiVision(
-        api_key=api_key,
-        model=str(config["vision_model"]),
-        timeout=int(config["vision_timeout"]),
-        retries=0,
-    )
+    if not config["vision_api_key"]:
+        return False, "Ключ авторизации GigaChat не введён."
+    client = _client(config, retries=0)
     text, error = client.ping()
+    _remember_scope(settings, client.scope)
     if error:
         return False, error
-    return True, f"Модель {config['vision_model']} отвечает: {text.strip() or 'пусто'}"
+    return True, (
+        f"Модель {config['vision_model']} отвечает: {text.strip() or 'пусто'} "
+        f"(версия API {client.scope})"
+    )
 
 
 # --- Разбор ответа -----------------------------------------------------------
@@ -595,6 +812,7 @@ def recognize(
     settings,
     cache: Cache | None = None,
     config: dict | None = None,
+    client: GigaChatVision | None = None,
 ) -> PhotoResult:
     """Разбирает один снимок и предлагает строки сверки.
 
@@ -608,9 +826,8 @@ def recognize(
     if not config["vision_enabled"]:
         result.error = "Распознавание фото выключено."
         return result
-    api_key = str(config["vision_api_key"])
-    if not api_key:
-        result.error = "Ключ API не введён."
+    if not config["vision_api_key"]:
+        result.error = "Ключ авторизации GigaChat не введён."
         return result
     if not file.is_file():
         result.error = "Файл снимка не найден."
@@ -641,16 +858,12 @@ def recognize(
         return result
 
     mime = mimetypes.guess_type(file.name)[0] or "image/jpeg"
-    client = GeminiVision(
-        api_key=api_key,
-        model=model,
-        timeout=int(config["vision_timeout"]),
-        retries=int(config["vision_retries"]),
-    )
+    client = client or _client(config)
 
     started = time.monotonic()
     raw, error = client.ask(image, mime, PROMPT.format(candidates=_candidate_lines(plus)))
     result.seconds = round(time.monotonic() - started, 2)
+    _remember_scope(settings, client.scope)
     if error:
         logger.warning("Фото %s: %s", file.name, error)
         result.error = error
@@ -672,17 +885,18 @@ def recognize_all(
 ) -> list[PhotoResult]:
     """Разбирает пачку снимков подряд.
 
-    Запросы идут последовательно: бесплатный тир считает обращения в минуту,
-    а снимков за одну сверку — единицы.
+    Запросы идут последовательно, одним клиентом: токен доступа получается
+    один раз на всю пачку, а пауза не даёт упереться в предел обращений.
     """
     config = load_config(settings)
     cache = Cache(cache_path(settings), int(config["vision_cache_limit"]))
     pause = float(config["vision_pause_seconds"])
+    client = _client(config)
     results: list[PhotoResult] = []
     for index, photo in enumerate(photos):
         if index:
             time.sleep(pause)
-        results.append(recognize(photo, items, settings, cache, config))
+        results.append(recognize(photo, items, settings, cache, config, client))
     return results
 
 

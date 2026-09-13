@@ -16,8 +16,12 @@
 			<span class="stat-value">{{ vision.model }}</span>
 		</div>
 		<div class="stat">
-			<span class="stat-label">Ключ API</span>
+			<span class="stat-label">Ключ авторизации</span>
 			<span class="stat-value">{% if vision.has_key %}введён {{ vision.key_tail }}{% else %}нет{% endif %}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Версия API</span>
+			<span class="stat-value">{{ vision.scope }}</span>
 		</div>
 		<div class="stat">
 			<span class="stat-label">Снимков в кеше</span>
@@ -51,7 +55,7 @@
 		</div>
 		<div class="actions"><button type="submit"{% if not vision.ready %} disabled{% endif %}>Разобрать фото</button></div>
 		{% if not vision.ready %}
-		<p class="hint">Сначала включите распознавание и введите ключ API в настройках ниже.</p>
+		<p class="hint">Сначала включите распознавание и введите ключ авторизации GigaChat в настройках ниже.</p>
 		{% endif %}
 	</form>
 	{% else %}
@@ -130,14 +134,14 @@
 			<label><input type="checkbox" name="enabled" value="on"{% if vision.enabled %} checked{% endif %} /> Включить распознавание фото</label>
 		</div>
 		<div class="field">
-			<label for="vision-key">Ключ API</label>
-			<input id="vision-key" type="password" name="api_key" autocomplete="off" placeholder="{% if vision.has_key %}ключ сохранён {{ vision.key_tail }} — оставьте пустым, чтобы не менять{% else %}вставьте ключ Google AI Studio{% endif %}" />
-			<p class="hint">Ключ берётся в Google AI Studio, бесплатный тир. Хранится на сервере в файле настроек, на странице целиком не показывается.</p>
+			<label for="vision-key">Ключ авторизации GigaChat</label>
+			<input id="vision-key" type="password" name="api_key" autocomplete="off" placeholder="{% if vision.has_key %}ключ сохранён {{ vision.key_tail }} — оставьте пустым, чтобы не менять{% else %}вставьте ключ авторизации из личного кабинета GigaChat{% endif %}" />
+			<p class="hint">Берётся в личном кабинете GigaChat (строка <code>Authorization key</code>). Версия API подбирается сама: сначала для физических лиц, затем B2B и корпоративная. Ключ хранится на сервере, на странице целиком не показывается.</p>
 		</div>
 		<div class="field">
 			<label for="vision-model">Модель</label>
 			<input id="vision-model" type="text" name="model" value="{{ config.vision_model }}" />
-			<p class="hint">По умолчанию <code>gemini-flash-lite-latest</code>: самая щедрая по бесплатным лимитам.</p>
+			<p class="hint">По умолчанию <code>GigaChat-2</code>. Модель должна уметь работать с изображениями.</p>
 		</div>
 		<div class="field">
 			<label for="vision-rows">Сколько строк-излишков показывать модели</label>
@@ -158,7 +162,7 @@
 		<div class="field">
 			<label for="vision-pause">Пауза между снимками, секунды</label>
 			<input id="vision-pause" type="text" name="pause_seconds" value="{{ config.vision_pause_seconds }}" />
-			<p class="hint">Бесплатный тир считает обращения в минуту: пауза не даёт упереться в лимит.</p>
+			<p class="hint">У бесплатной версии есть предел обращений: пауза не даёт в него упереться.</p>
 		</div>
 		<div class="field">
 			<label for="vision-floor">Порог запасного подбора по тексту</label>
@@ -175,15 +179,15 @@
 
 <section class="card">
 	<h2>4. Обслуживание</h2>
-	<p class="card-sub">Проверка связи ничего не распознаёт: она только убеждается, что ключ и модель рабочие.</p>
+	<p class="card-sub">Проверка связи ничего не распознаёт: она только убеждается, что ключ, версия API и модель рабочие.</p>
 	<form action="/vision/check" method="post">
 		<div class="actions"><button class="button-secondary" type="submit">Проверить связь</button></div>
 	</form>
 	<form action="/vision/cache/clear" method="post" onsubmit="return confirm('Забыть все разобранные снимки?');">
 		<div class="actions"><button class="button-secondary" type="submit">Очистить кеш снимков</button></div>
 	</form>
-	<form action="/vision/key/clear" method="post" onsubmit="return confirm('Удалить ключ API из настроек?');">
-		<div class="actions"><button class="button-danger" type="submit">Удалить ключ API</button></div>
+	<form action="/vision/key/clear" method="post" onsubmit="return confirm('Удалить ключ авторизации из настроек?');">
+		<div class="actions"><button class="button-danger" type="submit">Удалить ключ авторизации</button></div>
 	</form>
 </section>
 {% endblock %}
