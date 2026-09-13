@@ -1,36 +1,80 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-	<meta charset="utf-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<title>ExcelKROAutoFormat</title>
-	<link rel="stylesheet" href="/static/style.css" />
-</head>
-<body>
-<main class="card">
-	<h1>Форматирование сверки КРО</h1>
-	<p class="hint">Загрузите файл сверки из 1С в формате .xlsx. Имя склада берётся из имени файла.</p>
+{% extends "base.html" %}
+{% block title %}Сверка КРО — ExcelKROAutoFormat{% endblock %}
+{% block page_class %} page-narrow{% endblock %}
+{% block heading %}Сверка КРО{% endblock %}
+{% block subheading %}<p>Загрузите выгрузку из 1С в формате .xlsx — программа подберёт пересорты и оформит файл.</p>{% endblock %}
 
-	{% if error %}
-	<p class="error">{{ error }}</p>
-	{% endif %}
+{% block content %}
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
 
-	<form action="/upload" method="post" enctype="multipart/form-data">
-		<input type="file" name="file" accept=".xlsx" required />
+<form class="card" action="/upload" method="post" enctype="multipart/form-data">
+	<div class="field">
+		<label class="field-label" for="file">Файл сверки</label>
+		<input id="file" type="file" name="file" accept=".xlsx" required />
+		<p class="hint">До {{ max_upload_mb }} МБ. Имя склада берётся из имени файла.</p>
+	</div>
 
-		<p>
-			<label>
-				<input type="checkbox" name="strict" value="on" {% if strict %}checked{% endif %} />
-				Разрешить только чёткие пересорты
-			</label>
-		</p>
-		<p class="hint">В пару ставятся только позиции одного бренда. Любые другие пересорты исключены, цена на подбор не влияет.</p>
+	<div class="field">
+		<span class="field-label">Подбор пар</span>
+		<label class="choice">
+			<input type="checkbox" name="strict" value="on" {% if strict %}checked{% endif %} />
+			<span>
+				<span class="choice-title">Разрешить только чёткие пересорты</span>
+				<span class="choice-note">Бренд только с тем же брендом, цена не учитывается.</span>
+			</span>
+		</label>
+	</div>
 
-		<button type="submit">Обработать</button>
-	</form>
+	<div class="field">
+		<span class="field-label">Проверка пар</span>
+		<label class="choice">
+			<input type="radio" name="verify" value="off" {% if verify != "model" %}checked{% endif %} />
+			<span>
+				<span class="choice-title">Только детерминированная логика</span>
+				<span class="choice-note">Результат повторяемый и самый быстрый.</span>
+			</span>
+		</label>
+		<label class="choice{% if not model.ready %} choice-disabled{% endif %}">
+			<input type="radio" name="verify" value="model" {% if verify == "model" %}checked{% endif %} {% if not model.ready %}disabled{% endif %} />
+			<span>
+				<span class="choice-title">Логика + нейросеть</span>
+				<span class="choice-note">
+					{% if model.ready %}Второй слой отсеивает сомнительные пары. Обучена на {{ model.samples }} примерах{% if model.trained_at %}, {{ model.trained_at }}{% endif %}.
+					{% else %}Модель не обучена — сначала загрузите примеры на странице «Модель и обучение».{% endif %}
+				</span>
+			</span>
+		</label>
+	</div>
 
-	<p class="hint">Предел размера файла: {{ max_upload_mb }} МБ.</p>
-	<p class="hint"><a href="/refs">Справочники: пути, расписание копий, обновление</a></p>
-</main>
-</body>
-</html>
+	<div class="actions">
+		<button type="submit">Обработать файл</button>
+		<a class="link" href="/training">Настроить модель</a>
+		<a class="link" href="/refs">Справочники</a>
+	</div>
+</form>
+
+<section class="card">
+	<h2>Состояние</h2>
+	<ul class="facts">
+		<li>
+			<span>Модель проверки</span>
+			<span>{% if model.ready %}<span class="badge badge-ok">готова</span>{% else %}<span class="badge">не обучена</span>{% endif %}</span>
+		</li>
+		<li>
+			<span>Эмбеддинги имён</span>
+			<span>
+				{% if embed and embed.enabled and embed.ready %}<span class="badge badge-ok">включены</span>
+				{% elif embed and embed.enabled %}<span class="badge badge-warn">включены, файлы не готовы</span>
+				{% else %}<span class="badge">выключены</span>{% endif %}
+			</span>
+		</li>
+		<li>
+			<span>Справочники</span>
+			<span><a class="link" href="/refs">книги, разбор, ошибки</a></span>
+		</li>
+	</ul>
+	<p class="hint">Режимы модели и эмбеддингов переключаются на странице «Модель и обучение».</p>
+</section>
+{% endblock %}
