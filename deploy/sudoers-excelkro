@@ -1,0 +1,8 @@
+# Право служебного пользователя запустить разовую службу обновления.
+# Установка: sudo install -m 440 deploy/sudoers-excelkro /etc/sudoers.d/excelkro
+#
+# Разрешён только старт двух именованных служб: никаких других команд
+# под root веб-слой выполнить не может.
+excelkro ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block excelkro-update@check.service
+excelkro ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block excelkro-update@apply.service
+Defaults:excelkro !requiretty
