@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Фото товара — ExcelKROAutoFormat{% endblock %}
+{% block heading %}Фото товара{% endblock %}
+{% block subheading %}<p>Распознавание фото плюсующего товара и подбор строки сверки. Решение всегда за человеком: в файл ничего не пишется.</p>{% endblock %}
+
+{% block content %}
+<section class="card">
+	<h2>Состояние</h2>
+	<div class="stats">
+		<div class="stat">
+			<span class="stat-label">Распознавание</span>
+			<span class="stat-value">{% if vision.ready %}работает{% elif vision.enabled %}не готово{% else %}выключено{% endif %}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Модель</span>
+			<span class="stat-value">{{ vision.model }}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Ключ API</span>
+			<span class="stat-value">{% if vision.has_key %}введён {{ vision.key_tail }}{% else %}нет{% endif %}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Снимков в кеше</span>
+			<span class="stat-value">{{ vision.cached }}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Ответов человека</span>
+			<span class="stat-value">{{ vision.samples }}</span>
+		</div>
+	</div>
+	<p class="hint">{{ vision.reason }}</p>
+</section>
+
+<section class="card">
+	<h2>1. Разобрать фото</h2>
+	{% if jobs %}
+	<p class="card-sub">Выберите сверку, загруженную в этом сеансе, и приложите фото товара. Кандидатами становятся только строки с излишком.</p>
+	<form action="/vision/photos" method="post" enctype="multipart/form-data">
+		<div class="field">
+			<label for="vision-token">Сверка</label>
+			<select id="vision-token" name="token" required>
+				{% for job in jobs %}
+				<option value="{{ job.token }}"{% if job.token == token %} selected{% endif %}>{{ job.warehouse }} — {{ job.date }} (излишков строк: {{ job.surplus }})</option>
+				{% endfor %}
+			</select>
+		</div>
+		<div class="field">
+			<label for="vision-photos">Фото</label>
+			<input id="vision-photos" type="file" name="photos" accept="image/*" multiple required />
+			<p class="hint">До {{ vision_max_photo_mb }} МБ на снимок. Одно фото — один товар: так подбор точнее. Количество штук берётся из сверки, по фото оно не считается.</p>
+		</div>
+		<div class="actions"><button type="submit"{% if not vision.ready %} disabled{% endif %}>Разобрать фото</button></div>
+		{% if not vision.ready %}
+		<p class="hint">Сначала включите распознавание и введите ключ API в настройках ниже.</p>
+		{% endif %}
+	</form>
+	{% else %}
+	<p class="card-sub">Нет ни одной сверки в работе. Загрузите файл на странице «Сверка КРО», а затем вернитесь сюда: список строк с излишком берётся из разобранной сверки.</p>
+	{% endif %}
+</section>
+
+{% if results %}
+<section class="card">
+	<h2>2. Что распознано</h2>
+	<p class="card-sub">Отметьте строку, которой соответствует товар на фото. Ответ сохраняется как пример: по нему видно, где модель ошибается.</p>
+	{% for item in results %}
+	<div class="cluster">
+		<h3>{{ item.photo }}</h3>
+		{% if item.error %}
+		<p class="alert alert-warn">{{ item.error }}</p>
+		{% else %}
+		<p class="hint">
+			Прочитано на упаковке: {{ item.text or "текст не разобран" }}
+			{% if item.cached %} · ответ из кеша{% elif item.seconds %} · {{ item.seconds }} с{% endif %}
+		</p>
+		{% if item.comment %}<p class="hint">Замечание модели: {{ item.comment }}</p>{% endif %}
+		{% if item.candidates %}
+		<table class="grid">
+			<thead>
+				<tr><th>Строка</th><th>Позиция</th><th>Излишек, шт.</th><th>Цена</th><th>Уверенность</th><th>Схожесть</th><th>Источник</th><th></th></tr>
+			</thead>
+			<tbody>
+				{% for candidate in item.candidates %}
+				<tr>
+					<td>{{ candidate.row }}</td>
+					<td>{{ candidate.name }}</td>
+					<td>{{ candidate.diff }}</td>
+					<td>{{ "%.2f" | format(candidate.price) }}</td>
+					<td>{{ candidate.confidence }}</td>
+					<td>{{ candidate.ratio }}</td>
+					<td>{{ candidate.source }}</td>
+					<td>
+						<form action="/vision/confirm" method="post">
+							<input type="hidden" name="photo" value="{{ item.photo }}" />
+							<input type="hidden" name="digest" value="{{ item.digest }}" />
+							<input type="hidden" name="text" value="{{ item.text }}" />
+							<input type="hidden" name="row" value="{{ candidate.row }}" />
+							<input type="hidden" name="name" value="{{ candidate.name }}" />
+							<input type="hidden" name="source" value="{{ candidate.source }}" />
+							<button class="button-secondary" type="submit">Это он</button>
+						</form>
+					</td>
+				</tr>
+				{% endfor %}
+			</tbody>
+		</table>
+		<form action="/vision/confirm" method="post">
+			<input type="hidden" name="photo" value="{{ item.photo }}" />
+			<input type="hidden" name="digest" value="{{ item.digest }}" />
+			<input type="hidden" name="text" value="{{ item.text }}" />
+			<input type="hidden" name="row" value="0" />
+			<input type="hidden" name="name" value="" />
+			<input type="hidden" name="picked" value="off" />
+			<div class="actions"><button class="button-secondary" type="submit">Ни одна не подходит</button></div>
+		</form>
+		{% else %}
+		<p class="alert alert-warn">Подходящих строк среди излишков не нашлось.</p>
+		{% endif %}
+		{% endif %}
+	</div>
+	{% endfor %}
+</section>
+{% endif %}
+
+<section class="card">
+	<h2>3. Настройки</h2>
+	<p class="card-sub">Всё задаётся здесь и сохраняется в файле настроек программы. Править <code>.env</code> и перезапускать службу не нужно.</p>
+	<form action="/vision/settings" method="post">
+		<div class="field">
+			<label><input type="checkbox" name="enabled" value="on"{% if vision.enabled %} checked{% endif %} /> Включить распознавание фото</label>
+		</div>
+		<div class="field">
+			<label for="vision-key">Ключ API</label>
+			<input id="vision-key" type="password" name="api_key" autocomplete="off" placeholder="{% if vision.has_key %}ключ сохранён {{ vision.key_tail }} — оставьте пустым, чтобы не менять{% else %}вставьте ключ Google AI Studio{% endif %}" />
+			<p class="hint">Ключ берётся в Google AI Studio, бесплатный тир. Хранится на сервере в файле настроек, на странице целиком не показывается.</p>
+		</div>
+		<div class="field">
+			<label for="vision-model">Модель</label>
+			<input id="vision-model" type="text" name="model" value="{{ config.vision_model }}" />
+			<p class="hint">По умолчанию <code>gemini-flash-lite-latest</code>: самая щедрая по бесплатным лимитам.</p>
+		</div>
+		<div class="field">
+			<label for="vision-rows">Сколько строк-излишков показывать модели</label>
+			<input id="vision-rows" type="number" name="max_rows" min="1" max="200" value="{{ config.vision_max_rows }}" />
+		</div>
+		<div class="field">
+			<label for="vision-mb">Предельный размер снимка, МБ</label>
+			<input id="vision-mb" type="number" name="max_photo_mb" min="1" max="50" value="{{ config.vision_max_photo_mb }}" />
+		</div>
+		<div class="field">
+			<label for="vision-timeout">Ожидание ответа, секунды</label>
+			<input id="vision-timeout" type="number" name="timeout" min="5" max="300" value="{{ config.vision_timeout }}" />
+		</div>
+		<div class="field">
+			<label for="vision-retries">Повторов при сбое</label>
+			<input id="vision-retries" type="number" name="retries" min="0" max="5" value="{{ config.vision_retries }}" />
+		</div>
+		<div class="field">
+			<label for="vision-pause">Пауза между снимками, секунды</label>
+			<input id="vision-pause" type="text" name="pause_seconds" value="{{ config.vision_pause_seconds }}" />
+			<p class="hint">Бесплатный тир считает обращения в минуту: пауза не даёт упереться в лимит.</p>
+		</div>
+		<div class="field">
+			<label for="vision-floor">Порог запасного подбора по тексту</label>
+			<input id="vision-floor" type="text" name="text_min_score" value="{{ config.vision_text_min_score }}" />
+			<p class="hint">Если модель не назвала номер строки, имя подбирается по прочитанному тексту не ниже этой схожести.</p>
+		</div>
+		<div class="field">
+			<label for="vision-cache">Предел кеша ответов, снимков</label>
+			<input id="vision-cache" type="number" name="cache_limit" min="1" max="100000" value="{{ config.vision_cache_limit }}" />
+		</div>
+		<div class="actions"><button type="submit">Сохранить настройки</button></div>
+	</form>
+</section>
+
+<section class="card">
+	<h2>4. Обслуживание</h2>
+	<p class="card-sub">Проверка связи ничего не распознаёт: она только убеждается, что ключ и модель рабочие.</p>
+	<form action="/vision/check" method="post">
+		<div class="actions"><button class="button-secondary" type="submit">Проверить связь</button></div>
+	</form>
+	<form action="/vision/cache/clear" method="post" onsubmit="return confirm('Забыть все разобранные снимки?');">
+		<div class="actions"><button class="button-secondary" type="submit">Очистить кеш снимков</button></div>
+	</form>
+	<form action="/vision/key/clear" method="post" onsubmit="return confirm('Удалить ключ API из настроек?');">
+		<div class="actions"><button class="button-danger" type="submit">Удалить ключ API</button></div>
+	</form>
+</section>
+{% endblock %}
