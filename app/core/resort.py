@@ -17,6 +17,9 @@
 Режим «только чёткие пересорты» (`strict_brand_only=True`): в пару ставятся
 только позиции одного бренда, цена в подборе не участвует вовсе.
 
+Второй слой (`verify.py`) необязателен: модель судит только те пары,
+которые предложил слой 1, и не умеет добавлять свои.
+
 Зелёная заливка и метка `не-` — ручной тег по внешним данным. Программа его
 не ставит и не воспроизводит.
 """
@@ -44,6 +47,10 @@ DECISION_RESORT = "пересорт"
 DECISION_SURPLUS = "излишек"
 DECISION_SHORTAGE = "недостача"
 DECISION_NONE = "без разбора"
+
+# Источник попадания пары в список спорных.
+SOURCE_SIMILARITY = "схожесть"
+SOURCE_MODEL = "модель"
 
 # Границы отношения цены излишка к цене недостачи для пары разных брендов.
 # Значения по умолчанию; рабочие берутся из настроек (.env).
@@ -103,7 +110,11 @@ class Cluster:
 
 @dataclass
 class DoubtfulPair:
-    """Пара имён в полосе сомнения."""
+    """Пара имён в полосе сомнения.
+
+    Числа строк хранятся рядом: ответ человека сразу становится
+    примером для обучения модели.
+    """
 
     first_row: int
     first_name: str
@@ -113,6 +124,13 @@ class DoubtfulPair:
     linked: bool
     key: str = ""
     answered: bool = False
+    first_diff: float = 0.0
+    first_sum: float = 0.0
+    second_diff: float = 0.0
+    second_sum: float = 0.0
+    # Шанс модели, если второй слой работал.
+    model_prob: float | None = None
+    source: str = SOURCE_SIMILARITY
 
 
 def normalize(name: str, type_words: tuple[str, ...] = ()) -> str:
@@ -288,6 +306,34 @@ def pair_key(first_row: int, second_row: int) -> str:
     return f"{min(first_row, second_row)}-{max(first_row, second_row)}"
 
 
+def _doubtful(
+    plus: Item,
+    minus: Item,
+    ratio: float,
+    key: str,
+    answered: bool,
+    model_prob: float | None,
+    source: str,
+) -> DoubtfulPair:
+    """Спорная пара со всеми числами для режима обучения."""
+    return DoubtfulPair(
+        first_row=plus.row,
+        first_name=plus.name,
+        second_row=minus.row,
+        second_name=minus.name,
+        ratio=round(ratio, 3),
+        linked=False,
+        key=key,
+        answered=answered,
+        first_diff=plus.diff,
+        first_sum=round(plus.sum_diff, 2),
+        second_diff=minus.diff,
+        second_sum=round(minus.sum_diff, 2),
+        model_prob=round(model_prob, 3) if model_prob is not None else None,
+        source=source,
+    )
+
+
 def build_clusters(
     items: list[Item],
     threshold: float,
@@ -299,11 +345,16 @@ def build_clusters(
     price_gate_high: float = PRICE_GATE_HIGH,
     match_min_score: float = MATCH_MIN_SCORE,
     doubtful_limit: int = DOUBTFUL_LIMIT,
+    verifier=None,
 ) -> tuple[list[Cluster], list[DoubtfulPair]]:
     """Подбирает пары пересорта: каждый излишек к своей недостаче.
 
     При `strict_brand_only=True` разрешены только пары одного бренда,
     а цена не влияет ни на допуск пары, ни на её оценку.
+
+    `verifier` — второй слой. Он судит только готовые кандидаты: может
+    снять пару, усилить её оценку или отправить в спорные. Решение
+    человека (decisions) всегда главнее модели.
 
     Список спорных пар ограничен `doubtful_limit`: самые схожие пары идут
     в отчёт первыми.
@@ -314,6 +365,7 @@ def build_clusters(
 
     choices = decisions or {}
     doubtful: list[DoubtfulPair] = []
+    seen_doubtful: set[str] = set()
     ranked: list[tuple[float, int, int]] = []
     for p in plus:
         for m in minus:
@@ -333,22 +385,45 @@ def build_clusters(
                 score = brand_score(items[p], items[m])
             else:
                 score = pair_score(items[p], items[m])
+
+            # Второй слой: только для пар, по которым человек ещё не ответил.
+            model_prob: float | None = None
+            if verifier is not None and answer is not True:
+                verdict = verifier.check(items[p], items[m])
+                model_prob = verdict.prob
+                if not verdict.accept:
+                    continue
+                score += verdict.bonus
+                if verdict.gray and key not in seen_doubtful:
+                    seen_doubtful.add(key)
+                    doubtful.append(
+                        _doubtful(
+                            items[p],
+                            items[m],
+                            similarity(items[p].key, items[m].key),
+                            key,
+                            key in choices,
+                            model_prob,
+                            SOURCE_MODEL,
+                        )
+                    )
+
             if answer is True:
                 score += 10.0
             ranked.append((score, p, m))
             # Полная схожесть считается только для прошедших отбор пар.
             ratio = similarity(items[p].key, items[m].key)
-            if doubtful_min <= ratio <= doubtful_max:
+            if doubtful_min <= ratio <= doubtful_max and key not in seen_doubtful:
+                seen_doubtful.add(key)
                 doubtful.append(
-                    DoubtfulPair(
-                        first_row=items[p].row,
-                        first_name=items[p].name,
-                        second_row=items[m].row,
-                        second_name=items[m].name,
-                        ratio=round(ratio, 3),
-                        linked=False,
-                        key=key,
-                        answered=key in choices,
+                    _doubtful(
+                        items[p],
+                        items[m],
+                        ratio,
+                        key,
+                        key in choices,
+                        model_prob,
+                        SOURCE_SIMILARITY,
                     )
                 )
 
