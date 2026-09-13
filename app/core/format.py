@@ -10,7 +10,7 @@ from openpyxl.utils.cell import range_boundaries
 
 from . import prev as prev_book
 from . import style
-from .meta import EXTRA_ROW_OFFSET, SheetMeta
+from .meta import NET_ROW_OFFSET, SheetMeta
 from .meta import apply as apply_meta
 from .parse import (
     COL_BOOK,
@@ -42,10 +42,18 @@ MARK_NOT_MINUS = "не-"
 MARK_CREDIT = "перез"
 COL_CURRENCY_LABEL = 8   # H
 COL_GRAND_TOTAL = 9      # I
-# Ячейка неучтёнки в образце стоит в B1, над титулом.
-EXTRA_CELL_ROW = 1
-COL_EXTRA = COL_NAME     # B
-TITLE_TARGET_ROW = 2     # В образце титул стоит во второй строке.
+
+# Блок неучтёнки в образце занимает две строки над титулом:
+# строка 1 — «Неучтёнка» и её сумма, строка 2 — неподтверждённая.
+EXTRA_ROW = 1
+UNCONFIRMED_ROW = 2
+COL_EXTRA_LABEL = COL_NAME    # B
+COL_EXTRA_VALUE = COL_TRAIT   # C (коробка C:D)
+EXTRA_LABEL = "Неучтёнка"
+UNCONFIRMED_LABEL = "Неподтверждённая неучтёнка"
+# Строка итога с вычетом неучтёнки стоит под общим итогом.
+NET_LABEL = "С н. д/с:"
+TITLE_TARGET_ROW = 3     # В образце титул стоит в третьей строке.
 SCAN_COLUMNS = 12
 
 # В строке итога группы числа 1С не нужны: остаётся только сумма в J.
@@ -159,14 +167,40 @@ def drop_rows(sheet, rows: list[int]) -> None:
             sheet.merge_cells(moved)
 
 
+def insert_top_rows(sheet, count: int) -> None:
+    """Добавляет пустые строки в самом верху листа.
+
+    Нужно, когда в выгрузке 1С над титулом меньше строк, чем занимает
+    блок неучтёнки. Объединения снимаются и ставятся заново со сдвигом:
+    сам openpyxl их при вставке не пересчитывает.
+    """
+    if count <= 0:
+        return
+    ranges = [str(item) for item in sheet.merged_cells.ranges]
+    for text in ranges:
+        sheet.unmerge_cells(text)
+    sheet.insert_rows(1, count)
+    for text in ranges:
+        min_col, min_row, max_col, max_row = range_boundaries(text)
+        sheet.merge_cells(
+            start_row=min_row + count,
+            start_column=min_col,
+            end_row=max_row + count,
+            end_column=max_col,
+        )
+
+
 def shift_header(sheet, document: Document) -> Document:
-    """Шаг 3. Убирает строку «Организация:» и лишние строки сверху."""
+    """Шаг 3. Убирает строку «Организация:» и ставит титул на своё место.
+
+    В образце над титулом две строки блока неучтёнки, поэтому лишние
+    строки удаляются, а недостающие добавляются.
+    """
     rows: list[int] = []
     if document.organization_row:
         rows.append(document.organization_row)
 
-    # В образце над титулом остаётся одна пустая строка.
-    extra = document.title_row - TITLE_TARGET_ROW
+    extra = document.title_row - len(rows) - TITLE_TARGET_ROW
     row = 1
     while extra > 0 and row < document.title_row:
         if _row_is_empty(sheet, row) and row not in rows:
@@ -174,10 +208,15 @@ def shift_header(sheet, document: Document) -> Document:
             extra -= 1
         row += 1
 
-    if not rows:
-        return document
-    drop_rows(sheet, rows)
-    return parse(sheet)
+    if rows:
+        drop_rows(sheet, rows)
+        document = parse(sheet)
+
+    missing = TITLE_TARGET_ROW - document.title_row
+    if missing > 0:
+        insert_top_rows(sheet, missing)
+        document = parse(sheet)
+    return document
 
 
 def fill_header(sheet, document: Document, warehouse: str) -> int:
@@ -185,7 +224,7 @@ def fill_header(sheet, document: Document, warehouse: str) -> int:
 
     Всё пишется в строку со словом «Склад:», как в образце.
     """
-    row = document.warehouse_row or 4
+    row = document.warehouse_row or TITLE_TARGET_ROW + 2
     unmerge_cell(sheet, row, COL_TRAIT)
     cell = sheet.cell(row=row, column=COL_TRAIT)
     cell.value = warehouse
@@ -499,23 +538,45 @@ def write_grand_total(sheet, total_cells: list[str], row: int) -> None:
     style.style_grand_total_cell(cell)
 
 
-def write_extra_total(sheet, below_row: int) -> None:
-    """Шаг 6.5: ячейка неучтёнки в B1, как в образце.
+def write_extra_total(sheet, value: float | int | None = None) -> None:
+    """Шаг 6.5: блок неучтёнки над титулом, как в образце.
 
-    Значение остаётся пустым: сумму неучтёнки или пометку
-    «Неучтёнки нет» вписывают руками. Оформление — жёлтая заливка
-    и средняя рамка. Под общим итогом (`below_row`) ячейка не нужна:
-    там снимаются заливка и рамка.
+    Строка 1 — «Неучтёнка» и её сумма: значение задаётся в интерфейсе
+    программы. Строка 2 — «Неподтверждённая неучтёнка»: её ячейка
+    всегда остаётся пустой, сумму вписывают руками.
     """
-    unmerge_cell(sheet, EXTRA_CELL_ROW, COL_EXTRA)
-    cell = sheet.cell(row=EXTRA_CELL_ROW, column=COL_EXTRA)
-    if cell.value in (None, ""):
-        cell.value = None
-    style.style_extra_cell(cell)
+    rows = ((EXTRA_ROW, EXTRA_LABEL, value), (UNCONFIRMED_ROW, UNCONFIRMED_LABEL, None))
+    for row, label, cell_value in rows:
+        unmerge_cell(sheet, row, COL_EXTRA_LABEL)
+        label_cell = sheet.cell(row=row, column=COL_EXTRA_LABEL)
+        label_cell.value = label
+        style.style_extra_label_cell(label_cell)
 
-    below = sheet.cell(row=below_row, column=COL_GRAND_TOTAL)
-    below.value = None
-    style.clear(below)
+        unmerge_cell(sheet, row, COL_EXTRA_VALUE)
+        value_cell = sheet.cell(row=row, column=COL_EXTRA_VALUE)
+        value_cell.value = cell_value
+        style.style_extra_value_cell(value_cell)
+
+
+def write_net_total(sheet, total_row: int) -> int:
+    """Шаг 6.6: итог с вычетом неучтёнки строкой ниже общего итога.
+
+    Разницы в столбце J отрицательные, поэтому неучтёнка вычитается
+    сложением: `=I{итог}+C1`, как в образце. От этого числа считается
+    ставка продавцов.
+    """
+    row = total_row + NET_ROW_OFFSET
+    label = sheet.cell(row=row, column=COL_CURRENCY_LABEL)
+    label.value = NET_LABEL
+    label.font = Font(name="Arial", size=9)
+
+    unmerge_cell(sheet, row, COL_GRAND_TOTAL)
+    cell = sheet.cell(row=row, column=COL_GRAND_TOTAL)
+    total_letter = get_column_letter(COL_GRAND_TOTAL)
+    extra_letter = get_column_letter(COL_EXTRA_VALUE)
+    cell.value = f"={total_letter}{total_row}+{extra_letter}{EXTRA_ROW}"
+    style.style_net_total_cell(cell)
+    return row
 
 
 def format_workbook(
@@ -569,8 +630,10 @@ def format_workbook(
 
     if total_cells:
         write_grand_total(sheet, total_cells, header_row)
-    # Ячейка неучтёнки нужна всегда, даже если итогов групп нет.
-    write_extra_total(sheet, header_row + EXTRA_ROW_OFFSET)
+        # Строка «С н. д/с:» имеет смысл только при готовом общем итоге.
+        write_net_total(sheet, header_row)
+    # Блок неучтёнки нужен всегда, даже если итогов групп нет.
+    write_extra_total(sheet, sheet_meta.extra_value if sheet_meta is not None else None)
 
     if previous is not None:
         shares, notes = credit_shares(previous, result.comparison.credit_sum)
