@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Обновление — ExcelKROAutoFormat{% endblock %}
+{% block heading %}Обновление программы{% endblock %}
+{% block subheading %}
+<p class="hint">
+	Кнопка ставит на сервер последнюю версию из Git: код, зависимости и перезапуск
+	службы. Работа идёт в отдельной службе, поэтому перезапуск её не обрывает.
+	На время перезапуска (около 10 секунд) страницы недоступны.
+</p>
+{% endblock %}
+
+{% block head %}
+{% if status.busy %}<meta http-equiv="refresh" content="5" />{% endif %}
+{% endblock %}
+
+{% block content %}
+<section class="card">
+	<h2>Сейчас на сервере</h2>
+	<ul class="facts">
+		<li>Версия: <b>{{ status.version }}</b></li>
+		<li>Сборка: <b>{{ status.commit or "неизвестна" }}</b></li>
+		<li>Ветка обновлений: <b>{{ status.branch }}</b></li>
+		<li>Папка: <b>{{ status.app_dir }}</b></li>
+	</ul>
+
+	{% if not status.git %}
+	<p class="hint error">
+		Папка программы не является копией Git, поэтому обновление по кнопке
+		невозможно. Порядок перехода — в docs/09-ota-update.md.
+	</p>
+	{% endif %}
+
+	<form class="review-bar" method="post" action="/update/check">
+		<button type="submit" {% if status.busy or not status.git %}disabled{% endif %}>
+			Проверить обновления
+		</button>
+	</form>
+
+	<form
+		class="review-bar"
+		method="post"
+		action="/update/apply"
+		onsubmit="return confirm('Обновить программу и перезапустить службу? Незаконченные сверки будут потеряны.')"
+	>
+		<button type="submit" {% if status.busy or not status.git %}disabled{% endif %}>
+			Установить последнюю версию
+		</button>
+		{% if status.behind %}
+		<span class="badge">новых коммитов: {{ status.behind }}</span>
+		{% endif %}
+	</form>
+
+	<p class="hint">
+		Перед обновлением скачайте готовые файлы: при перезапуске незаконченные
+		сверки и ссылки на скачивание пропадают. Справочники, реестр, примеры
+		обучения и модель остаются на месте: они лежат вне папки программы.
+	</p>
+</section>
+
+<section class="card card-sub">
+	<h2>Состояние</h2>
+	{% if status.busy %}
+	<p class="hint">Идёт работа… страница обновляется сама каждые 5 секунд.</p>
+	{% endif %}
+
+	{% if state %}
+	<ul class="facts">
+		<li>Шаг: <b>{{ state.stage }}</b></li>
+		<li>Сообщение: {{ state.message }}</li>
+		<li>Режим: {{ "установка" if state.mode == "apply" else "проверка" }}</li>
+		<li>Начало: {{ state.started_at or "—" }}</li>
+		<li>Окончание: {{ state.finished_at or "—" }}</li>
+		{% if state.from or state.to %}
+		<li>Сборка: {{ state["from"] or "—" }} &rarr; {{ state.to or "—" }}</li>
+		{% endif %}
+	</ul>
+	{% if state.ok is false %}
+	<p class="hint error">Обновление не доведено до конца. Подробности — в журнале ниже.</p>
+	{% endif %}
+	{% else %}
+	<p class="hint">Обновление ещё не запускалось.</p>
+	{% endif %}
+
+	{% if status.log %}
+	<h3>Журнал последнего запуска</h3>
+	<pre class="log">{{ status.log }}</pre>
+	{% endif %}
+</section>
+{% endblock %}
