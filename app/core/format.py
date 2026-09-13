@@ -48,6 +48,11 @@ SCAN_COLUMNS = 12
 # В строке итога группы числа 1С не нужны: остаётся только сумма в J.
 TOTAL_ROW_CLEAR_COLUMNS = (COL_FACT, COL_BOOK, COL_DIFF, COL_DOC)
 
+EXCLUDED_NOTE = (
+    "Позиции с пометками «перез» и «не-» исключены из подбора пересортов: "
+    "их пары подбирались заново или остались без пары."
+)
+
 
 @dataclass
 class GroupResult:
@@ -62,6 +67,8 @@ class GroupResult:
     resort_pieces: float = 0.0
     single_rows: int = 0
     total_cell: str = ""
+    # Соответствие «старая строка → новая строка» после перестановки гроздей.
+    moved: dict[int, int] = field(default_factory=dict)
 
     @property
     def shortage_sum(self) -> float:
@@ -85,6 +92,10 @@ class Comparison:
     # Пары «продавец прошлой сверки — его доля перезачёта».
     shares: list[tuple[str, float]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def marked_rows(self) -> int:
+        return len(self.credits) + len(self.not_minus)
 
 
 @dataclass
@@ -241,10 +252,19 @@ def process_group(
     settings,
     decisions: dict[str, bool] | None = None,
     verifier=None,
+    skip_rows: set[int] | None = None,
 ) -> GroupResult:
-    """Шаг 4: грозди брендов и разбор расхождений."""
+    """Шаг 4: грозди брендов и разбор расхождений.
+
+    `skip_rows` — строки, которые не участвуют в подборе пересортов.
+    Так перезачёты и позиции «не-» выводятся из игры: их пара либо
+    прикрепляется к другому товару, либо остаётся без пары.
+    """
+    blocked = set(skip_rows or ())
     items = []
     for row in group.data_rows:
+        if row in blocked:
+            continue
         diff = _number(sheet.cell(row=row, column=COL_DIFF).value)
         if diff == 0:
             continue
@@ -282,7 +302,7 @@ def process_group(
         pair.first_row = moved.get(pair.first_row, pair.first_row)
         pair.second_row = moved.get(pair.second_row, pair.second_row)
 
-    result = GroupResult(name=group.name, clusters=clusters, doubtful=doubtful)
+    result = GroupResult(name=group.name, clusters=clusters, doubtful=doubtful, moved=moved)
     for cluster in clusters:
         if len(cluster.items) == 1:
             result.single_rows += 1
@@ -307,10 +327,15 @@ def process_group(
                 style.paint(sheet.cell(row=item.row, column=COL_DIFF), style.YELLOW)
                 style.paint(sheet.cell(row=item.row, column=COL_SUM_DIFF), style.YELLOW)
 
-    result.remainder_sum = sum(
+    result.remainder_sum = group_remainder(sheet, group)
+    return result
+
+
+def group_remainder(sheet, group: Group) -> float:
+    """Сумма остатка группы по столбцу J."""
+    return sum(
         _number(sheet.cell(row=row, column=COL_SUM_DIFF).value) for row in group.data_rows
     )
-    return result
 
 
 def _zero_sum(sheet, item, result: GroupResult) -> None:
@@ -335,19 +360,19 @@ def _paint_row(sheet, row: int, color: str) -> None:
         style.paint(sheet.cell(row=row, column=column), color)
 
 
-def compare_group(sheet, group: Group, previous, comparison: Comparison) -> None:
-    """Сравнение группы с предыдущей инвентаризацией.
+def plan_comparison(sheet, group: Group, previous, comparison: Comparison) -> list[dict]:
+    """Решения сравнения для группы — без записи в файл.
 
     Правила:
 
     * в прошлый раз позиция считалась в минус (сумма не обнулена), сейчас
-      выходит в плюс → пометка «перез», строка зелёная, сумма разницы 0,
-      а сумма прошлого списания идёт в таблицу «Перезачёт»;
-    * в прошлый раз позиция была «не+», сейчас в минусе → пометка «не-»,
-      строка зелёная, сумма разницы 0.
+      выходит в плюс → пометка «перез»;
+    * в прошлый раз позиция была «не+», сейчас в минусе → пометка «не-».
 
-    Позиции сопоставляются по полному названию товара.
+    Позиции сопоставляются по полному названию товара. Решения берутся до
+    разбора пересортов, чтобы помеченные строки в нём не участвовали.
     """
+    entries: list[dict] = []
     for row in group.data_rows:
         raw = sheet.cell(row=row, column=COL_NAME).value
         key = prev_book.name_key(raw)
@@ -358,32 +383,54 @@ def compare_group(sheet, group: Group, previous, comparison: Comparison) -> None
         diff = _number(sheet.cell(row=row, column=COL_DIFF).value)
         if diff > 0 and item.was_minus:
             mark = MARK_CREDIT
-            target = comparison.credits
             comparison.credit_sum += abs(item.sum_diff)
         elif diff < 0 and item.was_not_plus:
             mark = MARK_NOT_MINUS
-            target = comparison.not_minus
         else:
             continue
-
-        sum_cell = sheet.cell(row=row, column=COL_SUM_DIFF)
-        target.append(
+        entries.append(
             {
                 "group": group.name,
                 "row": row,
                 "name": str(raw or "").strip(),
                 "diff": diff,
-                "sum_before": round(_number(sum_cell.value), 2),
+                "sum_before": round(_number(sheet.cell(row=row, column=COL_SUM_DIFF).value), 2),
                 "prev_diff": item.diff,
                 "prev_sum": round(item.sum_diff, 2),
                 "mark": mark,
             }
         )
+    return entries
+
+
+def apply_comparison(
+    sheet,
+    entries: list[dict],
+    moved: dict[int, int] | None,
+    comparison: Comparison,
+) -> None:
+    """Запись пометок сравнения после перестановки строк."""
+    shift = moved or {}
+    for entry in entries:
+        row = shift.get(entry["row"], entry["row"])
+        entry["row"] = row
+        sum_cell = sheet.cell(row=row, column=COL_SUM_DIFF)
         unmerge_cell(sheet, row, COL_TRAIT)
-        sheet.cell(row=row, column=COL_TRAIT).value = mark
+        sheet.cell(row=row, column=COL_TRAIT).value = entry["mark"]
         # По обоим правилам разница суммы обнуляется.
         sum_cell.value = 0
         _paint_row(sheet, row, style.GREEN)
+        if entry["mark"] == MARK_CREDIT:
+            comparison.credits.append(entry)
+        else:
+            comparison.not_minus.append(entry)
+
+
+def compare_group(sheet, group: Group, previous, comparison: Comparison) -> list[dict]:
+    """Сравнение группы с предыдущей инвентаризацией одним шагом."""
+    entries = plan_comparison(sheet, group, previous, comparison)
+    apply_comparison(sheet, entries, None, comparison)
+    return entries
 
 
 def credit_shares(previous, credit_sum: float) -> tuple[list[tuple[str, float]], list[str]]:
@@ -460,8 +507,9 @@ def format_workbook(
     """Полный проход шагов 2–10.
 
     `previous` — разобранная предыдущая инвентаризация (модуль `prev`).
-    Если она передана, к каждой группе применяются правила сравнения,
-    а под блоком продавцов появляется мини-таблица «Перезачёт».
+    Если она передана, сначала берутся решения сравнения, потом идёт
+    подбор пересортов без помеченных строк, а под блоком продавцов
+    появляется мини-таблица «Перезачёт».
     """
     document = parse(sheet)
     document = shift_header(sheet, document)
@@ -481,11 +529,18 @@ def format_workbook(
     )
     total_cells: list[str] = []
     for group in document.groups:
-        group_result = process_group(sheet, group, settings, decisions, verifier)
-        highlight_rest(sheet, group)
-        # Сравнение идёт после обычного разбора: его пометки главнее.
+        # Сначала решения сравнения: перезачёты и «не-» не идут в пересорт.
+        entries: list[dict] = []
         if previous is not None:
-            compare_group(sheet, group, previous, result.comparison)
+            entries = plan_comparison(sheet, group, previous, result.comparison)
+        skip_rows = {entry["row"] for entry in entries}
+
+        group_result = process_group(sheet, group, settings, decisions, verifier, skip_rows)
+        if entries:
+            apply_comparison(sheet, entries, group_result.moved, result.comparison)
+            # После обнуления сумм помеченных строк остаток меняется.
+            group_result.remainder_sum = group_remainder(sheet, group)
+        highlight_rest(sheet, group)
         group_result.total_cell = write_group_total(sheet, group)
         total_cells.append(group_result.total_cell)
         result.groups.append(group_result)
@@ -497,6 +552,8 @@ def format_workbook(
         shares, notes = credit_shares(previous, result.comparison.credit_sum)
         result.comparison.shares = shares
         result.comparison.notes = notes
+        if result.comparison.marked_rows:
+            result.comparison.notes.append(EXCLUDED_NOTE)
 
     result.last_row = max(group.total_row for group in document.groups)
     # Шаг 10: ручные поля сверки пишутся до геометрии,
