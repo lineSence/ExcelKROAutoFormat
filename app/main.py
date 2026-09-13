@@ -136,6 +136,8 @@ async def _run_pipeline(
     folder: Path,
     decisions: dict[str, bool] | None = None,
     sheet_meta: SheetMeta | None = None,
+    prev_path: Path | None = None,
+    prev_name: str = "",
 ) -> PipelineResult:
     """Запускает обработку в отдельном потоке: сервер остаётся отзывчивым."""
     return await run_in_threadpool(
@@ -146,6 +148,8 @@ async def _run_pipeline(
         decisions,
         folder,
         sheet_meta,
+        prev_path,
+        prev_name,
     )
 
 
@@ -173,6 +177,7 @@ def index(request: Request):
 async def upload(
     request: Request,
     file: UploadFile = File(...),
+    prev: UploadFile | None = File(default=None),
     strict: str | None = Form(default=None),
     verify: str | None = Form(default=None),
 ):
@@ -201,8 +206,45 @@ async def upload(
         shutil.rmtree(folder, ignore_errors=True)
         return _error(request, EMPTY_UPLOAD, strict_on, verify_mode)
 
+    # Второй файл — предыдущая инвентаризация, он необязательный.
+    prev_path: Path | None = None
+    prev_name = ""
+    if prev is not None and (prev.filename or "").strip():
+        prev_name = _safe_name(prev.filename)
+        if not prev_name.lower().endswith(".xlsx"):
+            shutil.rmtree(folder, ignore_errors=True)
+            return _error(
+                request,
+                "Предыдущая сверка должна быть файлом .xlsx.",
+                strict_on,
+                verify_mode,
+            )
+        prev_path = folder / f"prev-{prev_name}"
+        try:
+            prev_size = await _save_upload(prev, prev_path, settings.max_upload_mb)
+        except UploadTooLarge:
+            shutil.rmtree(folder, ignore_errors=True)
+            return _error(
+                request,
+                f"Предыдущая сверка больше {settings.max_upload_mb} МБ.",
+                strict_on,
+                verify_mode,
+            )
+        if not prev_size:
+            prev_path, prev_name = None, ""
+
     try:
-        result = await _run_pipeline(source, name, strict_on, verify_mode, folder)
+        result = await _run_pipeline(
+            source,
+            name,
+            strict_on,
+            verify_mode,
+            folder,
+            None,
+            None,
+            prev_path,
+            prev_name,
+        )
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
         shutil.rmtree(folder, ignore_errors=True)
@@ -231,6 +273,12 @@ async def _rebuild(
     source = folder / old.source_path.name
     await run_in_threadpool(shutil.copyfile, old.source_path, source)
 
+    # Предыдущая сверка тоже не теряется при пересборке.
+    prev_path: Path | None = None
+    if old.prev_path is not None and old.prev_path.is_file():
+        prev_path = folder / old.prev_path.name
+        await run_in_threadpool(shutil.copyfile, old.prev_path, prev_path)
+
     try:
         result = await _run_pipeline(
             source,
@@ -240,6 +288,8 @@ async def _rebuild(
             folder,
             decisions,
             sheet_meta,
+            prev_path,
+            old.prev_name,
         )
     except (ParseError, RepairError) as error:
         shutil.rmtree(folder, ignore_errors=True)
@@ -386,6 +436,7 @@ def _result_page(
             "verify": _mode(verify),
             "refs": result.refs,
             "meta": result.sheet_meta.to_form(),
+            "comparison": result.comparison,
             "message": message,
         },
     )
