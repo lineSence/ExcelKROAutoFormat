@@ -568,17 +568,20 @@ def credit_shares(previous, credit_sum: float) -> tuple[list[tuple[str, float]],
     )
 
 
-def _count(value: float) -> float | int:
-    """Количество штук: целое без дробной части."""
-    number = float(value or 0)
-    return int(number) if number == int(number) else round(number, 2)
+def _count(value: float) -> int:
+    """Количество штук: всегда целое число.
+
+    В образце пересорты пишутся в виде «N» без нулей после запятой,
+    поэтому половинные штуки округляются до ближайшего целого.
+    """
+    return int(round(float(value or 0)))
 
 
 def write_resort_count(sheet, row: int, pieces: float) -> None:
     """Счётчик пересортов в строке итога группы, как в образце.
 
-    Подпись «Пересортов:» занимает D:E, число стоит в F.
-    Всё в средней рамке и по центру.
+    Подпись «Пересортов:» занимает D:E, число стоит в F
+    целым числом без нулей. Всё в средней рамке и по центру.
     """
     side = style.medium_side()
     unmerge_cell(sheet, row, COL_RESORT_LABEL)
@@ -594,6 +597,7 @@ def write_resort_count(sheet, row: int, pieces: float) -> None:
 
     value = sheet.cell(row=row, column=COL_RESORT_VALUE)
     value.value = _count(pieces)
+    value.number_format = style.COUNT_FORMAT
     value.font = Font(name="Arial", size=8, bold=True)
     value.alignment = style.Alignment(horizontal="center", vertical="center")
     value.border = style.Border(right=side, top=side, bottom=side)
