@@ -10,16 +10,26 @@ MODE="${1:-apply}"
 APP_DIR="${APP_DIR:-/opt/excelkro}"
 UPDATE_DIR="${UPDATE_DIR:-/var/lib/excelkro/update}"
 SERVICE_NAME="${SERVICE_NAME:-excelkro}"
-SERVICE_USER="${SERVICE_USER:-excelkro}"
 BRANCH="${UPDATE_BRANCH:-main}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/health}"
+
+UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+
+# Под каким пользователем работает служба сейчас. На серверах, где
+# установка делалась вручную, это root, а пользователя excelkro может не быть.
+# Если подставить в описание службы несуществующего пользователя, systemd
+# не запустит её вообще (код 217/USER), и страница перестанет открываться.
+SERVICE_USER="$(systemctl show -p User --value "${SERVICE_NAME}" 2>/dev/null)"
+SERVICE_USER="${SERVICE_USER:-root}"
+id -u "${SERVICE_USER}" >/dev/null 2>&1 || SERVICE_USER="root"
+SERVICE_GROUP="$(id -gn "${SERVICE_USER}" 2>/dev/null || echo "${SERVICE_USER}")"
 
 STATE="${UPDATE_DIR}/update-state.json"
 LOG="${UPDATE_DIR}/update.log"
 
 mkdir -p "${UPDATE_DIR}"
 : >"${LOG}"
-chown -R "${SERVICE_USER}:${SERVICE_USER}" "${UPDATE_DIR}" 2>/dev/null || true
+chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${UPDATE_DIR}" 2>/dev/null || true
 
 STARTED="$(date --iso-8601=seconds)"
 FROM=""
@@ -56,7 +66,7 @@ state() {
 	"behind": ${BEHIND}
 }
 JSON
-	chown "${SERVICE_USER}:${SERVICE_USER}" "${STATE}" "${LOG}" 2>/dev/null || true
+	chown "${SERVICE_USER}:${SERVICE_GROUP}" "${STATE}" "${LOG}" 2>/dev/null || true
 }
 
 fail() {
@@ -79,7 +89,7 @@ git config --global --get-all safe.directory | grep -qx "${APP_DIR}" ||
 	git config --global --add safe.directory "${APP_DIR}"
 
 state "проверка версии" run "Смотрим, есть ли новая версия"
-log "Режим: ${MODE}, ветка: ${BRANCH}"
+log "Режим: ${MODE}, ветка: ${BRANCH}, пользователь службы: ${SERVICE_USER}"
 
 git fetch --quiet origin "${BRANCH}" >>"${LOG}" 2>&1 || fail "Не удалось связаться с Git"
 FROM="$(git rev-parse --short HEAD)"
@@ -108,12 +118,18 @@ state "зависимости" run "Ставим пакеты из requirements.
 "${APP_DIR}/venv/bin/pip" install --quiet -r "${APP_DIR}/requirements.txt" >>"${LOG}" 2>&1 ||
 	fail "Не установились зависимости. Код уже обновлён до ${TO}"
 
-# Служба могла измениться вместе с кодом.
-if ! cmp -s "${APP_DIR}/deploy/app.service" "/etc/systemd/system/${SERVICE_NAME}.service"; then
-	log "Обновляем описание службы"
-	cp "${APP_DIR}/deploy/app.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+# Служба могла измениться вместе с кодом. Строки User и Group берутся не из
+# репозитория, а из живой службы: иначе обновление пересаживало бы программу
+# на пользователя, которого на сервере может не существовать.
+WANTED_UNIT="$(mktemp)"
+sed -e "s/^User=.*/User=${SERVICE_USER}/" -e "s/^Group=.*/Group=${SERVICE_GROUP}/" \
+	"${APP_DIR}/deploy/app.service" >"${WANTED_UNIT}"
+if ! cmp -s "${WANTED_UNIT}" "${UNIT_PATH}"; then
+	log "Обновляем описание службы (пользователь ${SERVICE_USER})"
+	cp "${WANTED_UNIT}" "${UNIT_PATH}"
 	systemctl daemon-reload >>"${LOG}" 2>&1
 fi
+rm -f "${WANTED_UNIT}"
 
 state "перезапуск" run "Перезапускаем службу ${SERVICE_NAME}"
 systemctl restart "${SERVICE_NAME}" >>"${LOG}" 2>&1 || fail "Служба не перезапустилась"
