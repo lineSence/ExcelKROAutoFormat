@@ -22,6 +22,75 @@
 	</div>
 </section>
 
+{% if refs and refs.uncertain %}
+<section class="card">
+	<h2>Подтверждение неуверенных значений</h2>
+	<p class="card-sub">
+		Справочники нашли данные, но совпадение неточное (уверенность {{ refs.confidence }}),
+		поэтому в файл они пока не внесены. Проверьте, при нужде поправьте и подтвердите.
+	</p>
+	{% if refs.notes %}
+	<ul>
+		{% for line in refs.notes %}
+		<li class="hint">{{ line }}</li>
+		{% endfor %}
+	</ul>
+	{% endif %}
+
+	<form method="post" action="/meta/{{ token }}">
+		<input type="hidden" name="strict" value="{% if strict %}on{% else %}off{% endif %}" />
+		<input type="hidden" name="verify" value="{{ verify }}" />
+		<input type="hidden" name="prev_date" value="{{ meta.prev_date }}" />
+		<input type="hidden" name="share_mode" value="{{ meta.share_mode }}" />
+		{% for seller in meta.sellers %}
+		<input type="hidden" name="sellers" value="{{ seller.name }}" />
+		<input type="hidden" name="seller_hours" value="{{ seller.hours }}" />
+		{% endfor %}
+		{% if meta.night %}<input type="hidden" name="night" value="on" />{% endif %}
+		<input type="hidden" name="night_name" value="{{ meta.night_name }}" />
+
+		<div class="field">
+			<label class="field-label" for="confirm-reason">Причина инвентаризации</label>
+			<input id="confirm-reason" type="text" name="reason" value="{{ meta.reason or refs.reason }}" />
+		</div>
+
+		<div class="field">
+			<label class="field-label" for="confirm-checked">Проверил</label>
+			<input id="confirm-checked" type="text" name="checked_by" value="{{ meta.checked_by or refs.checker }}" />
+		</div>
+
+		<div class="field">
+			<label class="field-label" for="confirm-admin">Администратор</label>
+			<input id="confirm-admin" type="text" name="admin" value="{{ meta.admin or refs.admin }}" />
+		</div>
+
+		<div class="field">
+			<span class="field-label">Ревизоры</span>
+			<div class="row-list" data-rows="auditors">
+				{% for name in meta.auditors or refs.auditors %}
+				<div class="row-item" data-row>
+					<input type="text" name="auditors" value="{{ name }}" placeholder="Фамилия Имя Отчество" />
+					<button class="button-secondary button-small" type="button" data-row-remove title="Убрать строку">✕</button>
+				</div>
+				{% endfor %}
+				<div class="row-item" data-row>
+					<input type="text" name="auditors" value="" placeholder="Фамилия Имя Отчество" />
+					<button class="button-secondary button-small" type="button" data-row-remove title="Убрать строку">✕</button>
+				</div>
+			</div>
+			<div class="actions">
+				<button class="button-secondary button-small" type="button" data-row-add="auditors">Добавить ревизора</button>
+			</div>
+		</div>
+
+		<div class="review-bar">
+			<span class="hint">Не подтверждать — просто не нажимать кнопку: в файле поля останутся пустыми.</span>
+			<button type="submit">Подтвердить и внести в файл</button>
+		</div>
+	</form>
+</section>
+{% endif %}
+
 {% if refs %}
 <section class="card">
 	<h2>Данные справочников</h2>
@@ -32,6 +101,12 @@
 		<li><span>Проверяющий</span><span>{{ refs.checker or "—" }}</span></li>
 		<li><span>Ревизоры</span><span>{% if refs.auditors %}{{ refs.auditors | join(", ") }}{% else %}не определены{% endif %}</span></li>
 	</ul>
+	{% if refs.uncertain %}
+	<p class="hint">
+		Эти значения пока не в файле: совпадение неточное, нужно подтверждение выше.
+		В файл внесён только проверяющий.
+	</p>
+	{% endif %}
 	{% if refs.counts %}
 	<p class="hint">
 		В справочниках прочитано: магазинов в планировании {{ refs.counts.plans or 0 }},
