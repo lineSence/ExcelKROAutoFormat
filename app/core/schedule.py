@@ -20,9 +20,11 @@
 3. всё остальное — название магазина или пометка о работе («сбор товара»,
    «открытие», «+1 продавца»).
 
-Магазин в ячейке стоит не всегда первым и не всегда есть вовсе: при
-многодневном переучёте его пишут один раз, а дальше только фамилии,
-поэтому название продолжается с предыдущего дня того же столбца.
+Магазин в ячейке стоит не всегда первым и не всегда есть вовсе. Его пишут
+один раз, а дальше в ячейках ниже остаются только фамилии — так ведут
+многодневные переучёты и ночные инвентаризации, где сверху стоит магазин,
+а снизу — люди. Поэтому название продолжается вниз по столбцу, а найденные
+фамилии относятся и к своей дате, и к дате той ячейки, где был магазин.
 
 Важно о чтении: книга открывается в режиме `read_only`, где обращение
 `sheet.cell(...)` каждый раз заново разбирает весь XML листа, поэтому лист
@@ -257,6 +259,29 @@ def _is_header(rows: list[list], row: int) -> bool:
 # --- Разбор листа графика -------------------------------------------------
 
 
+def _remember(
+    visits: dict[tuple[str, dt.date], tuple[str, tuple[str, ...]]],
+    store: str,
+    day: dt.date,
+    admin: str,
+    found: list[str],
+) -> None:
+    """Добавляет запись графика, собирая людей из всех её ячеек.
+
+    Один магазин в один день встречается у двух администраторов и в
+    соседних строках (ночная инвентаризация), поэтому фамилии копятся.
+    """
+    known = visits.get((store, day))
+    if known is None:
+        visits[(store, day)] = (admin, tuple(found))
+        return
+    merged = list(known[1])
+    for name in found:
+        if name not in merged:
+            merged.append(name)
+    visits[(store, day)] = (known[0] or admin, tuple(merged))
+
+
 def read_schedule(path: str | Path) -> tuple[
     dict[tuple[str, dt.date], tuple[str, tuple[str, ...]]],
     dict[str, list[str]],
@@ -281,8 +306,9 @@ def read_schedule(path: str | Path) -> tuple[
         )
 
     admins: dict[int, str] = {}
-    # При многодневном переучёте магазин пишут только в первый день.
-    carried: dict[int, str] = {}
+    # Магазин пишут только в первый день: при многодневном переучёте и при
+    # ночной инвентаризации, когда сверху название, а снизу фамилии.
+    carried: dict[int, tuple[str, dt.date]] = {}
     for row in range(1, len(rows) + 1):
         day = _as_date(_at(rows, row, 1))
         if day is None:
@@ -303,22 +329,19 @@ def read_schedule(path: str | Path) -> tuple[
                     continue
                 title = text
                 break
-            if not title:
-                title = carried.get(column, "")
+            if title:
+                origin = day
+            else:
+                # Фамилии без названия: магазин взят из ячейки выше по столбцу.
+                title, origin = carried.get(column, ("", day))
             store = normalize_store(title)
             if not store:
                 continue
-            carried[column] = title
-            known = visits.get((store, day))
-            if known is None:
-                visits[(store, day)] = (admin, tuple(found))
-                continue
-            # Один магазин у двух администраторов: собираем всех людей.
-            merged = list(known[1])
-            for name in found:
-                if name not in merged:
-                    merged.append(name)
-            visits[(store, day)] = (known[0] or admin, tuple(merged))
+            carried[column] = (title, origin)
+            _remember(visits, store, day, admin, found)
+            if origin != day and found:
+                # Ночная инвентаризация: фамилии относятся и к дате магазина.
+                _remember(visits, store, origin, admin, found)
     return visits, people
 
 
