@@ -17,6 +17,12 @@
 
 * в планировании строка недель и столбец магазинов ищутся по содержимому,
   а не берутся по номеру;
+* недели в книге планирования идут подряд за несколько лет (в реальной
+  книге это больше 250 столбцов), а год подписан в строке над шапкой не у
+  каждого столбца, поэтому год читается по столбцу с продолжением от
+  последнего известного;
+* подписи недель бывают сокращёнными («Янв 31- Февр 6», «Авг 31 - Сент 06»),
+  поэтому месяц определяется по началу слова;
 * в графике фамилии ревизоров могут быть и внутри ячейки магазина через
   перевод строки, и в строках ниже даты — читаются оба варианта.
 
@@ -48,8 +54,11 @@ logger = logging.getLogger("excelkro.refs")
 SCHEDULE_SHEET = "Переучеты"
 
 # Страховка от гигантских листов: дальше этих пределов данных не бывает.
+# Книга планирования ведётся годами подряд, столбцов в ней несколько сотен,
+# поэтому запас по ширине большой: при меньшем пределе последние годы
+# просто не читались и причина оставалась пустой.
 MAX_ROWS = 20000
-MAX_COLUMNS = 200
+MAX_COLUMNS = 1000
 
 # Сколько строк под датой в графике относятся к этой же дате.
 BLOCK_ROWS = 8
@@ -67,6 +76,7 @@ PLANNING_SKIP = (
 # Листы книги графика, где лежат полные ФИО и телефоны.
 NAME_SHEETS = ("тлф", "тлф помощников", "график помощников", "подотчетники")
 
+# Полные названия месяцев и сокращения, которые встречаются в шапках недель.
 MONTHS = {
     "январь": 1,
     "февраль": 2,
@@ -80,11 +90,28 @@ MONTHS = {
     "октябрь": 10,
     "ноябрь": 11,
     "декабрь": 12,
+    "янв": 1,
+    "февр": 2,
+    "фев": 2,
+    "мар": 3,
+    "апр": 4,
+    "мая": 5,
+    "июн": 6,
+    "июл": 7,
+    "авг": 8,
+    "сент": 9,
+    "сен": 9,
+    "окт": 10,
+    "нояб": 11,
+    "ноя": 11,
+    "дек": 12,
 }
+# Сначала длинные ключи: «февраль» не должен определяться по «фев».
+_MONTH_KEYS = sorted(MONTHS, key=len, reverse=True)
 
-# «Январь 10-16», «Май 1 - 7», «Июнь 29-5»
+# «Январь 10-16», «Май 1 - 7», «Июнь 29-5», «Янв 31- Февр 6», «Сент 25-Окт 1»
 WEEK = re.compile(
-    r"([А-Яа-яЁё]+)\s*(\d{1,2})\s*[-–]\s*(\d{1,2})",
+    r"([А-Яа-яЁё]+)\.?\s*(\d{1,2})\s*[-–]\s*(\d{1,2})",
 )
 # Полное ФИО: три слова с большой буквы.
 FULL_NAME = re.compile(
@@ -176,6 +203,21 @@ def similarity(first: str, second: str) -> float:
     return SequenceMatcher(None, first, second).ratio()
 
 
+def _month_number(word: object) -> int:
+    """Номер месяца по названию, в том числе сокращённому.
+
+    В шапках недель месяц пишут как угодно: «Сентябрь», «Сент», «Сен».
+    Поэтому сравнение идёт по началу слова, от длинных названий к коротким.
+    """
+    text = _clean(word).lower().replace("ё", "е")
+    if text in MONTHS:
+        return MONTHS[text]
+    for key in _MONTH_KEYS:
+        if text.startswith(key):
+            return MONTHS[key]
+    return 0
+
+
 def _as_date(value: object) -> dt.date | None:
     if isinstance(value, dt.datetime):
         return value.date()
@@ -207,7 +249,9 @@ def _matrix(sheet, max_rows: int = MAX_ROWS, max_columns: int = MAX_COLUMNS) -> 
     читалась бы часами. Здесь лист читается ровно один раз.
     """
     rows: list[list] = []
+    clipped = False
     for number, values in enumerate(sheet.iter_rows(values_only=True), start=1):
+        clipped = clipped or len(values) > max_columns
         rows.append(list(values[:max_columns]))
         if number >= max_rows:
             logger.warning(
@@ -216,6 +260,12 @@ def _matrix(sheet, max_rows: int = MAX_ROWS, max_columns: int = MAX_COLUMNS) -> 
                 max_rows,
             )
             break
+    if clipped:
+        logger.warning(
+            "Лист «%s» обрезан на %s столбцах: часть недель не прочитана",
+            getattr(sheet, "title", "?"),
+            max_columns,
+        )
     return rows
 
 
@@ -256,10 +306,40 @@ def _week_row(rows: list[list], limit: int = 12) -> int:
     return best_row if best_count >= 2 else 0
 
 
+def _year_at(rows: list[list], header_row: int, column: int) -> int:
+    """Год, подписанный над шапкой в этом столбце. 0 — подписи нет."""
+    for row in range(1, max(header_row, 1)):
+        value = _at(rows, row, column)
+        if isinstance(value, (int, float)) and 2000 < int(value) < 2100:
+            return int(value)
+        match = re.search(r"20\d{2}", _clean(value))
+        if match:
+            return int(match.group(0))
+    return 0
+
+
+def _sheet_year(rows: list[list], header_row: int, default: int) -> int:
+    """Год первых столбцов листа: самая левая подпись года над шапкой.
+
+    Подпись года стоит не в начале листа, а над первым столбцом недель, и у
+    разных управляющих этот столбец разный, поэтому ищем по всей ширине.
+    """
+    for column in range(1, _width(rows) + 1):
+        year = _year_at(rows, header_row, column)
+        if year:
+            return year
+    return default
+
+
 def _week_columns(
     rows: list[list], year: int, header_row: int
 ) -> dict[int, tuple[dt.date, dt.date]]:
-    """Столбцы недель: номер столбца -> (первый день, последний день)."""
+    """Столбцы недель: номер столбца -> (первый день, последний день).
+
+    Год берётся из подписи над столбцом, если она есть. Там, где подписи
+    нет, год продолжается от предыдущего столбца и увеличивается на переходе
+    через январь: недели в книге идут подряд по календарю.
+    """
     spans: dict[int, tuple[dt.date, dt.date]] = {}
     current_year = year
     last_month = 0
@@ -268,10 +348,15 @@ def _week_columns(
         match = WEEK.search(label)
         if not match:
             continue
-        month = MONTHS.get(match.group(1).strip().lower().replace("ё", "е"))
+        month = _month_number(match.group(1))
         if not month:
             continue
-        if month < last_month:
+        marked = _year_at(rows, header_row, column)
+        if marked:
+            if marked != current_year:
+                last_month = 0
+            current_year = marked
+        elif month < last_month:
             # Новый год начался: столбцы идут подряд по календарю.
             current_year += 1
         last_month = month
@@ -312,18 +397,6 @@ def _store_column(
         if count > best_count:
             best_column, best_count = column, count
     return best_column or 2
-
-
-def _sheet_year(rows: list[list], header_row: int, default: int) -> int:
-    for row in range(1, max(header_row, 1) + 1):
-        for column in range(1, min(_width(rows), 20) + 1):
-            value = _at(rows, row, column)
-            if isinstance(value, (int, float)) and 2000 < int(value) < 2100:
-                return int(value)
-            match = re.search(r"20\d{2}", _clean(value))
-            if match:
-                return int(match.group(0))
-    return default
 
 
 def read_planning(path: str | Path) -> dict[str, list[tuple[dt.date, dt.date, str, str]]]:
