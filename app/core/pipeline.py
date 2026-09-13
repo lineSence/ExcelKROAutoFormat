@@ -13,12 +13,13 @@ from pathlib import Path
 import openpyxl
 
 from ..config import Settings
+from . import claims as claims_book
 from . import prev as prev_book
 from . import refs, report
 from .format import format_workbook, output_filename
 from .guard import check_archive
 from .meta import SheetMeta
-from .parse import ParseError, warehouse_from_filename
+from .parse import ParseError, parse, warehouse_from_filename
 from .refs_sync import local_paths
 from .repair import RepairError, repair
 
@@ -53,6 +54,9 @@ class PipelineResult:
     comparison: dict = field(default_factory=dict)
     prev_path: Path | None = None
     prev_name: str = ""
+    # Заявки реестра расхождений и подтверждения человека по ним.
+    claims: dict = field(default_factory=dict)
+    claim_decisions: dict[str, bool] | None = None
 
 
 def work_dir(settings: Settings) -> Path:
@@ -309,6 +313,34 @@ def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) ->
     }
 
 
+def load_claims(
+    sheet,
+    warehouse: str,
+    settings: Settings,
+) -> tuple[list, list[str], dt.date | None]:
+    """Заявки реестра расхождений по текущему магазину.
+
+    Дата инвентаризации нужна до форматирования, поэтому титул читается
+    отдельно. Сбой реестра не должен мешать выдаче файла сверки.
+    """
+    try:
+        day = doc_day(parse(sheet).doc_date)
+    except Exception:  # noqa: BLE001
+        day = None
+    try:
+        demands, notes = claims_book.load_demands(
+            settings.refs_dir,
+            warehouse,
+            day,
+            settings.refs_match_min_score,
+            settings.type_words,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Реестр расхождений не применён")
+        return [], [f"Сбой при работе с реестром: {type(error).__name__}: {error}"], day
+    return demands, notes, day
+
+
 def read_previous(
     prev_path: str | Path,
     prev_name: str,
@@ -348,6 +380,7 @@ def process(
     sheet_meta: SheetMeta | None = None,
     prev_path: str | Path | None = None,
     prev_name: str = "",
+    claim_decisions: dict[str, bool] | None = None,
 ) -> PipelineResult:
     """Обрабатывает файл сверки и возвращает путь к готовому файлу.
 
@@ -356,6 +389,8 @@ def process(
     `sheet_meta` — ручные поля сверки (причина, продавцы, подписи).
     `prev_path` — файл предыдущей инвентаризации для сравнения (необязательно).
     Его дата из титула становится датой предыдущей инвентаризации в сверке.
+    `claim_decisions` — подтверждённые заявки реестра расхождений: без
+    подтверждения пометки в файл не пишутся.
     """
     settings = settings or Settings.load()
     folder = Path(folder) if folder is not None else work_dir(settings)
@@ -377,6 +412,9 @@ def process(
         # Дата предыдущей инвентаризации берётся из самого файла.
         sheet_meta = apply_prev_date(sheet_meta, previous, prev_problems)
 
+    # Реестр расхождений читается до форматирования: нужны заявки и дата.
+    claim_demands, claim_problems, _ = load_claims(sheet, warehouse, settings)
+
     format_result = format_workbook(
         sheet,
         warehouse,
@@ -384,7 +422,13 @@ def process(
         decisions,
         sheet_meta,
         previous,
+        claim_demands,
+        claim_decisions,
     )
+
+    claims_info = dict(format_result.claims or {})
+    claims_info["problems"] = list(claim_problems)
+    claims_info["book"] = claims_book.status(settings.refs_dir)
 
     comparison: dict = {}
     if prev_path:
@@ -442,4 +486,6 @@ def process(
         comparison=comparison,
         prev_path=Path(prev_path) if prev_path else None,
         prev_name=prev_name,
+        claims=claims_info,
+        claim_decisions=dict(claim_decisions or {}),
     )
