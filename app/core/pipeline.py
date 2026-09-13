@@ -26,6 +26,11 @@ logger = logging.getLogger("excelkro.pipeline")
 
 DATE_SHAPES = ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d")
 
+NO_PREV_DATE = (
+    "Дата предыдущей инвентаризации не определена из титула загруженного файла: "
+    "поле осталось как было — впишите дату вручную."
+)
+
 
 @dataclass
 class PipelineResult:
@@ -115,6 +120,39 @@ def doc_day(value: object) -> dt.date | None:
         except ValueError:
             continue
     return None
+
+
+def prev_date_text(previous) -> str:
+    """Дата из титула загруженного файла предыдущей инвентаризации.
+
+    Возвращает вид `ГГГГ-ММ-ДД`: так дата сразу показывается в поле формы
+    и понимается шагом записи в файл.
+    """
+    day = doc_day(getattr(previous, "date", "") or "")
+    return day.isoformat() if day else ""
+
+
+def apply_prev_date(
+    sheet_meta: SheetMeta | None,
+    previous,
+    notes: list[str],
+) -> SheetMeta | None:
+    """Ставит дату предыдущей инвентаризации по загруженному файлу.
+
+    Дата из самого документа точнее ручного ввода, поэтому она заменяет
+    значение в ручных полях и показывается в форме на странице результата.
+    Если дата в титуле не разобрана, ручное значение остаётся нетронутым.
+    """
+    if previous is None:
+        return sheet_meta
+    text = prev_date_text(previous)
+    if not text:
+        notes.append(NO_PREV_DATE)
+        return sheet_meta
+    meta = sheet_meta if sheet_meta is not None else SheetMeta()
+    meta.prev_date = text
+    logger.info("Дата предыдущей инвентаризации взята из файла: %s", text)
+    return meta
 
 
 def _closest_store(store: str, names: list[str]) -> tuple[str, float]:
@@ -317,6 +355,7 @@ def process(
     сохранил загруженный файл, чтобы лишние папки не оставались на диске.
     `sheet_meta` — ручные поля сверки (причина, продавцы, подписи).
     `prev_path` — файл предыдущей инвентаризации для сравнения (необязательно).
+    Его дата из титула становится датой предыдущей инвентаризации в сверке.
     """
     settings = settings or Settings.load()
     folder = Path(folder) if folder is not None else work_dir(settings)
@@ -335,6 +374,8 @@ def process(
     prev_problems: list[str] = []
     if prev_path:
         previous, prev_problems = read_previous(prev_path, prev_name, folder, settings)
+        # Дата предыдущей инвентаризации берётся из самого файла.
+        sheet_meta = apply_prev_date(sheet_meta, previous, prev_problems)
 
     format_result = format_workbook(
         sheet,
@@ -353,6 +394,7 @@ def process(
         comparison["items"] = len(previous.items) if previous is not None else 0
         comparison["sellers"] = len(previous.sellers) if previous is not None else 0
         comparison["problems"] = prev_problems
+        comparison["prev_date"] = sheet_meta.prev_date if sheet_meta is not None else ""
 
     try:
         refs_info = fill_refs(
