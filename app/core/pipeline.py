@@ -7,12 +7,13 @@ import logging
 import shutil
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import openpyxl
 
 from ..config import Settings
+from . import prev as prev_book
 from . import refs, report
 from .format import format_workbook, output_filename
 from .guard import check_archive
@@ -43,6 +44,10 @@ class PipelineResult:
     refs: dict = field(default_factory=dict)
     # Ручные поля сверки: нужны при каждой пересборке файла.
     sheet_meta: SheetMeta = field(default_factory=SheetMeta)
+    # Сравнение с предыдущей инвентаризацией и её файл.
+    comparison: dict = field(default_factory=dict)
+    prev_path: Path | None = None
+    prev_name: str = ""
 
 
 def work_dir(settings: Settings) -> Path:
@@ -266,6 +271,36 @@ def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) ->
     }
 
 
+def read_previous(
+    prev_path: str | Path,
+    prev_name: str,
+    folder: Path,
+    settings: Settings,
+) -> tuple[object | None, list[str]]:
+    """Готовит предыдущую инвентаризацию к сравнению.
+
+    Сбой второго файла не должен мешать обычной обработке сверки.
+    """
+    try:
+        check_archive(prev_path, settings.max_unpacked_mb)
+        repaired = repair(prev_path, folder / "prev_repaired.xlsx", settings.repair_mode)
+        previous = prev_book.read(
+            repaired,
+            prev_name or Path(prev_path).name,
+            settings.sheet_name,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Предыдущая сверка не прочитана")
+        return None, [
+            f"Предыдущая сверка не прочитана: {type(error).__name__}: {error}"
+        ]
+    if not previous.items:
+        return previous, [
+            "В предыдущей сверке не найдено ни одной позиции: сравнивать нечего."
+        ]
+    return previous, []
+
+
 def process(
     input_path: str | Path,
     original_filename: str,
@@ -273,12 +308,15 @@ def process(
     decisions: dict[str, bool] | None = None,
     folder: str | Path | None = None,
     sheet_meta: SheetMeta | None = None,
+    prev_path: str | Path | None = None,
+    prev_name: str = "",
 ) -> PipelineResult:
     """Обрабатывает файл сверки и возвращает путь к готовому файлу.
 
     `folder` — готовая рабочая папка. Веб-слой передаёт ту же папку, в которую
     сохранил загруженный файл, чтобы лишние папки не оставались на диске.
     `sheet_meta` — ручные поля сверки (причина, продавцы, подписи).
+    `prev_path` — файл предыдущей инвентаризации для сравнения (необязательно).
     """
     settings = settings or Settings.load()
     folder = Path(folder) if folder is not None else work_dir(settings)
@@ -293,7 +331,28 @@ def process(
     if not warehouse:
         raise ParseError("Из имени файла не вышло получить имя склада.")
 
-    format_result = format_workbook(sheet, warehouse, settings, decisions, sheet_meta)
+    previous = None
+    prev_problems: list[str] = []
+    if prev_path:
+        previous, prev_problems = read_previous(prev_path, prev_name, folder, settings)
+
+    format_result = format_workbook(
+        sheet,
+        warehouse,
+        settings,
+        decisions,
+        sheet_meta,
+        previous,
+    )
+
+    comparison: dict = {}
+    if prev_path:
+        comparison = asdict(format_result.comparison)
+        comparison["credit_sum"] = round(float(comparison.get("credit_sum") or 0.0), 2)
+        comparison["file_name"] = comparison.get("file_name") or prev_name
+        comparison["items"] = len(previous.items) if previous is not None else 0
+        comparison["sellers"] = len(previous.sellers) if previous is not None else 0
+        comparison["problems"] = prev_problems
 
     try:
         refs_info = fill_refs(
@@ -338,4 +397,7 @@ def process(
         decisions=dict(decisions or {}),
         refs=refs_info,
         sheet_meta=sheet_meta or SheetMeta(),
+        comparison=comparison,
+        prev_path=Path(prev_path) if prev_path else None,
+        prev_name=prev_name,
     )

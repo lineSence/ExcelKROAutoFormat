@@ -17,6 +17,15 @@
 	</div>
 
 	<div class="field">
+		<label class="field-label" for="prev">Предыдущая инвентаризация (необязательно)</label>
+		<input id="prev" type="file" name="prev" accept=".xlsx" />
+		<p class="hint">
+			Готовый файл прошлой сверки того же склада. Нужен для пометок
+			«перез» и «не-» и таблицы «Перезачёт».
+		</p>
+	</div>
+
+	<div class="field">
 		<span class="field-label">Подбор пар</span>
 		<label class="choice">
 			<input type="checkbox" name="strict" value="on" {% if strict %}checked{% endif %} />
