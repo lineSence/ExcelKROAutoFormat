@@ -19,14 +19,18 @@ ROWS = [
 
 @dataclass
 class FakeSettings:
-    """Настройки программы в объёме, нужном модулю зрения."""
+    """Настройки программы в объёме, нужном модулю зрения.
 
-    runtime_path: str
+    Файл переключателей лежит рядом с базой примеров, поэтому здесь задаётся
+    тот же `train_store_path`, что и в настройках программы.
+    """
+
+    train_store_path: str
     type_words: tuple = field(default=("жидкость", "картридж"))
 
 
 def make_settings(tmp_path) -> FakeSettings:
-    return FakeSettings(runtime_path=str(tmp_path / "data" / "runtime.json"))
+    return FakeSettings(train_store_path=str(tmp_path / "data" / "train-samples.jsonl"))
 
 
 def items(settings) -> list:
@@ -167,7 +171,7 @@ def test_api_version_is_remembered(tmp_path):
     turn_on(settings)
     vision._remember_scope(settings, "GIGACHAT_API_B2B")
     assert vision.load_config(settings)["vision_scope"] == "GIGACHAT_API_B2B"
-    # Чужое значение настройки не портит.
+    # Чужое значение настройку не портит.
     vision._remember_scope(settings, "НЕТ_ТАКОЙ")
     assert vision.load_config(settings)["vision_scope"] == "GIGACHAT_API_B2B"
 
