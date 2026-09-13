@@ -1,9 +1,9 @@
 """Веб-слой: загрузка, спорные пары, ручные поля, справочники, обучение.
 
-Тяжёлая работа (ремонт, разбор, справочники, обучение) выполняется в
-отдельном потоке через `run_in_threadpool`. Внутри `async def` обработчика
-нельзя вызывать блокирующий код напрямую: на время разбора встаёт весь
-сервер, и даже /health не отвечает.
+Тяжёлая работа (ремонт, разбор, справочники, обучение, распознавание
+фото) выполняется в отдельном потоке через `run_in_threadpool`. Внутри
+`async def` обработчика нельзя вызывать блокирующий код напрямую: на время
+разбора встаёт весь сервер, и даже /health не отвечает.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from .config import Settings
 from .core import claims as claims_book
 from .core import learning, refs_sync, runtime
 from .core import update as ota
+from .core import vision as vision_core
 from .core.guard import UploadTooLarge
 from .core.meta import SheetMeta
 from .core.parse import ParseError
@@ -506,6 +507,232 @@ def download(token: str):
 def cleanup(token: str) -> dict:
     _forget(token)
     return {"status": "ok"}
+
+
+# --- Фото плюсующего товара ------------------------------------------------
+
+
+def _vision_items(result: PipelineResult) -> list:
+    """Позиции сверки для подбора по фото."""
+    return vision_core.items_from_rows(result.clusters, tuple(settings.type_words))
+
+
+def _vision_page(
+    request: Request,
+    message: str = "",
+    error: str = "",
+    results: list | None = None,
+    token: str = "",
+    status_code: int = 200,
+) -> HTMLResponse:
+    """Страница распознавания: состояние, снимки и все настройки."""
+    base = _base()
+    config = vision_core.load_config(base)
+    jobs = []
+    for key, result in RESULTS.items():
+        if not result.output_path.is_file():
+            continue
+        jobs.append(
+            {
+                "token": key,
+                "warehouse": str(result.summary.get("warehouse") or "сверка"),
+                "date": str(result.summary.get("date") or "без даты"),
+                "surplus": len(vision_core.surplus_items(_vision_items(result))),
+            }
+        )
+    return templates.TemplateResponse(
+        request=request,
+        name="vision.html",
+        context={
+            "vision": vision_core.status(base, config),
+            "config": config,
+            "vision_max_photo_mb": config["vision_max_photo_mb"],
+            "jobs": jobs,
+            "token": token,
+            "results": results or [],
+            "message": message,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+@app.get("/vision", response_class=HTMLResponse)
+def vision_page(request: Request):
+    return _vision_page(request)
+
+
+@app.post("/vision/settings", response_class=HTMLResponse)
+def vision_settings(
+    request: Request,
+    enabled: str | None = Form(default=None),
+    api_key: str | None = Form(default=None),
+    model: str | None = Form(default=None),
+    max_rows: str | None = Form(default=None),
+    max_photo_mb: str | None = Form(default=None),
+    timeout: str | None = Form(default=None),
+    retries: str | None = Form(default=None),
+    pause_seconds: str | None = Form(default=None),
+    text_min_score: str | None = Form(default=None),
+    cache_limit: str | None = Form(default=None),
+):
+    """Сохраняет настройки распознавания без перезапуска службы.
+
+    Ключ API тоже задаётся здесь: пустое поле означает «оставить как было».
+    """
+    values = {
+        "vision_enabled": _is_on(enabled),
+        "vision_api_key": api_key,
+        "vision_max_rows": max_rows,
+        "vision_max_photo_mb": max_photo_mb,
+        "vision_timeout": timeout,
+        "vision_retries": retries,
+        "vision_pause_seconds": pause_seconds,
+        "vision_text_min_score": text_min_score,
+        "vision_cache_limit": cache_limit,
+    }
+    if str(model or "").strip():
+        values["vision_model"] = model
+    try:
+        vision_core.save_config(settings, values)
+    except OSError:
+        logger.exception("Настройки распознавания не сохранены")
+        return _vision_page(
+            request,
+            error="Настройки не сохранены. Подробности — в журнале службы.",
+            status_code=500,
+        )
+    return _vision_page(request, message="Настройки сохранены.")
+
+
+@app.post("/vision/photos", response_class=HTMLResponse)
+async def vision_photos(
+    request: Request,
+    token: str = Form(...),
+    photos: list[UploadFile] = File(default=[]),
+):
+    """Разбирает снимки и предлагает строки из излишков текущей сверки."""
+    base = _base()
+    config = vision_core.load_config(base)
+    result = RESULTS.get(token)
+    if result is None or not result.output_path.is_file():
+        return _vision_page(request, error=EXPIRED, status_code=400)
+    if not config["vision_enabled"] or not config["vision_api_key"]:
+        return _vision_page(
+            request,
+            error="Сначала включите распознавание и введите ключ API.",
+            token=token,
+            status_code=400,
+        )
+
+    sent_photos = [item for item in photos if item is not None and (item.filename or "").strip()]
+    if not sent_photos:
+        return _vision_page(request, error="Фото не выбраны.", token=token, status_code=400)
+
+    folder = result.output_path.parent / "photos"
+    saved: list[Path] = []
+    for sent in sent_photos:
+        name = _safe_name(sent.filename)
+        if not vision_core.is_photo(name):
+            return _vision_page(
+                request,
+                error=f"Файл {name} не похож на снимок: нужны jpg, png, webp или heic.",
+                token=token,
+                status_code=400,
+            )
+        target = folder / name
+        try:
+            size = await _save_upload(sent, target, int(config["vision_max_photo_mb"]))
+        except UploadTooLarge:
+            return _vision_page(
+                request,
+                error=f"Снимок {name} больше {config['vision_max_photo_mb']} МБ.",
+                token=token,
+                status_code=400,
+            )
+        except OSError:
+            logger.exception("Снимок не сохранён")
+            return _vision_page(request, error=GENERIC_ERROR, token=token, status_code=500)
+        if size:
+            saved.append(target)
+
+    if not saved:
+        return _vision_page(request, error=EMPTY_UPLOAD, token=token, status_code=400)
+
+    try:
+        found = await run_in_threadpool(
+            vision_core.recognize_all, saved, _vision_items(result), base
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Разбор фото не удался")
+        return _vision_page(request, error=GENERIC_ERROR, token=token, status_code=500)
+
+    return _vision_page(
+        request,
+        message=f"Разобрано снимков: {len(found)}. В файл сверки ничего не записано.",
+        results=found,
+        token=token,
+    )
+
+
+@app.post("/vision/confirm", response_class=HTMLResponse)
+def vision_confirm(
+    request: Request,
+    photo: str = Form(default=""),
+    digest: str = Form(default=""),
+    text: str = Form(default=""),
+    row: str = Form(default="0"),
+    name: str = Form(default=""),
+    source: str = Form(default=""),
+    picked: str = Form(default="on"),
+):
+    """Запоминает ответ человека по снимку. В файл сверки ничего не пишется."""
+    try:
+        number = int(str(row or "0").strip() or 0)
+    except ValueError:
+        number = 0
+    chosen = _is_on(picked) and number > 0
+    vision_core.remember(
+        settings,
+        photo=photo,
+        digest=digest,
+        text=text,
+        row=number,
+        name=name,
+        picked=chosen,
+        source=source,
+    )
+    if chosen:
+        message = f"Ответ записан: строка {number}, {name}."
+    else:
+        message = "Ответ записан: ни одна из предложенных строк не подходит."
+    return _vision_page(request, message=message)
+
+
+@app.post("/vision/check", response_class=HTMLResponse)
+def vision_check(request: Request):
+    """Проверяет ключ и модель коротким запросом без картинки.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток.
+    """
+    ok, note = vision_core.check(_base())
+    if not ok:
+        return _vision_page(request, error=note, status_code=400)
+    return _vision_page(request, message=note)
+
+
+@app.post("/vision/cache/clear", response_class=HTMLResponse)
+def vision_cache_clear(request: Request):
+    """Забывает разобранные снимки: следующий разбор пойдёт заново."""
+    forgotten = vision_core.clear_cache(_base())
+    return _vision_page(request, message=f"Кеш очищен, забыто снимков: {forgotten}.")
+
+
+@app.post("/vision/key/clear", response_class=HTMLResponse)
+def vision_key_clear(request: Request):
+    """Удаляет ключ API из настроек."""
+    vision_core.forget_key(settings)
+    return _vision_page(request, message="Ключ API удалён из настроек.")
 
 
 # --- Справочники ------------------------------------------------------------
