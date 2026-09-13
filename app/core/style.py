@@ -71,6 +71,11 @@ def fill(color: str) -> PatternFill:
     return PatternFill(fill_type="solid", start_color=color, end_color=color)
 
 
+def no_fill() -> PatternFill:
+    """Пустая заливка: в образце общий итог без цвета."""
+    return PatternFill(fill_type=None)
+
+
 def medium_side() -> Side:
     return Side(style="medium", color=BLACK)
 
@@ -124,7 +129,24 @@ def style_total_cell(cell) -> None:
 
 
 def style_grand_total_cell(cell) -> None:
-    """Общий итог в столбце I."""
+    """Общий итог в столбце I.
+
+    В образце жёлтой заливкой отмечена только пустая ячейка неучтёнки
+    строкой ниже, а сам итог стоит без цвета — в средней рамке.
+    """
+    cell.font = Font(name="Arial", size=10, bold=True)
+    cell.number_format = MONEY_FORMAT
+    cell.border = medium_border()
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.fill = no_fill()
+
+
+def style_extra_cell(cell) -> None:
+    """Ячейка неучтёнки под общим итогом.
+
+    По образцу она пустая, с жёлтой заливкой и средней рамкой:
+    сумму неучтёнки вписывают руками, и она входит в ставку продавцов.
+    """
     cell.font = Font(name="Arial", size=10, bold=True)
     cell.number_format = MONEY_FORMAT
     cell.border = medium_border()
