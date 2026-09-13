@@ -1,13 +1,18 @@
-"""Шаг 10. Ручные поля сверки: причина, дата, продавцы и подписи.
+"""Шаг 10. Ручные поля сверки: причина, дата, неучтёнка, продавцы и подписи.
 
 В образцах эти данные вносятся руками после разбора пересортов:
 
-* причина инвентаризации — столбец C в строке под «Склад:» (в образце C5);
-* дата предыдущей инвентаризации — столбец B под титулом (в образце B3),
+* причина инвентаризации — столбец C в строке под «Склад:»;
+* дата предыдущей инвентаризации — столбец B под титулом (в образце B4),
   выравнивание по левому краю, иначе Excel прижимает дату вправо;
+* сумма неучтёнки — задаётся в интерфейсе и пишется в ячейку C1
+  (сам блок рисует модуль `format`);
 * продавцы — блок внизу файла: строка ФИО, под ней строка с весом
   (часы или единица при делении поровну), рядом формула доли;
   в конце — итог весов.
+
+Ставка продавцов считается от итоговой суммы с вычетом неучтёнки —
+то есть от зелёной ячейки «С н. д/с:» строкой ниже общего итога.
 
 Под блоком продавцов может стоять мини-таблица «Перезачёт» в том же
 оформлении: продавцы предыдущей сверки и их доли перезачёта.
@@ -35,9 +40,11 @@ from .parse import COL_NAME, COL_TRAIT, Document
 
 COL_VALUE_START = COL_TRAIT       # C — значение мини-таблицы
 COL_VALUE_END = 7                 # G — ФИО целиком влезает в C:G
-COL_TOTAL_WITH_EXTRA = 9          # I — сумма с неучтёнкой
-# Пустая ячейка неучтёнки стоит строкой ниже общего итога.
-EXTRA_ROW_OFFSET = 1
+COL_NET_TOTAL = 9                 # I — итог с вычетом неучтёнки
+# Зелёная ячейка «С н. д/с:» стоит строкой ниже общего итога.
+NET_ROW_OFFSET = 1
+# Строка со словом «Склад:» в новой раскладке пятая.
+DEFAULT_WAREHOUSE_ROW = 5
 GAP_BEFORE_SIGNATURES = 1         # пустая строка между блоками
 NIGHT_ABSENT = "нет"
 TRUE_WORDS = ("1", "true", "yes", "on", "да")
@@ -122,6 +129,18 @@ def _hours_number(value: str) -> float | int | None:
     return int(number) if number == int(number) else number
 
 
+def _amount(value: object) -> float | int | None:
+    """Сумма из формы: принимаем запятую и пробелы внутри числа."""
+    plain = str(value or "").strip().replace(",", ".").replace(" ", "")
+    if not plain:
+        return None
+    try:
+        number = float(plain)
+    except ValueError:
+        return None
+    return int(number) if number == int(number) else number
+
+
 def _share_mode(value: object) -> str:
     """Способ распределения. По умолчанию — по часам."""
     text = str(value or "").strip().lower()
@@ -175,6 +194,8 @@ class SheetMeta:
 
     reason: str = ""
     prev_date: str = ""
+    # Сумма неучтёнки: задаётся в интерфейсе, хранится текстом.
+    extra: str = ""
     share_mode: str = SHARE_HOURS
     sellers: tuple[Seller, ...] = field(default_factory=tuple)
     checked_by: str = ""
@@ -190,6 +211,7 @@ class SheetMeta:
         return cls(
             reason=str(form.get("reason") or "").strip(),
             prev_date=str(form.get("prev_date") or "").strip(),
+            extra=str(form.get("extra") or "").strip(),
             share_mode=_share_mode(form.get("share_mode")),
             sellers=_sellers(form.get("sellers"), form.get("seller_hours")),
             checked_by=str(form.get("checked_by") or "").strip(),
@@ -204,6 +226,7 @@ class SheetMeta:
         return {
             "reason": self.reason,
             "prev_date": self.prev_date,
+            "extra": self.extra,
             "share_mode": self.share_mode,
             "by_hours": self.share_mode == SHARE_HOURS,
             "sellers": [seller.to_form() for seller in self.sellers],
@@ -215,12 +238,18 @@ class SheetMeta:
         }
 
     @property
+    def extra_value(self) -> float | int | None:
+        """Сумма неучтёнки для ячейки C1. Пустое поле — пустая ячейка."""
+        return _amount(self.extra)
+
+    @property
     def filled(self) -> bool:
         """Есть ли хоть одно заполненное поле."""
         return any(
             (
                 self.reason,
                 self.prev_date,
+                self.extra,
                 self.sellers,
                 self.checked_by,
                 self.admin,
@@ -263,7 +292,7 @@ def write_reason(sheet, document: Document, reason: str) -> None:
     """Причина инвентаризации — как в образце, под «Склад:»."""
     if not reason:
         return
-    row = (document.warehouse_row or 4) + 1
+    row = (document.warehouse_row or DEFAULT_WAREHOUSE_ROW) + 1
     _write(sheet, row, COL_TRAIT, reason, bold=True)
 
 
@@ -312,13 +341,13 @@ def _style_seller_cell(sheet, row: int, column: int, kind: str) -> None:
 
 
 def grand_total_row(sheet, document: Document) -> int:
-    """Строка с итогом по складу в столбце I.
+    """Строка с общим итогом по складу в столбце I.
 
     Итог по группам всегда стоит в строке со словом «Склад:» (в образце
-    I4), а строкой ниже — пустая ячейка неучтёнки (I5). Ставка
-    продавцов делит сумму этих двух ячеек.
+    I5), а строкой ниже — зелёная ячейка «С н. д/с:» (I6) с итогом
+    без неучтёнки. Именно от неё считается ставка продавцов.
     """
-    return document.warehouse_row or 4
+    return document.warehouse_row or DEFAULT_WAREHOUSE_ROW
 
 
 def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) -> int:
@@ -332,8 +361,7 @@ def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) ->
     if not sellers:
         return first_row - 1
 
-    rate_row = grand_total_row(sheet, document)
-    extra_row = rate_row + EXTRA_ROW_OFFSET
+    net_row = grand_total_row(sheet, document) + NET_ROW_OFFSET
     number_rows = [first_row + 1 + index * 2 for index in range(len(sellers))]
     total_row = number_rows[-1] + 1
 
@@ -343,14 +371,9 @@ def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) ->
         _write(sheet, name_row, COL_NAME, seller.name)
         _style_seller_cell(sheet, name_row, COL_NAME, "name")
         if index == 0:
-            # Ставка на единицу веса: итог по складу вместе с неучтёнкой
-            # делится на сумму весов. Пустая ячейка неучтёнки SUM не мешает.
-            _write(
-                sheet,
-                name_row,
-                COL_TRAIT,
-                f"=SUM(I{rate_row}:I{extra_row})/B{total_row}",
-            )
+            # Ставка на единицу веса: итог с вычетом неучтёнки
+            # (зелёная ячейка «С н. д/с:») делится на сумму весов.
+            _write(sheet, name_row, COL_TRAIT, f"=I{net_row}/B{total_row}")
             _style_seller_cell(sheet, name_row, COL_TRAIT, "share")
         weight = data.weight(seller)
         if weight is not None:
