@@ -222,8 +222,10 @@ def refs_problems(
 def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) -> dict:
     """Подставляет данные справочников в готовый файл.
 
-    Если пара «склад + дата» в распределении не найдена, поля остаются
-    пустыми, а причина попадает в problems — её показывает интерфейс.
+    Точные совпадения пишутся сразу. Если имя склада совпало неточно или
+    запись взята со сдвигом даты, значения считаются неуверенными: в файл
+    они не попадают, а показываются на странице результата на подтверждение.
+    Проверяющий всегда один и тот же, поэтому он пишется всегда.
     Служебные пометки в сверку не пишутся никогда.
     """
     planning, schedule = local_paths(settings.refs_dir)
@@ -235,8 +237,11 @@ def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) ->
         checker=settings.default_checker,
         min_score=settings.refs_match_min_score,
         days_around=settings.refs_days_around,
+        confirm_min_score=settings.refs_confirm_min_score,
     )
-    written = refs.write_cells(sheet, info, settings.refs_cells())
+    # Неуверенные значения ждут подтверждения человека.
+    to_write = refs.pending(info) if info.uncertain else info
+    written = refs.write_cells(sheet, to_write, settings.refs_cells())
     # Разбор причин — тяжёлый шаг, поэтому считается ровно один раз.
     need_problems = not info.found or not info.reason
     problems = refs_problems(warehouse, day, books, settings) if need_problems else []
@@ -248,6 +253,11 @@ def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) ->
         "found": info.found,
         "cells": written,
         "problems": problems,
+        # Подтверждение неуверенных значений.
+        "uncertain": info.uncertain,
+        "confidence": round(info.confidence, 2),
+        "day_shift": info.day_shift,
+        "notes": list(info.notes),
         "counts": {
             "plans": len(books.plans),
             "visits": len(books.visits),
@@ -305,6 +315,10 @@ def process(
             "problems": [
                 f"Сбой при работе со справочниками: {type(error).__name__}: {error}"
             ],
+            "uncertain": False,
+            "confidence": 0.0,
+            "day_shift": 0,
+            "notes": [],
             "counts": {},
         }
 

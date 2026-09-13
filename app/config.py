@@ -104,7 +104,12 @@ class Settings:
     # Проверяющий всегда один и тот же.
     default_checker: str = "Разумовский"
     # Порог схожести имён складов и допустимый сдвиг даты в графике.
-    refs_match_min_score: float = 0.90
+    # На 0.90 правильные совпадения отбрасывались, поэтому порог ниже,
+    # а всё неточное уходит на подтверждение человеку.
+    refs_match_min_score: float = 0.80
+    # Выше этой схожести значения пишутся в файл сразу, ниже — требуют
+    # подтверждения на странице результата.
+    refs_confirm_min_score: float = 0.95
     refs_days_around: int = 3
     # Адреса ячеек готового файла. Пустое значение — в файл не писать.
     refs_cell_reason: str = "C5"
@@ -170,7 +175,8 @@ class Settings:
             refs_dir=refs_dir,
             refs_state_path=_text("REFS_STATE_PATH", str(Path(refs_dir) / "state.json")),
             default_checker=_text("DEFAULT_CHECKER", "Разумовский"),
-            refs_match_min_score=_number("REFS_MATCH_MIN_SCORE", 0.90),
+            refs_match_min_score=_number("REFS_MATCH_MIN_SCORE", 0.80),
+            refs_confirm_min_score=_number("REFS_CONFIRM_MIN_SCORE", 0.95),
             refs_days_around=int(_number("REFS_DAYS_AROUND", 3)),
             refs_cell_reason=_text("REFS_CELL_REASON", "C5"),
             refs_cell_admin=_text("REFS_CELL_ADMIN", "L2"),
