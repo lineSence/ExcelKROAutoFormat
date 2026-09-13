@@ -115,10 +115,11 @@ class Settings:
     # Адреса ячеек готового файла. Пустое значение — в файл не писать.
     # Проверяющий в сам файл не пишется: в образце в верхней части
     # никаких фамилий нет, он виден только в таблице подписей.
-    refs_cell_reason: str = "C5"
-    refs_cell_admin: str = "L2"
+    # Адреса учитывают две строки блока неучтёнки сверху.
+    refs_cell_reason: str = "C6"
+    refs_cell_admin: str = "L3"
     refs_cell_checker: str = ""
-    refs_cell_auditors: str = "L4"
+    refs_cell_auditors: str = "L5"
     # Шаг проверки расписания копирования, секунды.
     refs_tick_seconds: int = 30
 
@@ -181,9 +182,9 @@ class Settings:
             refs_match_min_score=_number("REFS_MATCH_MIN_SCORE", 0.80),
             refs_confirm_min_score=_number("REFS_CONFIRM_MIN_SCORE", 0.95),
             refs_days_around=int(_number("REFS_DAYS_AROUND", 3)),
-            refs_cell_reason=_text("REFS_CELL_REASON", "C5"),
-            refs_cell_admin=_text("REFS_CELL_ADMIN", "L2"),
+            refs_cell_reason=_text("REFS_CELL_REASON", "C6"),
+            refs_cell_admin=_text("REFS_CELL_ADMIN", "L3"),
             refs_cell_checker=_text("REFS_CELL_CHECKER", ""),
-            refs_cell_auditors=_text("REFS_CELL_AUDITORS", "L4"),
+            refs_cell_auditors=_text("REFS_CELL_AUDITORS", "L5"),
             refs_tick_seconds=int(_number("REFS_TICK_SECONDS", 30)),
         )
