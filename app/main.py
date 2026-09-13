@@ -1,8 +1,15 @@
-"""Веб-слой: страница загрузки, подтверждение спорных пар, обучение и выдача файла."""
+"""Веб-слой: загрузка, спорные пары, ручные поля, справочники, обучение.
+
+Тяжёлая работа (ремонт, разбор, справочники, обучение) выполняется в
+отдельном потоке через `run_in_threadpool`. Внутри `async def` обработчика
+нельзя вызывать блокирующий код напрямую: на время разбора встаёт весь
+сервер, и даже /health не отвечает.
+"""
 
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -11,12 +18,15 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
+from . import __version__
 from .config import Settings
-from .core import learning, runtime
+from .core import learning, refs_sync, runtime
+from .core.guard import UploadTooLarge
 from .core.meta import SheetMeta
 from .core.parse import ParseError
-from .core.pipeline import PipelineResult, process, work_dir
+from .core.pipeline import PipelineResult, process, sweep, work_dir
 from .core.repair import RepairError
 from .core.verify import model_status
 
@@ -25,27 +35,30 @@ settings = Settings.load()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
 logger = logging.getLogger("excelkro")
 
-app = FastAPI(title="ExcelKROAutoFormat", version="0.4.0")
+app = FastAPI(title="ExcelKROAutoFormat", version=__version__)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# Размер части при записи загружаемого файла на диск.
+CHUNK = 1024 * 1024
+UNSAFE_NAME = re.compile(r"[\\/\x00]+")
 
 VERIFY_MODES = ("off", "model")
 # Поля формы сверки, у которых может быть несколько значений.
 META_MULTI_FIELDS = ("sellers", "seller_hours", "auditors")
-
-# Браузер иногда отдаёт пустое тело, если файл перезаписали после выбора
-# (ошибка вида «File changed» / ERR_UPLOAD_FILE_CHANGED).
-EMPTY_UPLOAD = (
-    "Файл не дошёл целиком: похоже, его изменили после выбора. "
-    "Закройте его в Excel и выберите заново."
-)
-EXPIRED = "Срок хранения истёк. Загрузите сверку заново."
 
 RESULTS: dict[str, PipelineResult] = {}
 # Режим «только чёткие пересорты» по токену результата: нужен при пересборке.
 STRICT_FLAGS: dict[str, bool] = {}
 # Режим второго слоя по токену результата.
 VERIFY_FLAGS: dict[str, str] = {}
+
+GENERIC_ERROR = "Не удалось обработать файл. Подробности — в журнале службы."
+EMPTY_UPLOAD = (
+    "Файл не дошёл целиком: похоже, его изменили после выбора. "
+    "Закройте его в Excel и выберите заново."
+)
+EXPIRED = "Срок хранения истёк. Загрузите сверку заново."
 
 
 def _mode(value: object) -> str:
@@ -66,6 +79,74 @@ def _settings_for(strict: bool, verify: str = "off") -> Settings:
 
 def _is_on(value: object) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes", "on", "да")
+
+
+def _safe_name(name: object) -> str:
+    """Имя файла без пути: клиент может прислать «../../secret.xlsx»."""
+    base = Path(str(name or "")).name
+    base = UNSAFE_NAME.sub("", base).strip().strip(".")
+    return base or "input.xlsx"
+
+
+def _forget(token: str) -> None:
+    """Убирает результат из памяти и удаляет его рабочую папку."""
+    result = RESULTS.pop(token, None)
+    STRICT_FLAGS.pop(token, None)
+    VERIFY_FLAGS.pop(token, None)
+    if result is not None:
+        shutil.rmtree(result.output_path.parent, ignore_errors=True)
+
+
+def _drop_expired() -> None:
+    """Чистит диск и память от работ со истёкшим сроком хранения."""
+    sweep(settings)
+    for token in list(RESULTS):
+        if not RESULTS[token].output_path.is_file():
+            RESULTS.pop(token, None)
+            STRICT_FLAGS.pop(token, None)
+            VERIFY_FLAGS.pop(token, None)
+
+
+async def _save_upload(file: UploadFile, target: Path, limit_mb: int) -> int:
+    """Пишет загрузку на диск по частям и обрывает её при превышении предела."""
+    limit = limit_mb * 1024 * 1024
+    size = 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target.open("wb") as sink:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise UploadTooLarge
+                sink.write(chunk)
+    except UploadTooLarge:
+        target.unlink(missing_ok=True)
+        raise
+    return size
+
+
+async def _run_pipeline(
+    source: Path,
+    original_name: str,
+    strict: bool,
+    verify: str,
+    folder: Path,
+    decisions: dict[str, bool] | None = None,
+    sheet_meta: SheetMeta | None = None,
+) -> PipelineResult:
+    """Запускает обработку в отдельном потоке: сервер остаётся отзывчивым."""
+    return await run_in_threadpool(
+        process,
+        source,
+        original_name,
+        _settings_for(strict, verify),
+        decisions,
+        folder,
+        sheet_meta,
+    )
 
 
 @app.get("/health")
@@ -95,66 +176,80 @@ async def upload(
     strict: str | None = Form(default=None),
     verify: str | None = Form(default=None),
 ):
-    folder = work_dir(settings)
-    source = folder / (file.filename or "input.xlsx")
-    content = await file.read()
+    await run_in_threadpool(_drop_expired)
     strict_on = _is_on(strict)
     verify_mode = _mode(verify)
+    name = _safe_name(file.filename)
 
-    if not content:
-        return _error(request, EMPTY_UPLOAD, strict_on, verify_mode)
-    if len(content) > settings.max_upload_mb * 1024 * 1024:
-        return _error(request, f"Файл больше {settings.max_upload_mb} МБ.", strict_on, verify_mode)
-    if not str(file.filename or "").lower().endswith(".xlsx"):
+    if not name.lower().endswith(".xlsx"):
         return _error(request, "Нужен файл с расширением .xlsx.", strict_on, verify_mode)
 
-    source.write_bytes(content)
+    folder = work_dir(settings)
+    source = folder / name
+    try:
+        size = await _save_upload(file, source, settings.max_upload_mb)
+    except UploadTooLarge:
+        shutil.rmtree(folder, ignore_errors=True)
+        return _error(
+            request,
+            f"Файл больше {settings.max_upload_mb} МБ.",
+            strict_on,
+            verify_mode,
+        )
+
+    if not size:
+        shutil.rmtree(folder, ignore_errors=True)
+        return _error(request, EMPTY_UPLOAD, strict_on, verify_mode)
 
     try:
-        result = process(
-            source,
-            file.filename or source.name,
-            _settings_for(strict_on, verify_mode),
-        )
+        result = await _run_pipeline(source, name, strict_on, verify_mode, folder)
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
+        shutil.rmtree(folder, ignore_errors=True)
         return _error(request, str(error), strict_on, verify_mode)
-    except Exception as error:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
-        return _error(request, f"Не удалось обработать файл: {error}", strict_on, verify_mode)
+        shutil.rmtree(folder, ignore_errors=True)
+        return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
 
     return _result_page(request, result, strict_on, verify_mode)
 
 
-def _rebuild(
+async def _rebuild(
     request: Request,
     old: PipelineResult,
     decisions: dict[str, bool],
-    sheet_meta: SheetMeta,
+    sheet_meta: SheetMeta | None,
     strict_on: bool,
     verify_mode: str,
     token: str,
     message: str = "",
 ) -> HTMLResponse:
     """Собирает файл заново с теми же режимами, решениями и ручными полями."""
+    folder = work_dir(settings)
+    # Исходный файл переносится в новую папку: старая будет удалена.
+    source = folder / old.source_path.name
+    await run_in_threadpool(shutil.copyfile, old.source_path, source)
+
     try:
-        result = process(
-            old.source_path,
+        result = await _run_pipeline(
+            source,
             old.source_name,
-            _settings_for(strict_on, verify_mode),
+            strict_on,
+            verify_mode,
+            folder,
             decisions,
             sheet_meta,
         )
     except (ParseError, RepairError) as error:
+        shutil.rmtree(folder, ignore_errors=True)
         return _error(request, str(error), strict_on, verify_mode)
-    except Exception as error:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
-        return _error(request, f"Не удалось обработать файл: {error}", strict_on, verify_mode)
+        shutil.rmtree(folder, ignore_errors=True)
+        return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
 
-    RESULTS.pop(token, None)
-    STRICT_FLAGS.pop(token, None)
-    VERIFY_FLAGS.pop(token, None)
-    shutil.rmtree(old.output_path.parent, ignore_errors=True)
+    _forget(token)
     return _result_page(request, result, strict_on, verify_mode, message)
 
 
@@ -166,7 +261,7 @@ async def meta(request: Request, token: str):
         return _error(request, EXPIRED)
 
     form = await request.form()
-    # Продавцы, часы и ревизоры приходят повторяющимися полями — каждая строка своя.
+    # Продавцы, часы и ревизоры приходят повторяющимися полями.
     payload = {
         key: (form.getlist(key) if key in META_MULTI_FIELDS else form.get(key))
         for key in form.keys()
@@ -175,7 +270,7 @@ async def meta(request: Request, token: str):
     strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
     verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
 
-    return _rebuild(
+    return await _rebuild(
         request,
         old,
         dict(old.decisions or {}),
@@ -215,21 +310,12 @@ async def confirm(request: Request, token: str):
     # Ответы человека — готовые примеры для обучения.
     if answers:
         try:
-            samples = learning.samples_from_decisions(
-                old.doubtful,
-                answers,
-                source=old.source_name or "ручное подтверждение",
-            )
-            learning.append_samples(
-                settings.train_store_path,
-                samples,
-                settings.train_max_samples,
-            )
+            await run_in_threadpool(_store_answers, old, answers)
         except Exception:  # noqa: BLE001
             logger.exception("Не удалось сохранить примеры обучения")
 
     # Ручные поля сверки не теряются при пересборке.
-    return _rebuild(
+    return await _rebuild(
         request,
         old,
         decisions,
@@ -238,6 +324,37 @@ async def confirm(request: Request, token: str):
         verify_mode,
         token,
     )
+
+
+def _store_answers(old: PipelineResult, answers: dict[str, bool]) -> None:
+    """Кладёт ответы по спорным парам в базу примеров."""
+    samples = learning.samples_from_decisions(
+        old.doubtful,
+        answers,
+        source=old.source_name or "ручное подтверждение",
+    )
+    learning.append_samples(
+        settings.train_store_path,
+        samples,
+        settings.train_max_samples,
+    )
+
+
+def _note_refs(result: PipelineResult) -> None:
+    """Кладёт итог справочников в состояние, чтобы он был виден на `/refs`."""
+    info = result.refs or {}
+    try:
+        refs_sync.note_fill(
+            settings.refs_state_path,
+            store=str(result.summary.get("warehouse") or ""),
+            day=str(result.summary.get("date") or ""),
+            file_name=result.source_name,
+            found=bool(info.get("found")),
+            problems=list(info.get("problems") or []),
+        )
+    except Exception:  # noqa: BLE001
+        # Запись журнала не должна мешать выдаче готового файла.
+        logger.warning("Итог справочников не записан в состояние", exc_info=True)
 
 
 def _result_page(
@@ -251,6 +368,7 @@ def _result_page(
     RESULTS[token] = result
     STRICT_FLAGS[token] = bool(strict)
     VERIFY_FLAGS[token] = _mode(verify)
+    _note_refs(result)
     # Подтверждённые пары в таблице не показываются.
     pending = [row for row in result.doubtful if not row.get("answered")]
     return templates.TemplateResponse(
@@ -260,11 +378,13 @@ def _result_page(
             "token": token,
             "summary": result.summary,
             "groups": result.groups,
+            "clusters": result.clusters,
             "doubtful": pending,
             "confirmed_count": len(result.doubtful) - len(pending),
             "output_name": result.output_name,
             "strict": bool(strict),
             "verify": _mode(verify),
+            "refs": result.refs,
             "meta": result.sheet_meta.to_form(),
             "message": message,
         },
@@ -285,12 +405,100 @@ def download(token: str):
 
 @app.post("/cleanup/{token}")
 def cleanup(token: str) -> dict:
-    result = RESULTS.pop(token, None)
-    STRICT_FLAGS.pop(token, None)
-    VERIFY_FLAGS.pop(token, None)
-    if result is not None:
-        shutil.rmtree(result.output_path.parent, ignore_errors=True)
+    _forget(token)
     return {"status": "ok"}
+
+
+# --- Справочники ------------------------------------------------------------
+
+
+def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLResponse:
+    """Страница справочников. Книги здесь не разбираются: только состояние."""
+    state = refs_sync.load_state(settings.refs_state_path)
+    return templates.TemplateResponse(
+        request=request,
+        name="refs.html",
+        context={
+            "state": state,
+            "books": refs_sync.book_status(settings.refs_dir),
+            "checker": settings.default_checker,
+            "cells": settings.refs_cells(),
+            "local_dir": settings.refs_dir,
+            "max_upload_mb": settings.max_upload_mb,
+            "fill_log": state.fill_log,
+            "min_score": settings.refs_match_min_score,
+            "days_around": settings.refs_days_around,
+            "note": note,
+            "error": error,
+        },
+    )
+
+
+@app.get("/refs", response_class=HTMLResponse)
+def refs_page(request: Request):
+    return _refs_page(request)
+
+
+@app.post("/refs/upload", response_class=HTMLResponse)
+async def refs_upload(
+    request: Request,
+    planning: UploadFile | None = File(default=None),
+    schedule: UploadFile | None = File(default=None),
+):
+    """Ручная загрузка книг справочников. Книги только сохраняются."""
+    state = refs_sync.load_state(settings.refs_state_path)
+    saved: list[str] = []
+
+    for kind, sent in (("planning", planning), ("schedule", schedule)):
+        if sent is None or not (sent.filename or "").strip():
+            continue
+        name = _safe_name(sent.filename)
+        if not name.lower().endswith(".xlsx"):
+            return _refs_page(request, error=f"Нужен файл .xlsx, получен: {name}")
+        target = refs_sync.book_target(settings.refs_dir, kind)
+        try:
+            await _save_upload(sent, target, settings.max_upload_mb)
+        except UploadTooLarge:
+            return _refs_page(
+                request,
+                error=f"Файл {name} больше {settings.max_upload_mb} МБ.",
+            )
+        except OSError:
+            logger.exception("Не удалось сохранить справочник")
+            return _refs_page(request, error="Файл не сохранён. Подробности — в журнале службы.")
+        state = refs_sync.mark_upload(state, kind, name, settings.refs_state_path)
+        saved.append(name)
+
+    if not saved:
+        return _refs_page(request, error="Файлы не выбраны.")
+    return _refs_page(
+        request,
+        note="Загружено: " + ", ".join(saved) + ". Книги разберутся при первой сверке.",
+    )
+
+
+@app.post("/refs/check", response_class=HTMLResponse)
+def refs_check(request: Request):
+    """Разбирает загруженные книги по кнопке и показывает итог.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, поэтому
+    долгий разбор книг не блокирует остальные страницы.
+    """
+    state = refs_sync.load_state(settings.refs_state_path)
+    state = refs_sync.measure(state, settings.refs_dir, settings.refs_state_path)
+    if state.last_status == "ошибка":
+        return _refs_page(request, error=f"Книги не разобраны. {state.last_error}")
+    return _refs_page(
+        request,
+        note=f"Разбор готов: складов {state.stores}, фамилий {state.people}.",
+    )
+
+
+@app.post("/refs/clear", response_class=HTMLResponse)
+def refs_clear(request: Request):
+    """Очищает блок ошибок справочников."""
+    refs_sync.clear_fill_log(settings.refs_state_path)
+    return _refs_page(request, note="Блок ошибок очищен.")
 
 
 # --- Режим обучения -------------------------------------------------------
@@ -330,33 +538,35 @@ async def training_samples(
     file: UploadFile = File(...),
 ):
     """Забирает примеры из ручной сверки: зелёные пары — да, остальные — нет."""
-    content = await file.read()
-    name = str(file.filename or "образец.xlsx")
-
-    if not content:
-        return _training_page(request, error=EMPTY_UPLOAD, status_code=400)
-    if len(content) > settings.max_upload_mb * 1024 * 1024:
-        return _training_page(request, error=f"Файл больше {settings.max_upload_mb} МБ.", status_code=400)
+    name = _safe_name(file.filename)
     if not name.lower().endswith(".xlsx"):
         return _training_page(request, error="Нужен файл с расширением .xlsx.", status_code=400)
 
     folder = work_dir(settings)
     source = folder / name
-    source.write_bytes(content)
     try:
-        samples = learning.samples_from_manual(
-            source,
-            tuple(settings.type_words),
-            source=name,
+        size = await _save_upload(file, source, settings.max_upload_mb)
+    except UploadTooLarge:
+        shutil.rmtree(folder, ignore_errors=True)
+        return _training_page(
+            request,
+            error=f"Файл больше {settings.max_upload_mb} МБ.",
+            status_code=400,
         )
-        stored = learning.append_samples(
-            settings.train_store_path,
-            samples,
-            settings.train_max_samples,
-        )
+
+    if not size:
+        shutil.rmtree(folder, ignore_errors=True)
+        return _training_page(request, error=EMPTY_UPLOAD, status_code=400)
+
+    try:
+        samples, stored = await run_in_threadpool(_read_samples, source, name)
     except Exception as error:  # noqa: BLE001
         logger.exception("Не удалось разобрать образец")
-        return _training_page(request, error=f"Не удалось разобрать образец: {error}", status_code=400)
+        return _training_page(
+            request,
+            error=f"Не удалось разобрать образец: {error}",
+            status_code=400,
+        )
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -371,9 +581,28 @@ async def training_samples(
     )
 
 
+def _read_samples(source: Path, name: str) -> tuple[list, dict]:
+    """Разбор образца ручной сверки и запись примеров в базу."""
+    samples = learning.samples_from_manual(
+        source,
+        tuple(settings.type_words),
+        source=name,
+    )
+    stored = learning.append_samples(
+        settings.train_store_path,
+        samples,
+        settings.train_max_samples,
+    )
+    return samples, stored
+
+
 @app.post("/training/train", response_class=HTMLResponse)
 def training_train(request: Request):
-    """Переобучает модель на всех накопленных примерах."""
+    """Переобучает модель на всех накопленных примерах.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, и
+    долгое обучение не блокирует остальные страницы.
+    """
     try:
         report = learning.train_model(settings)
     except ValueError as error:
@@ -403,6 +632,7 @@ def _error(
     message: str,
     strict: bool = False,
     verify: str = "off",
+    status: int = 400,
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
@@ -415,5 +645,5 @@ def _error(
             "model": model_status(settings),
             "embed": runtime.embed_status(_base()),
         },
-        status_code=400,
+        status_code=status,
     )
