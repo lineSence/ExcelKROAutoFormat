@@ -1,4 +1,4 @@
-"""Шаги 3–9: сдвиг шапки, пересорты, итоги, геометрия."""
+"""Шаги 3–10: сдвиг шапки, пересорты, итоги, ручные поля, геометрия."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
 from . import style
+from .meta import SheetMeta
+from .meta import apply as apply_meta
 from .parse import (
     COL_BOOK,
     COL_CODE,
@@ -31,6 +33,7 @@ from .resort import (
     build_clusters,
     make_item,
 )
+from .verify import load_verifier
 
 MARK_NOT_PLUS = "не+"
 COL_CURRENCY_LABEL = 8   # H
@@ -68,6 +71,10 @@ class FormatResult:
     warehouse: str
     groups: list[GroupResult] = field(default_factory=list)
     last_row: int = 0
+    # Работал ли второй слой проверки.
+    verify_used: bool = False
+    # Последняя строка с учётом ручных блоков (продавцы, подписи).
+    bottom_row: int = 0
 
 
 def _number(value: object) -> float:
@@ -204,7 +211,13 @@ def move_rows(sheet, group: Group, clusters: list[Cluster]) -> dict[int, int]:
     return moved
 
 
-def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | None = None) -> GroupResult:
+def process_group(
+    sheet,
+    group: Group,
+    settings,
+    decisions: dict[str, bool] | None = None,
+    verifier=None,
+) -> GroupResult:
     """Шаг 4: грозди брендов и разбор расхождений."""
     items = []
     for row in group.data_rows:
@@ -232,6 +245,7 @@ def process_group(sheet, group: Group, settings, decisions: dict[str, bool] | No
         price_gate_high=settings.price_gate_high,
         match_min_score=settings.match_min_score,
         doubtful_limit=settings.doubtful_limit,
+        verifier=verifier,
     )
 
     # Строки одной грозди ставятся рядом до окраски и рамки.
@@ -324,16 +338,24 @@ def format_workbook(
     warehouse: str,
     settings,
     decisions: dict[str, bool] | None = None,
+    sheet_meta: SheetMeta | None = None,
 ) -> FormatResult:
-    """Полный проход шагов 2–9."""
+    """Полный проход шагов 2–10."""
     document = parse(sheet)
     document = shift_header(sheet, document)
     header_row = fill_header(sheet, document, warehouse)
 
-    result = FormatResult(document=document, warehouse=warehouse)
+    # Второй слой готовится один раз на файл, а не на каждую группу.
+    verifier = load_verifier(settings)
+
+    result = FormatResult(
+        document=document,
+        warehouse=warehouse,
+        verify_used=verifier is not None,
+    )
     total_cells: list[str] = []
     for group in document.groups:
-        group_result = process_group(sheet, group, settings, decisions)
+        group_result = process_group(sheet, group, settings, decisions, verifier)
         highlight_rest(sheet, group)
         group_result.total_cell = write_group_total(sheet, group)
         total_cells.append(group_result.total_cell)
@@ -343,6 +365,9 @@ def format_workbook(
         write_grand_total(sheet, total_cells, header_row)
 
     result.last_row = max(group.total_row for group in document.groups)
+    # Шаг 10: ручные поля сверки пишутся до геометрии,
+    # чтобы высоты строк захватили и блок продавцов.
+    result.bottom_row = apply_meta(sheet, document, sheet_meta, result.last_row)
     style.apply_geometry(sheet, result.last_row)
     return result
 
