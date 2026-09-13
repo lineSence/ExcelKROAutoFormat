@@ -1,0 +1,57 @@
+{#
+	Общий каркас всех страниц.
+
+	Новые разделы программы добавляются двумя шагами:
+	1. новый шаблон с `{% extends "base.html" %}`;
+	2. новая запись в списке `nav_items` ниже.
+
+	Свои стили раздела подключаются через блок `head`.
+#}
+{% set nav_items = nav_items | default([
+	{"href": "/", "label": "Сверка КРО"},
+	{"href": "/training", "label": "Модель и обучение"},
+], true) %}
+{% set current = request.url.path if request else "/" %}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>{% block title %}ExcelKROAutoFormat{% endblock %}</title>
+	<link rel="stylesheet" href="/static/style.css" />
+	{% block head %}{% endblock %}
+</head>
+<body>
+<header class="topbar">
+	<div class="topbar-inner">
+		<a class="brand" href="/">Складские сверки</a>
+		<nav class="nav">
+			{% for item in nav_items %}
+			<a class="nav-link{% if current == item.href %} nav-link-active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+			{% endfor %}
+		</nav>
+	</div>
+</header>
+
+<main class="page{% block page_class %}{% endblock %}">
+	<div class="page-head">
+		<h1>{% block heading %}{% endblock %}</h1>
+		{% block subheading %}{% endblock %}
+	</div>
+
+	{% if error %}
+	<p class="alert alert-error" role="alert">{{ error }}</p>
+	{% endif %}
+	{% if message %}
+	<p class="alert alert-ok">{{ message }}</p>
+	{% endif %}
+
+	{% block content %}{% endblock %}
+</main>
+
+<footer class="footer">Обработка идёт локально на сервере. Файлы удаляются после скачивания.</footer>
+
+<script src="/static/upload.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
