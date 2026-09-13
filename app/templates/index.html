@@ -5,11 +5,15 @@
 {% block subheading %}<p>Загрузите выгрузку из 1С в формате .xlsx — программа подберёт пересорты и оформит файл.</p>{% endblock %}
 
 {% block content %}
-<form class="card" action="/upload" method="post" enctype="multipart/form-data" data-inmemory="true">
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+<form class="card" action="/upload" method="post" enctype="multipart/form-data">
 	<div class="field">
 		<label class="field-label" for="file">Файл сверки</label>
 		<input id="file" type="file" name="file" accept=".xlsx" required />
-		<p class="hint">До {{ max_upload_mb }} МБ. Файл читается в память сразу при отправке, поэтому открытый в Excel документ тоже загружается.</p>
+		<p class="hint">До {{ max_upload_mb }} МБ. Имя склада берётся из имени файла.</p>
 	</div>
 
 	<div class="field">
@@ -17,7 +21,7 @@
 		<label class="choice">
 			<input type="checkbox" name="strict" value="on" {% if strict %}checked{% endif %} />
 			<span>
-				<span class="choice-title">Разрешить только ч⑑ткие пересорты</span>
+				<span class="choice-title">Разрешить только чёткие пересорты</span>
 				<span class="choice-note">Бренд только с тем же брендом, цена не учитывается.</span>
 			</span>
 		</label>
@@ -47,6 +51,7 @@
 	<div class="actions">
 		<button type="submit">Обработать файл</button>
 		<a class="link" href="/training">Настроить модель</a>
+		<a class="link" href="/refs">Справочники</a>
 	</div>
 </form>
 
@@ -64,6 +69,10 @@
 				{% elif embed and embed.enabled %}<span class="badge badge-warn">включены, файлы не готовы</span>
 				{% else %}<span class="badge">выключены</span>{% endif %}
 			</span>
+		</li>
+		<li>
+			<span>Справочники</span>
+			<span><a class="link" href="/refs">книги, разбор, ошибки</a></span>
 		</li>
 	</ul>
 	<p class="hint">Режимы модели и эмбеддингов переключаются на странице «Модель и обучение».</p>
