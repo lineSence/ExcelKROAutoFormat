@@ -6,6 +6,9 @@
 Число складов и фамилий считается один раз после загрузки и хранится в состоянии:
 разбор больших книг тяжёлый, и делать его на каждый показ страницы нельзя.
 
+Здесь же хранится журнал последних обработок сверки: если данные справочников
+не подставились, причины видны на странице «Справочники», а не только в журнале службы.
+
 Запасной способ (пока не включён в интерфейсе): копирование из сетевой
 папки по расписанию. Код сохранён для будущего.
 """
@@ -36,6 +39,9 @@ WEEK_DAYS = (
 
 PLANNING_FILE = "planning.xlsx"
 SCHEDULE_FILE = "schedule.xlsx"
+
+# Сколько последних обработок сверок хранить для блока ошибок.
+FILL_LOG_LIMIT = 10
 
 # Виды книг: ключ формы — имя местной копии — название для страницы.
 BOOK_KINDS = {
@@ -68,6 +74,9 @@ class SyncState:
     last_run: str = ""
     last_status: str = ""
     last_error: str = ""
+    # Журнал последних обработок сверки для блока ошибок на странице.
+    # Каждая запись: {"at", "store", "day", "file", "found", "problems"}.
+    fill_log: list[dict] = field(default_factory=list)
 
     def slots(self) -> list[dt.time]:
         picked = []
@@ -76,6 +85,16 @@ class SyncState:
             if moment is not None:
                 picked.append(moment)
         return sorted(set(picked))
+
+    @property
+    def fill_last(self) -> dict | None:
+        """Последняя обработка сверки или None, если их ещё не было."""
+        return self.fill_log[0] if self.fill_log else None
+
+    @property
+    def fill_troubles(self) -> list[dict]:
+        """Только те обработки, где справочники дали ошибку."""
+        return [item for item in self.fill_log if item.get("problems")]
 
 
 def parse_time(value: object) -> dt.time | None:
@@ -110,6 +129,30 @@ def parse_times(values: list[object]) -> list[str]:
     return sorted(times)
 
 
+def parse_fill_log(values: object) -> list[dict]:
+    """Чистит журнал обработок, прочитанный из файла состояния."""
+    if not isinstance(values, list):
+        return []
+    clean: list[dict] = []
+    for item in values[:FILL_LOG_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        problems = item.get("problems")
+        clean.append(
+            {
+                "at": str(item.get("at") or ""),
+                "store": str(item.get("store") or ""),
+                "day": str(item.get("day") or ""),
+                "file": str(item.get("file") or ""),
+                "found": bool(item.get("found")),
+                "problems": (
+                    [str(line) for line in problems] if isinstance(problems, list) else []
+                ),
+            }
+        )
+    return clean
+
+
 def load_state(path: str | Path) -> SyncState:
     file = Path(path)
     if not file.is_file():
@@ -123,6 +166,7 @@ def load_state(path: str | Path) -> SyncState:
     state = SyncState(**known)
     state.days = parse_days(list(state.days))
     state.times = parse_times(list(state.times))
+    state.fill_log = parse_fill_log(state.fill_log)
     return state
 
 
@@ -133,6 +177,41 @@ def save_state(path: str | Path, state: SyncState) -> None:
         json.dumps(asdict(state), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def note_fill(
+    state_path: str | Path,
+    store: str,
+    day: str,
+    file_name: str,
+    found: bool,
+    problems: list[str],
+) -> SyncState:
+    """Записывает итог подстановки справочников в одну сверку.
+
+    Запись нужна, чтобы причина была видна на странице «Справочники» и позже,
+    а не только сразу после обработки.
+    """
+    state = load_state(state_path)
+    entry = {
+        "at": dt.datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "store": str(store or ""),
+        "day": str(day or ""),
+        "file": str(file_name or ""),
+        "found": bool(found),
+        "problems": [str(line) for line in problems],
+    }
+    state.fill_log = [entry] + list(state.fill_log)[: FILL_LOG_LIMIT - 1]
+    save_state(state_path, state)
+    return state
+
+
+def clear_fill_log(state_path: str | Path) -> SyncState:
+    """Очищает блок ошибок справочников."""
+    state = load_state(state_path)
+    state.fill_log = []
+    save_state(state_path, state)
+    return state
 
 
 def local_paths(local_dir: str | Path) -> tuple[Path, Path]:
@@ -188,12 +267,14 @@ def measure(state: SyncState, local_dir: str | Path, state_path: str | Path) -> 
         state.people = 0
         state.parsed = ""
         state.last_status = "ошибка"
-        state.last_error = f"разбор не выполнен: {type(error).__name__}"
+        state.last_error = f"разбор не выполнен: {type(error).__name__}: {error}"
         save_state(state_path, state)
         return state
     state.stores = books.stores
     state.people = len(books.by_surname)
     state.parsed = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+    state.last_status = "разобрано"
+    state.last_error = ""
     save_state(state_path, state)
     return state
 
