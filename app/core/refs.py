@@ -12,6 +12,11 @@
 Причина берётся из книги планирования. Если пару «склад + дата» найти не
 удалось, поля остаются пустыми. Никакие служебные пометки в файл сверки
 не пишутся.
+
+Важно о чтении книг: они открываются в режиме `read_only`, где обращение
+`sheet.cell(row=..., column=...)` каждый раз заново разбирает весь XML листа.
+Поэтому случайный доступ по ячейкам здесь запрещён: лист читается одним
+проходом в матрицу значений (`_matrix`), а дальше работа идёт с ней.
 """
 
 from __future__ import annotations
@@ -29,6 +34,10 @@ import openpyxl
 logger = logging.getLogger("excelkro.refs")
 
 SCHEDULE_SHEET = "Переучеты"
+
+# Страховка от гигантских листов: дальше этих пределов данных не бывает.
+MAX_ROWS = 20000
+MAX_COLUMNS = 200
 
 # Листы книги планирования, которые не относятся к администраторам.
 PLANNING_SKIP = (
@@ -157,16 +166,53 @@ def _looks_like_name(text: str) -> bool:
     return bool(SHORT_NAME.match(text) or FULL_NAME.match(text))
 
 
+# --- Чтение листа одним проходом --------------------------------------------
+
+
+def _matrix(sheet, max_rows: int = MAX_ROWS, max_columns: int = MAX_COLUMNS) -> list[list]:
+    """Значения листа списком строк. Один проход по файлу.
+
+    В режиме `read_only` случайный доступ `sheet.cell(...)` разбирает весь
+    лист заново на каждое обращение, поэтому книга на несколько тысяч строк
+    читалась бы часами. Здесь лист читается ровно один раз.
+    """
+    rows: list[list] = []
+    for number, values in enumerate(sheet.iter_rows(values_only=True), start=1):
+        rows.append(list(values[:max_columns]))
+        if number >= max_rows:
+            logger.warning(
+                "Лист «%s» обрезан на %s строках",
+                getattr(sheet, "title", "?"),
+                max_rows,
+            )
+            break
+    return rows
+
+
+def _width(rows: list[list]) -> int:
+    """Число столбцов в прочитанной матрице."""
+    return max((len(line) for line in rows), default=0)
+
+
+def _at(rows: list[list], row: int, column: int) -> object:
+    """Значение ячейки матрицы. Нумерация с единицы, как в Excel."""
+    if 1 <= row <= len(rows):
+        line = rows[row - 1]
+        if 1 <= column <= len(line):
+            return line[column - 1]
+    return None
+
+
 # --- Книга планирования -----------------------------------------------------
 
 
-def _week_columns(sheet, year: int) -> dict[int, tuple[dt.date, dt.date]]:
+def _week_columns(rows: list[list], year: int) -> dict[int, tuple[dt.date, dt.date]]:
     """Столбцы недель: номер столбца -> (первый день, последний день)."""
     spans: dict[int, tuple[dt.date, dt.date]] = {}
     current_year = year
     last_month = 0
-    for column in range(1, sheet.max_column + 1):
-        label = _clean(sheet.cell(row=2, column=column).value)
+    for column in range(1, _width(rows) + 1):
+        label = _clean(_at(rows, 2, column))
         match = WEEK.search(label)
         if not match:
             continue
@@ -192,9 +238,9 @@ def _week_columns(sheet, year: int) -> dict[int, tuple[dt.date, dt.date]]:
     return spans
 
 
-def _sheet_year(sheet, default: int) -> int:
-    for column in range(1, min(sheet.max_column, 20) + 1):
-        value = sheet.cell(row=1, column=column).value
+def _sheet_year(rows: list[list], default: int) -> int:
+    for column in range(1, min(_width(rows), 20) + 1):
+        value = _at(rows, 1, column)
         if isinstance(value, (int, float)) and 2000 < int(value) < 2100:
             return int(value)
         match = re.search(r"20\d{2}", _clean(value))
@@ -212,19 +258,19 @@ def read_planning(path: str | Path) -> dict[str, list[tuple[dt.date, dt.date, st
             low = name.strip().lower()
             if any(low.startswith(skip) for skip in PLANNING_SKIP):
                 continue
-            sheet = book[name]
+            rows = _matrix(book[name])
             admin = _clean(name)
-            year = _sheet_year(sheet, dt.date.today().year)
-            spans = _week_columns(sheet, year)
+            year = _sheet_year(rows, dt.date.today().year)
+            spans = _week_columns(rows, year)
             if not spans:
                 continue
-            for row in range(3, sheet.max_row + 1):
-                store = normalize_store(sheet.cell(row=row, column=2).value)
+            for row in range(3, len(rows) + 1):
+                store = normalize_store(_at(rows, row, 2))
                 if not store:
                     continue
                 bucket = plans.setdefault(store, [])
                 for column, (start, end) in spans.items():
-                    reason = _clean(sheet.cell(row=row, column=column).value)
+                    reason = _clean(_at(rows, row, column))
                     if not reason:
                         continue
                     reason = reason.replace("\n", " / ")
@@ -237,10 +283,10 @@ def read_planning(path: str | Path) -> dict[str, list[tuple[dt.date, dt.date, st
 # --- Книга графика ----------------------------------------------------------
 
 
-def _admin_columns(sheet, header_row: int) -> dict[int, str]:
+def _admin_columns(rows: list[list], header_row: int) -> dict[int, str]:
     columns: dict[int, str] = {}
-    for column in range(2, sheet.max_column + 1):
-        name = _clean(sheet.cell(row=header_row, column=column).value)
+    for column in range(2, _width(rows) + 1):
+        name = _clean(_at(rows, header_row, column))
         if name and _looks_like_name(name):
             columns[column] = name
     return columns
@@ -264,14 +310,14 @@ def read_schedule(path: str | Path) -> tuple[
             logger.warning("В книге графика нет листа %s", SCHEDULE_SHEET)
             return visits, by_surname
 
-        sheet = book[SCHEDULE_SHEET]
+        rows = _matrix(book[SCHEDULE_SHEET])
         admins: dict[int, str] = {}
-        for row in range(1, sheet.max_row + 1):
-            values = [sheet.cell(row=row, column=col).value for col in range(1, sheet.max_column + 1)]
+        for row in range(1, len(rows) + 1):
+            values = rows[row - 1]
             day = _as_date(values[0] if values else None)
             if day is None:
                 # Шапка повторяется по всему листу: состав столбцов меняется.
-                fresh = _admin_columns(sheet, row)
+                fresh = _admin_columns(rows, row)
                 if len(fresh) >= 3:
                     admins = fresh
                 continue
