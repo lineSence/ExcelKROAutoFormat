@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
@@ -40,8 +41,10 @@ MARK_NOT_PLUS = "не+"
 # Пометки сравнения с предыдущей инвентаризацией: пишутся в тот же столбец C.
 MARK_NOT_MINUS = "не-"
 MARK_CREDIT = "перез"
-COL_CURRENCY_LABEL = 8   # H
-COL_GRAND_TOTAL = 9      # I
+# Подписи итогов в образце стоят в G:H, слева от самих чисел.
+COL_TOTAL_LABEL = 7     # G
+TOTAL_LABEL_SPAN = 2    # G:H
+COL_GRAND_TOTAL = 9     # I
 
 # Блок неучтёнки в образце занимает две строки над титулом:
 # строка 1 — «Неучтёнка» и её сумма, строка 2 — неподтверждённая.
@@ -51,10 +54,35 @@ COL_EXTRA_LABEL = COL_NAME    # B
 COL_EXTRA_VALUE = COL_TRAIT   # C (коробка C:D)
 EXTRA_LABEL = "Неучтёнка"
 UNCONFIRMED_LABEL = "Неподтверждённая неучтёнка"
-# Строка итога с вычетом неучтёнки стоит под общим итогом.
-NET_LABEL = "С н. д/с:"
+# Подпись строки общего итога и строки итога с неучтёнкой.
+SHORTAGE_LABEL = "Недостача:"
+NET_LABEL = "С неучтёнкой:"
 TITLE_TARGET_ROW = 3     # В образце титул стоит в третьей строке.
 SCAN_COLUMNS = 12
+
+# Плашка срока приёма найденного товара: E1:J1, справа от неучтёнки.
+NOTICE_ROW = 1
+COL_NOTICE = 5           # E
+NOTICE_LABEL = "Найденный товар принимается до:"
+# Товар принимается три дня с момента инвентаризации,
+# текущий день не считается: дата документа плюс три дня.
+NOTICE_DAYS = 3
+DATE_PLACEHOLDER = "ДД.ММ.ГГГГ"
+DATE_OUT = "%d.%m.%Y"
+DATE_PATTERNS = ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%y")
+
+# Подписи шапки в столбце B и значения в C.
+PREV_DATE_LABEL = "Предыдущая инвентаризация:"
+WAREHOUSE_LABEL = "Склад:"
+REASON_LABEL = "Причина инвентаризации:"
+COL_REASON_VALUE = COL_TRAIT   # C
+REASON_SPAN = 4                # C:F
+
+# Счётчик пересортов в строке итога группы: подпись D:E, число в F.
+RESORT_LABEL = "Пересортов:"
+COL_RESORT_LABEL = COL_FACT    # D
+RESORT_LABEL_SPAN = 2          # D:E
+COL_RESORT_VALUE = COL_DIFF    # F
 
 # В строке итога группы числа 1С не нужны: остаётся только сумма в J.
 TOTAL_ROW_CLEAR_COLUMNS = (COL_FACT, COL_BOOK, COL_DIFF, COL_DOC)
@@ -125,6 +153,36 @@ class FormatResult:
 
 def _number(value: object) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _date(value: object) -> date | None:
+    """Дата из ячейки или текста выгрузки 1С."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    plain = str(value or "").strip()
+    if not plain:
+        return None
+    for pattern in DATE_PATTERNS:
+        try:
+            return datetime.strptime(plain, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def accept_date(doc_date: object, days: int = NOTICE_DAYS) -> str:
+    """Срок приёма найденного товара текстом.
+
+    Три дня с момента инвентаризации, текущий день не считается:
+    дата документа плюс три дня. Если дата документа не разобрана,
+    остаётся заглушка «ДД.ММ.ГГГГ» для ручного ввода.
+    """
+    value = _date(doc_date)
+    if value is None:
+        return DATE_PLACEHOLDER
+    return (value + timedelta(days=days)).strftime(DATE_OUT)
 
 
 def _row_is_empty(sheet, row: int) -> bool:
@@ -229,7 +287,7 @@ def fill_header(sheet, document: Document, warehouse: str) -> int:
     cell = sheet.cell(row=row, column=COL_TRAIT)
     cell.value = warehouse
     cell.font = Font(name="Arial", size=9, bold=True)
-    for column in range(COL_CURRENCY_LABEL, SCAN_COLUMNS + 1):
+    for column in range(COL_TOTAL_LABEL, SCAN_COLUMNS + 1):
         neighbour = sheet.cell(row=row, column=column)
         if str(neighbour.value or "").strip().lower() == "руб":
             neighbour.value = None
@@ -510,8 +568,39 @@ def credit_shares(previous, credit_sum: float) -> tuple[list[tuple[str, float]],
     )
 
 
-def write_group_total(sheet, group: Group) -> str:
-    """Шаг 5: формула итога группы."""
+def _count(value: float) -> float | int:
+    """Количество штук: целое без дробной части."""
+    number = float(value or 0)
+    return int(number) if number == int(number) else round(number, 2)
+
+
+def write_resort_count(sheet, row: int, pieces: float) -> None:
+    """Счётчик пересортов в строке итога группы, как в образце.
+
+    Подпись «Пересортов:» занимает D:E, число стоит в F.
+    Всё в средней рамке и по центру.
+    """
+    side = style.medium_side()
+    unmerge_cell(sheet, row, COL_RESORT_LABEL)
+    label = sheet.cell(row=row, column=COL_RESORT_LABEL)
+    label.value = RESORT_LABEL
+    label.font = Font(name="Arial", size=8)
+    label.alignment = style.Alignment(horizontal="center", vertical="center")
+    label.border = style.Border(left=side, top=side, bottom=side)
+
+    neighbour = sheet.cell(row=row, column=COL_RESORT_LABEL + 1)
+    neighbour.border = style.Border(top=side, bottom=side)
+    style.wide_box(label, RESORT_LABEL_SPAN)
+
+    value = sheet.cell(row=row, column=COL_RESORT_VALUE)
+    value.value = _count(pieces)
+    value.font = Font(name="Arial", size=8, bold=True)
+    value.alignment = style.Alignment(horizontal="center", vertical="center")
+    value.border = style.Border(right=side, top=side, bottom=side)
+
+
+def write_group_total(sheet, group: Group, resort_pieces: float = 0.0) -> str:
+    """Шаг 5: формула итога группы и счётчик пересортов."""
     for column in TOTAL_ROW_CLEAR_COLUMNS:
         sheet.cell(row=group.total_row, column=column).value = None
     last = max(group.first_data_row, group.total_row - 1)
@@ -519,6 +608,7 @@ def write_group_total(sheet, group: Group) -> str:
     cell = sheet.cell(row=group.total_row, column=COL_SUM_DIFF)
     cell.value = f"=SUM({letter}{group.first_data_row}:{letter}{last})"
     style.style_total_cell(cell)
+    write_resort_count(sheet, group.total_row, resort_pieces)
     return f"{letter}{group.total_row}"
 
 
@@ -530,12 +620,26 @@ def unmerge_cell(sheet, row: int, column: int) -> None:
             sheet.unmerge_cells(merged)
 
 
+def _write_total_label(sheet, row: int, text: str, bottom_line: bool) -> None:
+    """Подпись итога в G:H слева от самого числа."""
+    unmerge_cell(sheet, row, COL_TOTAL_LABEL)
+    cell = sheet.cell(row=row, column=COL_TOTAL_LABEL)
+    cell.value = text
+    style.style_field_label_cell(cell, right_line=True, bottom_line=bottom_line)
+    if bottom_line:
+        sheet.cell(row=row, column=COL_TOTAL_LABEL + 1).border = style.Border(
+            bottom=style.medium_side()
+        )
+    style.wide_box(cell, TOTAL_LABEL_SPAN)
+
+
 def write_grand_total(sheet, total_cells: list[str], row: int) -> None:
     """Шаг 6: общий итог в столбце I строки со словом «Склад:»."""
     unmerge_cell(sheet, row, COL_GRAND_TOTAL)
     cell = sheet.cell(row=row, column=COL_GRAND_TOTAL)
     cell.value = f"=SUM({','.join(total_cells)})"
     style.style_grand_total_cell(cell)
+    _write_total_label(sheet, row, SHORTAGE_LABEL, bottom_line=False)
 
 
 def write_extra_total(sheet, value: float | int | None = None) -> None:
@@ -558,6 +662,64 @@ def write_extra_total(sheet, value: float | int | None = None) -> None:
         style.style_extra_value_cell(value_cell)
 
 
+def write_notice(sheet, document: Document) -> str:
+    """Шаг 6.7: плашка «Найденный товар принимается до:» в E1:J1.
+
+    Дата считается сама: три дня с даты инвентаризации,
+    текущий день не считается.
+    """
+    text = accept_date(getattr(document, "doc_date", ""))
+    unmerge_cell(sheet, NOTICE_ROW, COL_NOTICE)
+    cell = sheet.cell(row=NOTICE_ROW, column=COL_NOTICE)
+    cell.value = f"{NOTICE_LABEL}{text}"
+    style.style_notice_cell(cell)
+    return text
+
+
+def write_header_fields(sheet, document: Document) -> None:
+    """Шаг 6.8: подписи шапки, как в образце.
+
+    В столбце B стоят названия полей, в C — их значения:
+    строка под титулом — предыдущая инвентаризация, дальше склад
+    и причина инвентаризации в широкой ячейке C:F.
+    Функция вызывается после ручных полей: она только оформляет
+    уже записанные значения.
+    """
+    warehouse_row = document.warehouse_row or TITLE_TARGET_ROW + 2
+    prev_row = document.title_row + 1
+    reason_row = warehouse_row + 1
+
+    # Строка предыдущей инвентаризации: подпись и дата одной строкой.
+    prev_cell = sheet.cell(row=prev_row, column=COL_NAME)
+    prev_value = _date(prev_cell.value)
+    prev_text = prev_value.strftime(DATE_OUT) if prev_value else ""
+    if prev_text or not str(prev_cell.value or "").strip():
+        prev_cell.value = f"{PREV_DATE_LABEL}{prev_text}"
+        prev_cell.number_format = "General"
+        prev_cell.font = Font(name="Arial", size=9)
+        prev_cell.alignment = style.Alignment(horizontal="left", vertical="center")
+
+    # «Склад:» прижат вправо, к имени склада в C.
+    unmerge_cell(sheet, warehouse_row, COL_NAME)
+    warehouse_label = sheet.cell(row=warehouse_row, column=COL_NAME)
+    if not str(warehouse_label.value or "").strip():
+        warehouse_label.value = WAREHOUSE_LABEL
+    style.style_field_label_cell(warehouse_label)
+
+    # Причина инвентаризации: подпись в B, значение в широкой C:F.
+    unmerge_cell(sheet, reason_row, COL_NAME)
+    reason_label = sheet.cell(row=reason_row, column=COL_NAME)
+    reason_label.value = REASON_LABEL
+    style.style_field_label_cell(reason_label)
+
+    reason_cell = sheet.cell(row=reason_row, column=COL_REASON_VALUE)
+    for shift in range(REASON_SPAN):
+        sheet.cell(row=reason_row, column=COL_REASON_VALUE + shift).border = style.Border(
+            bottom=style.medium_side()
+        )
+    style.style_field_value_cell(reason_cell, span=REASON_SPAN)
+
+
 def write_net_total(sheet, total_row: int) -> int:
     """Шаг 6.6: итог с вычетом неучтёнки строкой ниже общего итога.
 
@@ -566,9 +728,7 @@ def write_net_total(sheet, total_row: int) -> int:
     ставка продавцов.
     """
     row = total_row + NET_ROW_OFFSET
-    label = sheet.cell(row=row, column=COL_CURRENCY_LABEL)
-    label.value = NET_LABEL
-    label.font = Font(name="Arial", size=9)
+    _write_total_label(sheet, row, NET_LABEL, bottom_line=True)
 
     unmerge_cell(sheet, row, COL_GRAND_TOTAL)
     cell = sheet.cell(row=row, column=COL_GRAND_TOTAL)
@@ -624,16 +784,17 @@ def format_workbook(
             # После обнуления сумм помеченных строк остаток меняется.
             group_result.remainder_sum = group_remainder(sheet, group)
         highlight_rest(sheet, group)
-        group_result.total_cell = write_group_total(sheet, group)
+        group_result.total_cell = write_group_total(sheet, group, group_result.resort_pieces)
         total_cells.append(group_result.total_cell)
         result.groups.append(group_result)
 
     if total_cells:
         write_grand_total(sheet, total_cells, header_row)
-        # Строка «С н. д/с:» имеет смысл только при готовом общем итоге.
+        # Строка «С неучтёнкой:» имеет смысл только при готовом общем итоге.
         write_net_total(sheet, header_row)
-    # Блок неучтёнки нужен всегда, даже если итогов групп нет.
+    # Блок неучтёнки и плашка срока нужны всегда, даже без итогов групп.
     write_extra_total(sheet, sheet_meta.extra_value if sheet_meta is not None else None)
+    write_notice(sheet, document)
 
     if previous is not None:
         shares, notes = credit_shares(previous, result.comparison.credit_sum)
@@ -652,6 +813,8 @@ def format_workbook(
         result.last_row,
         result.comparison.shares,
     )
+    # Подписи шапки оформляются последними: ручные поля уже записаны.
+    write_header_fields(sheet, document)
     style.apply_geometry(sheet, result.last_row)
     return result
 
