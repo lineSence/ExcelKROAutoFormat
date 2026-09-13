@@ -1,0 +1,22 @@
+[Unit]
+Description=ExcelKROAutoFormat OTA (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Разовая работа под root в своём окружении: перезапуск основной службы
+# не обрывает обновление на полпути.
+Type=oneshot
+User=root
+WorkingDirectory=/opt/excelkro
+Environment=APP_DIR=/opt/excelkro
+Environment=UPDATE_DIR=/var/lib/excelkro/update
+Environment=SERVICE_NAME=excelkro
+Environment=SERVICE_USER=excelkro
+Environment=UPDATE_BRANCH=main
+Environment=HEALTH_URL=http://127.0.0.1:8000/health
+ExecStart=/opt/excelkro/deploy/ota-update.sh %i
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
