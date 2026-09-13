@@ -6,8 +6,8 @@
 Число складов и фамилий считается один раз после загрузки и хранится в состоянии:
 разбор больших книг тяжёлый, и делать его на каждый показ страницы нельзя.
 
-Здесь же хранится итог последней обработки сверки: если данные справочников
-не подставились, причины видны на странице «Справочники» без журнала службы.
+Здесь же хранится журнал последних обработок сверки: если данные справочников
+не подставились, причины видны на странице «Справочники», а не только в журнале службы.
 
 Запасной способ (пока не включён в интерфейсе): копирование из сетевой
 папки по расписанию. Код сохранён для будущего.
@@ -40,7 +40,7 @@ WEEK_DAYS = (
 PLANNING_FILE = "planning.xlsx"
 SCHEDULE_FILE = "schedule.xlsx"
 
-# Сколько последних обработок со сбоями справочников хранить для страницы.
+# Сколько последних обработок сверок хранить для блока ошибок.
 FILL_LOG_LIMIT = 10
 
 # Виды книг: ключ формы — имя местной копии — название для страницы.
@@ -93,7 +93,7 @@ class SyncState:
 
     @property
     def fill_troubles(self) -> list[dict]:
-        """Только те обработки, где были ошибки справочников."""
+        """Только те обработки, где справочники дали ошибку."""
         return [item for item in self.fill_log if item.get("problems")]
 
 
@@ -130,7 +130,7 @@ def parse_times(values: list[object]) -> list[str]:
 
 
 def parse_fill_log(values: object) -> list[dict]:
-    """Чистит журнал обработок из файла состояния."""
+    """Чистит журнал обработок, прочитанный из файла состояния."""
     if not isinstance(values, list):
         return []
     clean: list[dict] = []
@@ -145,7 +145,9 @@ def parse_fill_log(values: object) -> list[dict]:
                 "day": str(item.get("day") or ""),
                 "file": str(item.get("file") or ""),
                 "found": bool(item.get("found")),
-                "problems": [str(line) for line in problems] if isinstance(problems, list) else [],
+                "problems": (
+                    [str(line) for line in problems] if isinstance(problems, list) else []
+                ),
             }
         )
     return clean
@@ -187,7 +189,7 @@ def note_fill(
 ) -> SyncState:
     """Записывает итог подстановки справочников в одну сверку.
 
-    Журнал нужен, чтобы причина была видна на странице «Справочники» позже,
+    Запись нужна, чтобы причина была видна на странице «Справочники» и позже,
     а не только сразу после обработки.
     """
     state = load_state(state_path)
@@ -390,4 +392,4 @@ class Scheduler:
                     refresh(state, self.local_dir, self.state_path)
                     self._last = dt.datetime.now()
             except Exception:  # noqa: BLE001
-                logger.exception("Сбой в планировщике справочников"}
+                logger.exception("Сбой в планировщике справочников")

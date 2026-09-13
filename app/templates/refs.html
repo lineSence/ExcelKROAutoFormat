@@ -34,6 +34,44 @@
     </form>
 
     <section class="card">
+      <h2>Ошибки справочников</h2>
+      <p class="hint">
+        Здесь видно, почему при обработке инвентаризации не подставились причина,
+        администратор и ревизоры. Записи появляются автоматически после каждой сверки,
+        хранятся последние 10. Служебные сообщения в саму сверку не пишутся.
+      </p>
+      {% if fill_log %}
+        {% for item in fill_log %}
+        <div class="card">
+          <p>
+            <b>{{ item.at }}</b> — склад «{{ item.store or "не определён" }}»,
+            дата {{ item.day or "не найдена" }}
+            {% if item.file %}<br /><span class="hint">Файл: {{ item.file }}</span>{% endif %}
+          </p>
+          {% if item.problems %}
+          <ul>
+            {% for line in item.problems %}
+            <li class="error">{{ line }}</li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <p class="ok">Справочники подставлены полностью.</p>
+          {% endif %}
+        </div>
+        {% endfor %}
+        <form method="post" action="/refs/clear">
+          <button type="submit">Очистить блок ошибок</button>
+        </form>
+      {% else %}
+        <p class="hint">Сверок с момента обновления ещё не было: записей нет.</p>
+      {% endif %}
+      <p class="hint">
+        Порог схожести названий складов: {{ min_score }} (настройка REFS_MATCH_MIN_SCORE).
+        Запас по дате: ±{{ days_around }} дн. (настройка REFS_DAYS_AROUND).
+      </p>
+    </section>
+
+    <section class="card">
       <h2>Состояние</h2>
       <table>
         <tbody>
@@ -68,7 +106,7 @@
             <td>{{ state.parsed or "не выполнялся" }}</td>
           </tr>
           {% if state.last_error %}
-          <tr><th>Последняя ошибка</th><td class="error">{{ state.last_error }}</td></tr>
+          <tr><th>Последняя ошибка разбора</th><td class="error">{{ state.last_error }}</td></tr>
           {% endif %}
           <tr><th>Проверяющий по умолчанию</th><td>{{ checker }}</td></tr>
           <tr><th>Папка хранения</th><td><code>{{ local_dir }}</code></td></tr>
@@ -96,7 +134,7 @@
       </table>
       <p class="hint">
         Ревизоры берутся из распределения полным ФИО. Если пара «склад + дата» не найдена,
-        поля остаются пустыми; служебные сообщения в сверку не пишутся.
+        поля остаются пустыми, а причина попадает в блок ошибок выше.
       </p>
     </section>
 

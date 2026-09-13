@@ -34,7 +34,18 @@
 		<li>Проверяющий: {{ refs.checker or "—" }}</li>
 		<li>Ревизоры: {% if refs.auditors %}{{ refs.auditors | join(", ") }}{% else %}не определены{% endif %}</li>
 	</ul>
-	{% if not refs.found %}
+	{% if refs.problems %}
+	<h3>Ошибки справочников</h3>
+	<ul>
+		{% for line in refs.problems %}
+		<li class="error">{{ line }}</li>
+		{% endfor %}
+	</ul>
+	<p class="hint">
+		Поля в файле остались пустыми — заполните их вручную. Тот же список сохраняется в блоке
+		ошибок на странице <a href="/refs">Справочники</a>.
+	</p>
+	{% elif not refs.found %}
 	<p class="hint">Пара «склад + дата» в распределении не найдена. Поля в файле остались пустыми — заполните их вручную. <a href="/refs">Справочники</a></p>
 	{% endif %}
 	{% endif %}

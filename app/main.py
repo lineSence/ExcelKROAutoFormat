@@ -192,6 +192,23 @@ async def confirm(request: Request, token: str):
     return _result_page(request, result, strict_on)
 
 
+def _note_refs(result: PipelineResult) -> None:
+    """Кладёт итог справочников в состояние, чтобы он был виден на `/refs`."""
+    info = result.refs or {}
+    try:
+        refs_sync.note_fill(
+            settings.refs_state_path,
+            store=str(result.summary.get("warehouse") or ""),
+            day=str(result.summary.get("date") or ""),
+            file_name=result.source_name,
+            found=bool(info.get("found")),
+            problems=list(info.get("problems") or []),
+        )
+    except OSError:
+        # Запись журнала не должна мешать выдаче готового файла.
+        logger.warning("Итог справочников не записан в состояние", exc_info=True)
+
+
 def _result_page(
     request: Request,
     result: PipelineResult,
@@ -200,6 +217,7 @@ def _result_page(
     token = result.output_path.parent.name
     RESULTS[token] = result
     STRICT_FLAGS[token] = bool(strict)
+    _note_refs(result)
     # Подтверждённые пары в таблице не показываются.
     pending = [row for row in result.doubtful if not row.get("answered")]
     return templates.TemplateResponse(
@@ -252,6 +270,9 @@ def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLRespons
             "cells": settings.refs_cells(),
             "local_dir": settings.refs_dir,
             "max_upload_mb": settings.max_upload_mb,
+            "fill_log": state.fill_log,
+            "min_score": settings.refs_match_min_score,
+            "days_around": settings.refs_days_around,
             "note": note,
             "error": error,
         },
@@ -307,11 +328,18 @@ def refs_check(request: Request):
     state = refs_sync.load_state(settings.refs_state_path)
     state = refs_sync.measure(state, settings.refs_dir, settings.refs_state_path)
     if state.last_status == "ошибка":
-        return _refs_page(request, error="Книги не разобраны. Подробности — в журнале службы.")
+        return _refs_page(request, error=f"Книги не разобраны. {state.last_error}")
     return _refs_page(
         request,
         note=f"Разбор готов: складов {state.stores}, фамилий {state.people}.",
     )
+
+
+@app.post("/refs/clear", response_class=HTMLResponse)
+def refs_clear(request: Request):
+    """Очищает блок ошибок справочников."""
+    refs_sync.clear_fill_log(settings.refs_state_path)
+    return _refs_page(request, note="Блок ошибок очищен.")
 
 
 def _error(
