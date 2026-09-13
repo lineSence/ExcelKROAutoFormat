@@ -8,8 +8,11 @@
   (часы или единица при делении поровну), рядом формула доли;
   в конце — итог весов.
 
+Под блоком продавцов может стоять мини-таблица «Перезачёт» в том же
+оформлении: продавцы предыдущей сверки и их доли перезачёта.
+
 Остальные подписи (проверил, администратор, ревизоры, ночной продавец)
-собраны в мини-таблицу под блоком продавцов.
+собраны в мини-таблицу ниже.
 
 Модуль не знает ни про HTTP, ни про пересорты: набор полей легко
 расширить под другие задачи — добавьте поле в SheetMeta и строку
@@ -35,6 +38,7 @@ COL_TOTAL_WITH_EXTRA = 9          # I — сумма с неучтёнкой
 GAP_BEFORE_SIGNATURES = 1         # пустая строка между блоками
 NIGHT_ABSENT = "нет"
 TRUE_WORDS = ("1", "true", "yes", "on", "да")
+CREDIT_TITLE = "Перезачёт"
 
 # Способы разнести недостачу между продавцами.
 SHARE_HOURS = "hours"
@@ -353,6 +357,44 @@ def write_sellers(sheet, document: Document, first_row: int, data: SheetMeta) ->
     return total_row
 
 
+def write_credits(sheet, first_row: int, shares) -> int:
+    """Мини-таблица «Перезачёт» под блоком продавцов.
+
+    Оформление то же, что у продавцов: заголовок и ФИО на заливке,
+    под каждым ФИО — сумма перезачёта, внизу итог.
+    Суммы считаются по весам продавцов предыдущей сверки.
+    """
+    rows = [(str(name or ""), float(amount)) for name, amount in (shares or [])]
+    if not rows:
+        return first_row - 1
+
+    _write(sheet, first_row, COL_NAME, CREDIT_TITLE, bold=True)
+    _style_seller_cell(sheet, first_row, COL_NAME, "name")
+
+    amount_rows: list[int] = []
+    row = first_row
+    for name, amount in rows:
+        row += 1
+        _write(sheet, row, COL_NAME, name)
+        _style_seller_cell(sheet, row, COL_NAME, "name")
+        row += 1
+        _write(sheet, row, COL_NAME, round(amount, 2))
+        _style_seller_cell(sheet, row, COL_NAME, "weight")
+        sheet.cell(row=row, column=COL_NAME).number_format = style.MONEY_FORMAT
+        amount_rows.append(row)
+
+    row += 1
+    _write(
+        sheet,
+        row,
+        COL_NAME,
+        "=SUM({})".format(",".join(f"B{item}" for item in amount_rows)),
+    )
+    _style_seller_cell(sheet, row, COL_NAME, "total")
+    sheet.cell(row=row, column=COL_NAME).number_format = style.MONEY_FORMAT
+    return row
+
+
 def write_signatures(sheet, first_row: int, rows: list[tuple[str, str]]) -> int:
     """Мини-таблица под блоком продавцов. Возвращает последнюю строку."""
     if not rows:
@@ -377,16 +419,32 @@ def write_signatures(sheet, first_row: int, rows: list[tuple[str, str]]) -> int:
     return first_row + len(rows) - 1
 
 
-def apply(sheet, document: Document, data: SheetMeta | None, last_row: int) -> int:
-    """Заполняет все ручные поля. Возвращает номер последней строки."""
-    if data is None or not data.filled:
+def apply(
+    sheet,
+    document: Document,
+    data: SheetMeta | None,
+    last_row: int,
+    credits=None,
+) -> int:
+    """Заполняет все ручные поля. Возвращает номер последней строки.
+
+    `credits` — доли перезачёта из сравнения с предыдущей инвентаризацией.
+    Таблица «Перезачёт» пишется даже тогда, когда ручные поля пустые.
+    """
+    shares = list(credits or [])
+    if (data is None or not data.filled) and not shares:
         return last_row
+    if data is None:
+        data = SheetMeta()
 
     write_reason(sheet, document, data.reason)
     write_prev_date(sheet, document, data.prev_date)
 
     # Блок продавцов начинается в строке последнего итога, как в образце.
     bottom = write_sellers(sheet, document, last_row, data)
+    if shares:
+        start = max(bottom, last_row) + 1 + GAP_BEFORE_SIGNATURES
+        bottom = write_credits(sheet, start, shares)
     signatures = data.signature_rows()
     if signatures:
         start = max(bottom, last_row) + 1 + GAP_BEFORE_SIGNATURES

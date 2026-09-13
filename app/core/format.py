@@ -8,6 +8,7 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
+from . import prev as prev_book
 from . import style
 from .meta import SheetMeta
 from .meta import apply as apply_meta
@@ -36,6 +37,9 @@ from .resort import (
 from .verify import load_verifier
 
 MARK_NOT_PLUS = "не+"
+# Пометки сравнения с предыдущей инвентаризацией: пишутся в тот же столбец C.
+MARK_NOT_MINUS = "не-"
+MARK_CREDIT = "перез"
 COL_CURRENCY_LABEL = 8   # H
 COL_GRAND_TOTAL = 9      # I
 TITLE_TARGET_ROW = 2     # В образце титул стоит во второй строке.
@@ -66,6 +70,24 @@ class GroupResult:
 
 
 @dataclass
+class Comparison:
+    """Итог сравнения с предыдущей инвентаризацией."""
+
+    file_name: str = ""
+    date: str = ""
+    matched: int = 0
+    # Позиции, получившие «перез» (были в минусе, стали в плюсе).
+    credits: list[dict] = field(default_factory=list)
+    # Позиции, получившие «не-» (были «не+», стали в минусе).
+    not_minus: list[dict] = field(default_factory=list)
+    # Сумма перезачёта: столько списывали за эти позиции в прошлый раз.
+    credit_sum: float = 0.0
+    # Пары «продавец прошлой сверки — его доля перезачёта».
+    shares: list[tuple[str, float]] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class FormatResult:
     document: Document
     warehouse: str
@@ -75,6 +97,8 @@ class FormatResult:
     verify_used: bool = False
     # Последняя строка с учётом ручных блоков (продавцы, подписи).
     bottom_row: int = 0
+    # Сравнение с предыдущей инвентаризацией.
+    comparison: Comparison = field(default_factory=Comparison)
 
 
 def _number(value: object) -> float:
@@ -305,6 +329,98 @@ def highlight_rest(sheet, group: Group) -> None:
             style.paint(sum_cell, style.YELLOW)
 
 
+def _paint_row(sheet, row: int, color: str) -> None:
+    """Красит всю строку позиции: столбцы A–L."""
+    for column in range(1, SCAN_COLUMNS + 1):
+        style.paint(sheet.cell(row=row, column=column), color)
+
+
+def compare_group(sheet, group: Group, previous, comparison: Comparison) -> None:
+    """Сравнение группы с предыдущей инвентаризацией.
+
+    Правила:
+
+    * в прошлый раз позиция считалась в минус (сумма не обнулена), сейчас
+      выходит в плюс → пометка «перез», строка зелёная, сумма разницы 0,
+      а сумма прошлого списания идёт в таблицу «Перезачёт»;
+    * в прошлый раз позиция была «не+», сейчас в минусе → пометка «не-»,
+      строка зелёная, сумма разницы 0.
+
+    Позиции сопоставляются по полному названию товара.
+    """
+    for row in group.data_rows:
+        raw = sheet.cell(row=row, column=COL_NAME).value
+        key = prev_book.name_key(raw)
+        item = previous.items.get(key) if key else None
+        if item is None:
+            continue
+        comparison.matched += 1
+        diff = _number(sheet.cell(row=row, column=COL_DIFF).value)
+        if diff > 0 and item.was_minus:
+            mark = MARK_CREDIT
+            target = comparison.credits
+            comparison.credit_sum += abs(item.sum_diff)
+        elif diff < 0 and item.was_not_plus:
+            mark = MARK_NOT_MINUS
+            target = comparison.not_minus
+        else:
+            continue
+
+        sum_cell = sheet.cell(row=row, column=COL_SUM_DIFF)
+        target.append(
+            {
+                "group": group.name,
+                "row": row,
+                "name": str(raw or "").strip(),
+                "diff": diff,
+                "sum_before": round(_number(sum_cell.value), 2),
+                "prev_diff": item.diff,
+                "prev_sum": round(item.sum_diff, 2),
+                "mark": mark,
+            }
+        )
+        unmerge_cell(sheet, row, COL_TRAIT)
+        sheet.cell(row=row, column=COL_TRAIT).value = mark
+        # По обоим правилам разница суммы обнуляется.
+        sum_cell.value = 0
+        _paint_row(sheet, row, style.GREEN)
+
+
+def credit_shares(previous, credit_sum: float) -> tuple[list[tuple[str, float]], list[str]]:
+    """Доли перезачёта по продавцам прошлой сверки.
+
+    Сумма делится так же, как эти позиции списывались в прошлый раз:
+    по весам продавцов из предыдущей сверки.
+    """
+    notes: list[str] = []
+    if credit_sum <= 0:
+        return [], notes
+
+    sellers = list(getattr(previous, "sellers", ()) or ())
+    if not sellers:
+        notes.append(
+            "Блок продавцов в предыдущей сверке не найден: сумма перезачёта "
+            "показана одной строкой, фамилии впишите вручную."
+        )
+        return [("", round(credit_sum, 2))], notes
+
+    weights = [seller.weight for seller in sellers]
+    total = sum(weights)
+    if total <= 0:
+        notes.append(
+            "Веса продавцов в предыдущей сверке пустые: перезачёт разделён поровну."
+        )
+        weights = [1.0] * len(sellers)
+        total = float(len(sellers))
+    return (
+        [
+            (seller.name, round(credit_sum * weight / total, 2))
+            for seller, weight in zip(sellers, weights)
+        ],
+        notes,
+    )
+
+
 def write_group_total(sheet, group: Group) -> str:
     """Шаг 5: формула итога группы."""
     for column in TOTAL_ROW_CLEAR_COLUMNS:
@@ -339,8 +455,14 @@ def format_workbook(
     settings,
     decisions: dict[str, bool] | None = None,
     sheet_meta: SheetMeta | None = None,
+    previous=None,
 ) -> FormatResult:
-    """Полный проход шагов 2–10."""
+    """Полный проход шагов 2–10.
+
+    `previous` — разобранная предыдущая инвентаризация (модуль `prev`).
+    Если она передана, к каждой группе применяются правила сравнения,
+    а под блоком продавцов появляется мини-таблица «Перезачёт».
+    """
     document = parse(sheet)
     document = shift_header(sheet, document)
     header_row = fill_header(sheet, document, warehouse)
@@ -352,11 +474,18 @@ def format_workbook(
         document=document,
         warehouse=warehouse,
         verify_used=verifier is not None,
+        comparison=Comparison(
+            file_name=str(getattr(previous, "file_name", "") or ""),
+            date=str(getattr(previous, "date", "") or ""),
+        ),
     )
     total_cells: list[str] = []
     for group in document.groups:
         group_result = process_group(sheet, group, settings, decisions, verifier)
         highlight_rest(sheet, group)
+        # Сравнение идёт после обычного разбора: его пометки главнее.
+        if previous is not None:
+            compare_group(sheet, group, previous, result.comparison)
         group_result.total_cell = write_group_total(sheet, group)
         total_cells.append(group_result.total_cell)
         result.groups.append(group_result)
@@ -364,10 +493,21 @@ def format_workbook(
     if total_cells:
         write_grand_total(sheet, total_cells, header_row)
 
+    if previous is not None:
+        shares, notes = credit_shares(previous, result.comparison.credit_sum)
+        result.comparison.shares = shares
+        result.comparison.notes = notes
+
     result.last_row = max(group.total_row for group in document.groups)
     # Шаг 10: ручные поля сверки пишутся до геометрии,
     # чтобы высоты строк захватили и блок продавцов.
-    result.bottom_row = apply_meta(sheet, document, sheet_meta, result.last_row)
+    result.bottom_row = apply_meta(
+        sheet,
+        document,
+        sheet_meta,
+        result.last_row,
+        result.comparison.shares,
+    )
     style.apply_geometry(sheet, result.last_row)
     return result
 
