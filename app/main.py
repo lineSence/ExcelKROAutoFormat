@@ -24,6 +24,7 @@ from . import __version__
 from .config import Settings
 from .core import claims as claims_book
 from .core import learning, refs_sync, runtime
+from .core import update as ota
 from .core.guard import UploadTooLarge
 from .core.meta import SheetMeta
 from .core.parse import ParseError
@@ -613,6 +614,72 @@ def refs_clear(request: Request):
     """Очищает блок ошибок справочников."""
     refs_sync.clear_fill_log(settings.refs_state_path)
     return _refs_page(request, note="Блок ошибок очищен.")
+
+
+# --- Обновление программы (OTA) ---------------------------------------------
+
+
+def _update_page(
+    request: Request,
+    message: str = "",
+    error: str = "",
+    status_code: int = 200,
+) -> HTMLResponse:
+    """Страница обновления: текущая версия, кнопки и состояние последнего запуска."""
+    info = ota.status()
+    return templates.TemplateResponse(
+        request=request,
+        name="update.html",
+        context={
+            "status": info,
+            "state": info["state"],
+            "message": message,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+@app.get("/update", response_class=HTMLResponse)
+def update_page(request: Request):
+    return _update_page(request)
+
+
+@app.post("/update/check", response_class=HTMLResponse)
+def update_check(request: Request):
+    """Смотрит, есть ли в Git версия новее установленной. Файлы не меняются."""
+    try:
+        ota.start("check")
+    except ota.UpdateError as error:
+        return _update_page(request, error=str(error), status_code=400)
+    return _update_page(request, message="Проверка запущена. Итог появится в блоке состояния.")
+
+
+@app.post("/update/apply", response_class=HTMLResponse)
+def update_apply(request: Request):
+    """Ставит последнюю версию и перезапускает службу.
+
+    Обновление идёт в отдельной службе systemd, поэтому перезапуск этого же
+    веб-слоя не обрывает работу на полпути. Страница отвечает сразу, а ход
+    работы виден в блоке состояния.
+    """
+    try:
+        ota.start("apply")
+    except ota.UpdateError as error:
+        return _update_page(request, error=str(error), status_code=400)
+    return _update_page(
+        request,
+        message=(
+            "Обновление запущено. Служба перезапустится сама: если страница "
+            "ненадолго перестанет отвечать, обновите её через полминуты."
+        ),
+    )
+
+
+@app.get("/update/state")
+def update_state() -> dict:
+    """Состояние обновления в виде JSON: удобно для проверок извне."""
+    return ota.status()
 
 
 # --- Режим обучения -------------------------------------------------------
