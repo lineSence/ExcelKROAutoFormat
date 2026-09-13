@@ -188,8 +188,14 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert result.summary["pieces"] > 0
 
     sheet = openpyxl.load_workbook(result.output_path)["TDSheet"]
-    assert str(sheet["I4"].value).startswith("=SUM(")
-    assert sheet["C4"].value == "ОхтаМоллСМА"
+    # Шапка сдвинута вниз двумя строками блока неучтёнки.
+    assert sheet["B1"].value == "Неучтёнка"
+    assert sheet["B2"].value == "Неподтверждённая неучтёнка"
+    # Неподтверждённая неучтёнка всегда пустая: её вписывают руками.
+    assert sheet["C2"].value is None
+    assert str(sheet["I5"].value).startswith("=SUM(")
+    assert str(sheet["I6"].value).startswith("=I5")
+    assert sheet["C5"].value == "ОхтаМоллСМА"
     assert sheet.auto_filter.ref.startswith("K1:K")
 
 
