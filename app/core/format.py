@@ -700,8 +700,13 @@ def write_header_fields(sheet, document: Document) -> None:
         prev_cell.alignment = style.Alignment(horizontal="left", vertical="center")
 
     # «Склад:» прижат вправо, к имени склада в C.
+    # В выгрузке 1С подпись стоит в A и объединена с B: после снятия
+    # объединения текст переезжает в B, иначе появится двойник.
     unmerge_cell(sheet, warehouse_row, COL_NAME)
     warehouse_label = sheet.cell(row=warehouse_row, column=COL_NAME)
+    left_cell = sheet.cell(row=warehouse_row, column=COL_CODE)
+    if str(left_cell.value or "").strip().lower().startswith("склад"):
+        left_cell.value = None
     if not str(warehouse_label.value or "").strip():
         warehouse_label.value = WAREHOUSE_LABEL
     style.style_field_label_cell(warehouse_label)
