@@ -13,6 +13,11 @@
 удалось, поля остаются пустыми. Никакие служебные пометки в файл сверки
 не пишутся.
 
+Подбор склада нечёткий, поэтому у каждого ответа есть уверенность:
+`RefsInfo.confidence` — схожесть имени склада, `day_shift` — сдвиг даты в
+графике. Неточные ответы помечаются `uncertain`: такие значения в файл
+сразу не пишутся, их подтверждает человек на странице результата.
+
 Важно о чтении книг: они открываются в режиме `read_only`, где обращение
 `sheet.cell(row=..., column=...)` каждый раз заново разбирает весь XML листа.
 Поэтому случайный доступ по ячейкам здесь запрещён: лист читается одним
@@ -88,6 +93,9 @@ NOT_A_NAME = (
     "выходной",
 )
 
+# Порог, ниже которого подбор склада требует подтверждения человеком.
+CONFIRM_MIN_SCORE = 0.95
+
 
 @dataclass
 class RefsInfo:
@@ -97,6 +105,14 @@ class RefsInfo:
     admin: str = ""
     checker: str = ""
     auditors: tuple[str, ...] = ()
+    # Схожесть имени склада с именем из книги: 1.0 — точное совпадение.
+    confidence: float = 1.0
+    # Сдвиг найденной записи графика относительно даты сверки, дни.
+    day_shift: int = 0
+    # Понятные причины сомнения: показываются на странице результата.
+    notes: tuple[str, ...] = ()
+    # Значения найдены, но подбор неточный: нужно подтверждение человека.
+    uncertain: bool = False
 
     @property
     def auditors_text(self) -> str:
@@ -435,15 +451,18 @@ def forget_books() -> None:
 # --- Поиск данных по складу и дате ------------------------------------------
 
 
-def _match_store(store: str, known: list[str], min_score: float) -> str:
+def _match_store(store: str, known: list[str], min_score: float) -> tuple[str, float]:
+    """Ближайшее имя склада и его схожесть. Пустое имя — совпадений нет."""
     if store in known:
-        return store
+        return store, 1.0
     best, score = "", 0.0
     for name in known:
         ratio = similarity(store, name)
         if ratio > score:
             best, score = name, ratio
-    return best if score >= min_score else ""
+    if score < min_score:
+        return "", score
+    return best, score
 
 
 def lookup(
@@ -451,38 +470,94 @@ def lookup(
     day: dt.date | None,
     books: RefsBooks,
     checker: str = "",
-    min_score: float = 0.90,
+    min_score: float = 0.80,
     days_around: int = 3,
+    confirm_min_score: float = CONFIRM_MIN_SCORE,
 ) -> RefsInfo:
-    """Собирает данные по складу и дате инвентаризации."""
+    """Собирает данные по складу и дате инвентаризации.
+
+    Порог `min_score` — граница, ниже которой склад считается не найденным.
+    Всё, что найдено по неточному имени или со сдвигом даты, помечается
+    `uncertain`: такие значения требуют подтверждения человеком.
+    """
     store = normalize_store(warehouse)
     if not store or day is None:
-        return RefsInfo(checker=checker)
+        return RefsInfo(checker=checker, confidence=0.0)
+
+    notes: list[str] = []
+    scores: list[float] = []
+    shift = 0
 
     admin, people = "", ()
     visit_stores = sorted({name for name, _ in books.visits})
-    visit_key = _match_store(store, visit_stores, min_score)
+    visit_key, visit_score = _match_store(store, visit_stores, min_score)
     if visit_key:
-        for shift in range(0, days_around + 1):
-            for step in ((0,) if shift == 0 else (-shift, shift)):
+        for step_size in range(0, days_around + 1):
+            for step in ((0,) if step_size == 0 else (-step_size, step_size)):
                 found = books.visits.get((visit_key, day + dt.timedelta(days=step)))
                 if found:
                     admin, people = found
+                    shift = step
                     break
             if admin or people:
                 break
+        if admin or people:
+            scores.append(visit_score)
+            if visit_score < 1.0:
+                notes.append(
+                    f"Склад «{warehouse}» сопоставлен с «{visit_key}» в графике, "
+                    f"схожесть {visit_score:.2f}."
+                )
+            if shift:
+                notes.append(
+                    f"Запись в графике взята со сдвигом {shift:+d} дн. "
+                    f"от даты сверки {day:%d.%m.%Y}."
+                )
 
     reason = ""
-    plan_key = _match_store(store, sorted(books.plans), min_score)
+    plan_key, plan_score = _match_store(store, sorted(books.plans), min_score)
     if plan_key:
         for start, end, text, plan_admin in books.plans[plan_key]:
             if start <= day <= end:
                 reason = text
                 admin = admin or plan_admin
+                scores.append(plan_score)
+                if plan_score < 1.0:
+                    notes.append(
+                        f"Склад «{warehouse}» сопоставлен с «{plan_key}» в планировании, "
+                        f"схожесть {plan_score:.2f}."
+                    )
                 break
 
     auditors = tuple(full_name(person, books.by_surname) for person in people)
-    return RefsInfo(reason=reason, admin=admin, checker=checker, auditors=auditors)
+    info = RefsInfo(
+        reason=reason,
+        admin=admin,
+        checker=checker,
+        auditors=auditors,
+        confidence=min(scores) if scores else 0.0,
+        day_shift=shift,
+        notes=tuple(notes),
+    )
+    info.uncertain = bool(
+        info.found and (info.confidence < confirm_min_score or shift != 0)
+    )
+    return info
+
+
+def pending(info: RefsInfo) -> RefsInfo:
+    """Версия ответа без неподтверждённых значений.
+
+    Проверяющий всегда один и тот же, поэтому он остаётся. Остальное ждёт
+    подтверждения человека и в файл сверки пока не пишется.
+    """
+    return RefsInfo(
+        checker=info.checker,
+        confidence=info.confidence,
+        day_shift=info.day_shift,
+        notes=info.notes,
+        uncertain=info.uncertain,
+    )
 
 
 def write_cells(sheet, info: RefsInfo, cells: dict[str, str]) -> list[str]:
