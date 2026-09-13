@@ -16,6 +16,7 @@ from ..config import Settings
 from . import refs, report
 from .format import format_workbook, output_filename
 from .guard import check_archive
+from .meta import SheetMeta
 from .parse import ParseError, warehouse_from_filename
 from .refs_sync import local_paths
 from .repair import RepairError, repair
@@ -40,6 +41,8 @@ class PipelineResult:
     decisions: dict[str, bool] | None = None
     # Причина, администратор, проверяющий и ревизоры из справочников.
     refs: dict = field(default_factory=dict)
+    # Ручные поля сверки: нужны при каждой пересборке файла.
+    sheet_meta: SheetMeta = field(default_factory=SheetMeta)
 
 
 def work_dir(settings: Settings) -> Path:
@@ -234,9 +237,9 @@ def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) ->
         days_around=settings.refs_days_around,
     )
     written = refs.write_cells(sheet, info, settings.refs_cells())
-    problems = refs_problems(warehouse, day, books, settings) if not info.found else []
-    if info.found and not info.reason:
-        problems = refs_problems(warehouse, day, books, settings)
+    # Разбор причин — тяжёлый шаг, поэтому считается ровно один раз.
+    need_problems = not info.found or not info.reason
+    problems = refs_problems(warehouse, day, books, settings) if need_problems else []
     return {
         "reason": info.reason,
         "admin": info.admin,
@@ -259,11 +262,13 @@ def process(
     settings: Settings | None = None,
     decisions: dict[str, bool] | None = None,
     folder: str | Path | None = None,
+    sheet_meta: SheetMeta | None = None,
 ) -> PipelineResult:
     """Обрабатывает файл сверки и возвращает путь к готовому файлу.
 
     `folder` — готовая рабочая папка. Веб-слой передаёт ту же папку, в которую
     сохранил загруженный файл, чтобы лишние папки не оставались на диске.
+    `sheet_meta` — ручные поля сверки (причина, продавцы, подписи).
     """
     settings = settings or Settings.load()
     folder = Path(folder) if folder is not None else work_dir(settings)
@@ -278,7 +283,7 @@ def process(
     if not warehouse:
         raise ParseError("Из имени файла не вышло получить имя склада.")
 
-    format_result = format_workbook(sheet, warehouse, settings, decisions)
+    format_result = format_workbook(sheet, warehouse, settings, decisions, sheet_meta)
 
     try:
         refs_info = fill_refs(
@@ -318,4 +323,5 @@ def process(
         source_name=original_filename,
         decisions=dict(decisions or {}),
         refs=refs_info,
+        sheet_meta=sheet_meta or SheetMeta(),
     )
