@@ -120,6 +120,7 @@
 		<input type="hidden" name="strict" value="{% if strict %}on{% else %}off{% endif %}" />
 		<input type="hidden" name="verify" value="{{ verify }}" />
 		<input type="hidden" name="prev_date" value="{{ meta.prev_date }}" />
+		<input type="hidden" name="extra" value="{{ meta.extra }}" />
 		<input type="hidden" name="share_mode" value="{{ meta.share_mode }}" />
 		{% for seller in meta.sellers %}
 		<input type="hidden" name="sellers" value="{{ seller.name }}" />
@@ -225,6 +226,12 @@
 		<div class="field">
 			<label class="field-label" for="meta-prev-date">Дата предыдущей инвентаризации</label>
 			<input id="meta-prev-date" type="date" name="prev_date" value="{{ meta.prev_date }}" />
+		</div>
+
+		<div class="field">
+			<label class="field-label" for="meta-extra">Неучтёнка</label>
+			<input id="meta-extra" type="number" name="extra" value="{{ meta.extra }}" step="0.01" placeholder="Сумма неучтёнки" />
+			<span class="hint">Сумма попадёт в ячейку C1. Неподтверждённая неучтёнка (C2) остаётся пустой для ручного ввода. Расчёт продавцов идёт от итога с вычетом неучтёнки.</span>
 		</div>
 
 		<div class="field">
