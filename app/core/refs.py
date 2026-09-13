@@ -13,10 +13,17 @@
 удалось, поля остаются пустыми. Никакие служебные пометки в файл сверки
 не пишутся.
 
+Разметка книг у людей плавает, поэтому разбор нарочно гибкий:
+
+* в планировании строка недель и столбец магазинов ищутся по содержимому,
+  а не берутся по номеру;
+* в графике фамилии ревизоров могут быть и внутри ячейки магазина через
+  перевод строки, и в строках ниже даты — читаются оба варианта.
+
 Подбор склада нечёткий, поэтому у каждого ответа есть уверенность:
 `RefsInfo.confidence` — схожесть имени склада, `day_shift` — сдвиг даты в
-графике. Неточные ответы помечаются `uncertain`: такие значения в файл
-сразу не пишутся, их подтверждает человек на странице результата.
+графике. Неточные и неполные ответы помечаются `uncertain`: такие значения
+в файл сразу не пишутся, их подтверждает человек на странице результата.
 
 Важно о чтении книг: они открываются в режиме `read_only`, где обращение
 `sheet.cell(row=..., column=...)` каждый раз заново разбирает весь XML листа.
@@ -43,6 +50,9 @@ SCHEDULE_SHEET = "Переучеты"
 # Страховка от гигантских листов: дальше этих пределов данных не бывает.
 MAX_ROWS = 20000
 MAX_COLUMNS = 200
+
+# Сколько строк под датой в графике относятся к этой же дате.
+BLOCK_ROWS = 8
 
 # Листы книги планирования, которые не относятся к администраторам.
 PLANNING_SKIP = (
@@ -80,8 +90,10 @@ WEEK = re.compile(
 FULL_NAME = re.compile(
     r"^([А-ЯЁ][а-яё\-]+)\s+([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]+)$",
 )
-# «Павлова М.», «Смирнова»
-SHORT_NAME = re.compile(r"^([А-ЯЁ][а-яё\-]+)\s*([А-ЯЁ])?\.?$")
+# «Павлова», «Павлова М.», «Павлова М. А.», «Павлова М.А.»
+SHORT_NAME = re.compile(
+    r"^([А-ЯЁ][а-яё\-]+)(?:\s*([А-ЯЁ])\.?(?:\s*([А-ЯЁ])\.?)?)?$",
+)
 
 NOT_A_NAME = (
     "дата",
@@ -89,8 +101,10 @@ NOT_A_NAME = (
     "закрытия",
     "итого",
     "склад",
+    "магазин",
     "отпуск",
     "выходной",
+    "больничный",
 )
 
 # Порог, ниже которого подбор склада требует подтверждения человеком.
@@ -111,7 +125,7 @@ class RefsInfo:
     day_shift: int = 0
     # Понятные причины сомнения: показываются на странице результата.
     notes: tuple[str, ...] = ()
-    # Значения найдены, но подбор неточный: нужно подтверждение человека.
+    # Данные неточные или неполные: нужно подтверждение человека.
     uncertain: bool = False
 
     @property
@@ -219,16 +233,38 @@ def _at(rows: list[list], row: int, column: int) -> object:
     return None
 
 
+def _lines(rows: list[list], row: int, column: int) -> list[str]:
+    """Непустые строки внутри одной ячейки."""
+    parts = str(_at(rows, row, column) or "").split("\n")
+    return [text for text in (_clean(part) for part in parts) if text]
+
+
 # --- Книга планирования -----------------------------------------------------
 
 
-def _week_columns(rows: list[list], year: int) -> dict[int, tuple[dt.date, dt.date]]:
+def _week_row(rows: list[list], limit: int = 12) -> int:
+    """Строка с подписями недель. Ищется по содержимому, а не по номеру."""
+    best_row, best_count = 0, 0
+    for row in range(1, min(len(rows), limit) + 1):
+        count = sum(
+            1
+            for column in range(1, _width(rows) + 1)
+            if WEEK.search(_clean(_at(rows, row, column)))
+        )
+        if count > best_count:
+            best_row, best_count = row, count
+    return best_row if best_count >= 2 else 0
+
+
+def _week_columns(
+    rows: list[list], year: int, header_row: int
+) -> dict[int, tuple[dt.date, dt.date]]:
     """Столбцы недель: номер столбца -> (первый день, последний день)."""
     spans: dict[int, tuple[dt.date, dt.date]] = {}
     current_year = year
     last_month = 0
     for column in range(1, _width(rows) + 1):
-        label = _clean(_at(rows, 2, column))
+        label = _clean(_at(rows, header_row, column))
         match = WEEK.search(label)
         if not match:
             continue
@@ -254,14 +290,39 @@ def _week_columns(rows: list[list], year: int) -> dict[int, tuple[dt.date, dt.da
     return spans
 
 
-def _sheet_year(rows: list[list], default: int) -> int:
-    for column in range(1, min(_width(rows), 20) + 1):
-        value = _at(rows, 1, column)
-        if isinstance(value, (int, float)) and 2000 < int(value) < 2100:
-            return int(value)
-        match = re.search(r"20\d{2}", _clean(value))
-        if match:
-            return int(match.group(0))
+def _store_column(
+    rows: list[list],
+    header_row: int,
+    spans: dict[int, tuple[dt.date, dt.date]],
+    limit: int = 8,
+) -> int:
+    """Столбец с названиями магазинов: самый «текстовый» из первых столбцов."""
+    best_column, best_count = 0, 0
+    for column in range(1, min(_width(rows), limit) + 1):
+        if column in spans:
+            continue
+        count = 0
+        for row in range(header_row + 1, len(rows) + 1):
+            text = _clean(_at(rows, row, column))
+            if len(text) < 3 or WEEK.search(text):
+                continue
+            if text.replace(",", ".").replace(".", "").isdigit():
+                continue
+            count += 1
+        if count > best_count:
+            best_column, best_count = column, count
+    return best_column or 2
+
+
+def _sheet_year(rows: list[list], header_row: int, default: int) -> int:
+    for row in range(1, max(header_row, 1) + 1):
+        for column in range(1, min(_width(rows), 20) + 1):
+            value = _at(rows, row, column)
+            if isinstance(value, (int, float)) and 2000 < int(value) < 2100:
+                return int(value)
+            match = re.search(r"20\d{2}", _clean(value))
+            if match:
+                return int(match.group(0))
     return default
 
 
@@ -276,12 +337,17 @@ def read_planning(path: str | Path) -> dict[str, list[tuple[dt.date, dt.date, st
                 continue
             rows = _matrix(book[name])
             admin = _clean(name)
-            year = _sheet_year(rows, dt.date.today().year)
-            spans = _week_columns(rows, year)
+            header_row = _week_row(rows)
+            if not header_row:
+                logger.warning("Лист планирования «%s»: строка недель не найдена", name)
+                continue
+            year = _sheet_year(rows, header_row, dt.date.today().year)
+            spans = _week_columns(rows, year, header_row)
             if not spans:
                 continue
-            for row in range(3, len(rows) + 1):
-                store = normalize_store(_at(rows, row, 2))
+            store_column = _store_column(rows, header_row, spans)
+            for row in range(header_row + 1, len(rows) + 1):
+                store = normalize_store(_at(rows, row, store_column))
                 if not store:
                     continue
                 bucket = plans.setdefault(store, [])
@@ -308,6 +374,24 @@ def _admin_columns(rows: list[list], header_row: int) -> dict[int, str]:
     return columns
 
 
+def _block_end(rows: list[list], row: int) -> int:
+    """Последняя строка, относящаяся к дате из строки `row`.
+
+    Фамилии ревизоров в графике часто стоят не внутри ячейки магазина, а в
+    строках под датой, у которых столбец с датой пустой.
+    """
+    last = row
+    while last < len(rows) and last - row < BLOCK_ROWS:
+        following = last + 1
+        values = rows[following - 1]
+        if _as_date(values[0] if values else None) is not None:
+            break
+        if len(_admin_columns(rows, following)) >= 3:
+            break
+        last = following
+    return last
+
+
 def read_schedule(path: str | Path) -> tuple[
     dict[tuple[str, dt.date], tuple[str, tuple[str, ...]]],
     dict[str, list[str]],
@@ -328,7 +412,8 @@ def read_schedule(path: str | Path) -> tuple[
 
         rows = _matrix(book[SCHEDULE_SHEET])
         admins: dict[int, str] = {}
-        for row in range(1, len(rows) + 1):
+        row = 1
+        while row <= len(rows):
             values = rows[row - 1]
             day = _as_date(values[0] if values else None)
             if day is None:
@@ -336,13 +421,16 @@ def read_schedule(path: str | Path) -> tuple[
                 fresh = _admin_columns(rows, row)
                 if len(fresh) >= 3:
                     admins = fresh
+                row += 1
                 continue
             if not admins:
+                row += 1
                 continue
+            last = _block_end(rows, row)
             for column, admin in admins.items():
-                cell = values[column - 1] if column - 1 < len(values) else None
-                lines = [_clean(part) for part in str(cell or "").split("\n")]
-                lines = [part for part in lines if part]
+                lines: list[str] = []
+                for line_row in range(row, last + 1):
+                    lines.extend(_lines(rows, line_row, column))
                 if not lines:
                     continue
                 store = normalize_store(lines[0])
@@ -350,6 +438,7 @@ def read_schedule(path: str | Path) -> tuple[
                 if not store:
                     continue
                 visits[(store, day)] = (admin, people)
+            row = last + 1
     finally:
         book.close()
     return visits, by_surname
@@ -358,14 +447,14 @@ def read_schedule(path: str | Path) -> tuple[
 def _collect_names(sheet, by_surname: dict[str, list[str]]) -> None:
     for row in sheet.iter_rows(values_only=True):
         for value in row:
-            text = _clean(value)
-            match = FULL_NAME.match(text)
-            if not match:
-                continue
-            key = _surname_key(match.group(1))
-            names = by_surname.setdefault(key, [])
-            if text not in names:
-                names.append(text)
+            for text in (_clean(part) for part in str(value or "").split("\n")):
+                match = FULL_NAME.match(text)
+                if not match:
+                    continue
+                key = _surname_key(match.group(1))
+                names = by_surname.setdefault(key, [])
+                if text not in names:
+                    names.append(text)
 
 
 # --- Разворот фамилии в полное ФИО ------------------------------------------
@@ -465,6 +554,23 @@ def _match_store(store: str, known: list[str], min_score: float) -> tuple[str, f
     return best, score
 
 
+def _pick_plan(
+    entries: list[tuple[dt.date, dt.date, str, str]],
+    day: dt.date,
+    days_around: int,
+) -> tuple[str, str, int] | None:
+    """Причина по неделе, в которую попадает дата. Иначе ближайшая неделя."""
+    for start, end, text, admin in entries:
+        if start <= day <= end:
+            return text, admin, 0
+    picked: tuple[str, str, int] | None = None
+    for start, end, text, admin in entries:
+        gap = min(abs((day - start).days), abs((day - end).days))
+        if gap <= days_around and (picked is None or gap < picked[2]):
+            picked = (text, admin, gap)
+    return picked
+
+
 def lookup(
     warehouse: str,
     day: dt.date | None,
@@ -477,8 +583,8 @@ def lookup(
     """Собирает данные по складу и дате инвентаризации.
 
     Порог `min_score` — граница, ниже которой склад считается не найденным.
-    Всё, что найдено по неточному имени или со сдвигом даты, помечается
-    `uncertain`: такие значения требуют подтверждения человеком.
+    Всё, что найдено по неточному имени, со сдвигом даты или найдено не
+    полностью, помечается `uncertain` и требует подтверждения человеком.
     """
     store = normalize_store(warehouse)
     if not store or day is None:
@@ -487,6 +593,7 @@ def lookup(
     notes: list[str] = []
     scores: list[float] = []
     shift = 0
+    plan_gap = 0
 
     admin, people = "", ()
     visit_stores = sorted({name for name, _ in books.visits})
@@ -513,21 +620,35 @@ def lookup(
                     f"Запись в графике взята со сдвигом {shift:+d} дн. "
                     f"от даты сверки {day:%d.%m.%Y}."
                 )
+            if not people:
+                notes.append(
+                    "Ревизоры в графике не распознаны: в ячейке распределения "
+                    "фамилий нет. Впишите их вручную."
+                )
 
     reason = ""
     plan_key, plan_score = _match_store(store, sorted(books.plans), min_score)
     if plan_key:
-        for start, end, text, plan_admin in books.plans[plan_key]:
-            if start <= day <= end:
-                reason = text
-                admin = admin or plan_admin
-                scores.append(plan_score)
-                if plan_score < 1.0:
-                    notes.append(
-                        f"Склад «{warehouse}» сопоставлен с «{plan_key}» в планировании, "
-                        f"схожесть {plan_score:.2f}."
-                    )
-                break
+        picked = _pick_plan(books.plans[plan_key], day, days_around)
+        if picked:
+            reason, plan_admin, plan_gap = picked
+            admin = admin or plan_admin
+            scores.append(plan_score)
+            if plan_score < 1.0:
+                notes.append(
+                    f"Склад «{warehouse}» сопоставлен с «{plan_key}» в планировании, "
+                    f"схожесть {plan_score:.2f}."
+                )
+            if plan_gap:
+                notes.append(
+                    f"Причина взята из недели, отстоящей от даты сверки "
+                    f"на {plan_gap} дн."
+                )
+    if not reason:
+        notes.append(
+            "Причина инвентаризации в планировании не найдена: "
+            "укажите её вручную."
+        )
 
     auditors = tuple(full_name(person, books.by_surname) for person in people)
     info = RefsInfo(
@@ -540,8 +661,17 @@ def lookup(
         notes=tuple(notes),
     )
     info.uncertain = bool(
-        info.found and (info.confidence < confirm_min_score or shift != 0)
+        info.found
+        and (
+            info.confidence < confirm_min_score
+            or shift != 0
+            or plan_gap != 0
+            or not reason
+            or not auditors
+        )
     )
+    if not info.uncertain:
+        info.notes = ()
     return info
 
 
