@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import copy
 
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles.colors import Color
 from openpyxl.utils.cell import range_boundaries
 
 YELLOW = "FFFFFF00"
@@ -20,6 +21,10 @@ DATE_FORMAT = "DD.MM.YYYY"
 TOTAL_SPAN = 2
 # Коробка значения неучтёнки тоже шириной в две колонки: C:D.
 EXTRA_SPAN = 2
+# Плашка срока приёма найденного товара занимает E:J.
+NOTICE_SPAN = 6
+# Заливка плашки в образце задана темой книги, а не цветом RGB.
+NOTICE_THEME = 5
 
 # Ширины столбцов 1–12. Остальные остаются по умолчанию.
 COLUMN_WIDTHS = {
@@ -75,6 +80,11 @@ def copy_style(source, target) -> None:
 
 def fill(color: str) -> PatternFill:
     return PatternFill(fill_type="solid", start_color=color, end_color=color)
+
+
+def theme_fill(theme: int = NOTICE_THEME) -> PatternFill:
+    """Заливка цветом темы книги, как у плашки в образце."""
+    return PatternFill(fill_type="solid", fgColor=Color(theme=theme, tint=0.0))
 
 
 def no_fill() -> PatternFill:
@@ -189,7 +199,7 @@ def style_grand_total_cell(cell) -> None:
 
 
 def style_net_total_cell(cell) -> None:
-    """Итог с вычетом неучтёнки (строка «С н. д/с:»).
+    """Итог с неучтёнкой (строка «С неучтёнкой:»).
 
     В образце это зелёная коробка I:J со средней рамкой:
     именно от этого числа считается ставка продавцов.
@@ -226,6 +236,47 @@ def style_extra_value_cell(cell) -> None:
     cell.alignment = Alignment(horizontal="center", vertical="center")
     paint(cell, YELLOW)
     wide_box(cell, EXTRA_SPAN)
+
+
+def style_notice_cell(cell) -> None:
+    """Плашка «Найденный товар принимается до:» в E1:J1.
+
+    В образце это широкая ячейка с заливкой темы, текстом
+    по центру и средней линией слева — она отделяет плашку
+    от коробки неучтёнки.
+    """
+    cell.font = Font(name="Arial", size=10)
+    cell.number_format = "General"
+    cell.border = Border(left=medium_side())
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.fill = theme_fill()
+    wide_box(cell, NOTICE_SPAN)
+
+
+def style_field_label_cell(cell, right_line: bool = False, bottom_line: bool = False) -> None:
+    """Подпись поля шапки: «Склад:», «Недостача:» и прочие.
+
+    В образце все подписи Arial 9 и прижаты вправо, к своему
+    значению. Линии по краю нужны только у блока итогов.
+    """
+    cell.font = Font(name="Arial", size=9)
+    cell.alignment = Alignment(horizontal="right", vertical="center")
+    if right_line or bottom_line:
+        side = medium_side()
+        cell.border = Border(
+            right=side if right_line else None,
+            bottom=side if bottom_line else None,
+        )
+
+
+def style_field_value_cell(cell, span: int = 1, bottom_line: bool = False) -> None:
+    """Значение поля шапки: имя склада, причина инвентаризации."""
+    cell.font = Font(name="Arial", size=9, bold=True)
+    cell.alignment = Alignment(horizontal="left", vertical="center")
+    if bottom_line:
+        cell.border = Border(bottom=medium_side())
+    if span > 1:
+        wide_box(cell, span)
 
 
 def apply_geometry(sheet, last_row: int) -> None:
