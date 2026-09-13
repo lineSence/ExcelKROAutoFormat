@@ -101,7 +101,8 @@ class Settings:
     # Папка местных копий книг и файл расписания.
     refs_dir: str = "/var/lib/excelkro/refs"
     refs_state_path: str = "/var/lib/excelkro/refs/state.json"
-    # Проверяющий всегда один и тот же.
+    # Проверяющий всегда один и тот же: подставляется в форму сверки,
+    # а в мини-таблицу подписей попадает строкой «Проверил».
     default_checker: str = "Разумовский"
     # Порог схожести имён складов и допустимый сдвиг даты в графике.
     # На 0.90 правильные совпадения отбрасывались, поэтому порог ниже,
@@ -112,9 +113,11 @@ class Settings:
     refs_confirm_min_score: float = 0.95
     refs_days_around: int = 3
     # Адреса ячеек готового файла. Пустое значение — в файл не писать.
+    # Проверяющий в сам файл не пишется: в образце в верхней части
+    # никаких фамилий нет, он виден только в таблице подписей.
     refs_cell_reason: str = "C5"
     refs_cell_admin: str = "L2"
-    refs_cell_checker: str = "L3"
+    refs_cell_checker: str = ""
     refs_cell_auditors: str = "L4"
     # Шаг проверки расписания копирования, секунды.
     refs_tick_seconds: int = 30
@@ -180,7 +183,7 @@ class Settings:
             refs_days_around=int(_number("REFS_DAYS_AROUND", 3)),
             refs_cell_reason=_text("REFS_CELL_REASON", "C5"),
             refs_cell_admin=_text("REFS_CELL_ADMIN", "L2"),
-            refs_cell_checker=_text("REFS_CELL_CHECKER", "L3"),
+            refs_cell_checker=_text("REFS_CELL_CHECKER", ""),
             refs_cell_auditors=_text("REFS_CELL_AUDITORS", "L4"),
             refs_tick_seconds=int(_number("REFS_TICK_SECONDS", 30)),
         )
