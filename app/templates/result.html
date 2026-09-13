@@ -19,9 +19,93 @@
 			{% elif verify == "model" %}<span class="badge badge-warn">модель не загрузилась</span>
 			{% else %}<span class="badge">только логика</span>{% endif %}
 			{% if comparison %}<span class="badge badge-ok">сравнение с прошлой сверкой</span>{% endif %}
+			{% if claims and claims.applied %}<span class="badge badge-ok">реестр: внесено {{ claims.applied }}</span>{% endif %}
 		</div>
 	</div>
 </section>
+
+{% if claims and (claims.rows or claims.skipped or claims.problems) %}
+<section class="card">
+	<h2>Заявки реестра расхождений</h2>
+	<p class="card-sub">
+		Недовозы и перетарки по этому магазину за год до даты инвентаризации.
+		Отметьте те строки, которые нужно внести в файл: пометка «не-» или «не+»,
+		разница суммы 0, зелёная строка, комментарий в столбце L. Без галочки
+		в файл ничего не пишется.
+	</p>
+
+	{% if claims.problems %}
+	<ul>
+		{% for line in claims.problems %}
+		<li class="error">{{ line }}</li>
+		{% endfor %}
+	</ul>
+	{% endif %}
+
+	{% if claims.rows %}
+	<form method="post" action="/claims/{{ token }}">
+		<input type="hidden" name="strict" value="{% if strict %}on{% else %}off{% endif %}" />
+		<input type="hidden" name="verify" value="{{ verify }}" />
+
+		<div class="table-wrap">
+			<table>
+				<thead>
+					<tr>
+						<th>Внести</th>
+						<th>Вид</th>
+						<th>Группа</th>
+						<th>Позиция сверки</th>
+						<th class="num">Строка</th>
+						<th class="num">Кол-во сверки</th>
+						<th class="num">Кол-во заявки</th>
+						<th class="num">Сумма до</th>
+						<th class="num">Сумма после</th>
+						<th>Комментарий</th>
+					</tr>
+				</thead>
+				<tbody>
+					{% for row in claims.rows %}
+					<tr>
+						<td><label><input type="checkbox" name="claim-{{ row.key }}" value="yes" {% if row.applied %}checked{% endif %} /> {{ row.mark }}</label></td>
+						<td>{{ row.kind }}{% if not row.closed %} <span class="badge badge-warn">частично</span>{% endif %}</td>
+						<td>{{ row.group }}</td>
+						<td>{{ row.name }}</td>
+						<td class="num">{{ row.row }}</td>
+						<td class="num">{{ row.diff }}</td>
+						<td class="num">{{ row.demand_qty }}</td>
+						<td class="num">{{ row.sum_before }}</td>
+						<td class="num">{{ row.sum_after }}</td>
+						<td>{{ row.comment }}</td>
+					</tr>
+					{% endfor %}
+				</tbody>
+			</table>
+		</div>
+
+		<div class="review-bar">
+			<span class="hint">Внесено {{ claims.applied }}, ждёт решения {{ claims.pending }}. Полностью закрытые строки уйдут из пересортов.</span>
+			<button type="submit">Внести заявки и собрать файл</button>
+		</div>
+	</form>
+	{% else %}
+	<p class="hint">Подходящих заявок по этому магазину не найдено.</p>
+	{% endif %}
+
+	{% if claims.skipped %}
+	<h3 class="card-sub">Спорные и неразмеченные заявки</h3>
+	<ul>
+		{% for line in claims.skipped %}
+		<li class="hint">{{ line }}</li>
+		{% endfor %}
+	</ul>
+	<p class="hint">Такие строки программа не трогает: разметьте их вручную.</p>
+	{% endif %}
+
+	{% if claims.book and not claims.book.found %}
+	<p class="hint">Книга реестра не загружена. <a class="link" href="/refs">Справочники</a></p>
+	{% endif %}
+</section>
+{% endif %}
 
 {% if comparison %}
 <section class="card">

@@ -9,6 +9,7 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
+from . import claims as claims_book
 from . import prev as prev_book
 from . import style
 from .meta import NET_ROW_OFFSET, SheetMeta
@@ -91,6 +92,10 @@ EXCLUDED_NOTE = (
     "Позиции с пометками «перез» и «не-» исключены из подбора пересортов: "
     "их пары подбирались заново или остались без пары."
 )
+CLAIMS_NOTE = (
+    "Позиции, закрытые реестром расхождений, из подбора пересортов исключены: "
+    "недовозы и перетарки не вина магазина."
+)
 
 
 @dataclass
@@ -149,6 +154,8 @@ class FormatResult:
     bottom_row: int = 0
     # Сравнение с предыдущей инвентаризацией.
     comparison: Comparison = field(default_factory=Comparison)
+    # Итог реестра расхождений: предложенные и внесённые пометки.
+    claims: dict = field(default_factory=dict)
 
 
 def _number(value: object) -> float:
@@ -357,8 +364,9 @@ def process_group(
     """Шаг 4: грозди брендов и разбор расхождений.
 
     `skip_rows` — строки, которые не участвуют в подборе пересортов.
-    Так перезачёты и позиции «не-» выводятся из игры: их пара либо
-    прикрепляется к другому товару, либо остаётся без пары.
+    Так перезачёты, позиции «не-» и закрытые реестром недовозы с
+    перетарками выводятся из игры: их пара либо прикрепляется к другому
+    товару, либо остаётся без пары.
     """
     blocked = set(skip_rows or ())
     items = []
@@ -755,6 +763,8 @@ def format_workbook(
     decisions: dict[str, bool] | None = None,
     sheet_meta: SheetMeta | None = None,
     previous=None,
+    claim_demands=None,
+    claim_decisions: dict[str, bool] | None = None,
 ) -> FormatResult:
     """Полный проход шагов 2–10.
 
@@ -762,6 +772,10 @@ def format_workbook(
     Если она передана, сначала берутся решения сравнения, потом идёт
     подбор пересортов без помеченных строк, а под блоком продавцов
     появляется мини-таблица «Перезачёт».
+
+    `claim_demands` — заявки реестра расхождений по текущему магазину
+    (модуль `claims`), `claim_decisions` — подтверждения человека по
+    каждой заявке. Без подтверждения в файл ничего не пишется.
     """
     document = parse(sheet)
     document = shift_header(sheet, document)
@@ -779,6 +793,17 @@ def format_workbook(
             date=str(getattr(previous, "date", "") or ""),
         ),
     )
+
+    # Реестр расхождений: подбор строк идёт до пересортов, запись — после.
+    claim_plan = claims_book.Plan()
+    if claim_demands:
+        claim_plan = claims_book.plan(
+            claims_book.sheet_rows(sheet, document.groups, settings.type_words),
+            list(claim_demands),
+        )
+    claim_marks = claims_book.confirmed(claim_plan.marks, claim_decisions)
+    claim_skip = claims_book.closed_rows(claim_plan.marks, claim_decisions)
+
     total_cells: list[str] = []
     for group in document.groups:
         # Сначала решения сравнения: перезачёты и «не-» не идут в пересорт.
@@ -786,16 +811,28 @@ def format_workbook(
         if previous is not None:
             entries = plan_comparison(sheet, group, previous, result.comparison)
         skip_rows = {entry["row"] for entry in entries}
+        # Закрытые реестром недовозы и перетарки тоже выходят из игры.
+        skip_rows.update(row for row in claim_skip if row in set(group.data_rows))
 
         group_result = process_group(sheet, group, settings, decisions, verifier, skip_rows)
         if entries:
             apply_comparison(sheet, entries, group_result.moved, result.comparison)
+        group_marks = [mark for mark in claim_marks if mark.group == group.name]
+        if group_marks:
+            claims_book.apply(sheet, group_marks, group_result.moved)
+        if entries or group_marks:
             # После обнуления сумм помеченных строк остаток меняется.
             group_result.remainder_sum = group_remainder(sheet, group)
         highlight_rest(sheet, group)
         group_result.total_cell = write_group_total(sheet, group, group_result.resort_pieces)
         total_cells.append(group_result.total_cell)
         result.groups.append(group_result)
+
+    result.claims = claims_book.report(
+        claim_plan.marks,
+        claim_decisions,
+        claim_plan.skipped,
+    )
 
     if total_cells:
         write_grand_total(sheet, total_cells, header_row)

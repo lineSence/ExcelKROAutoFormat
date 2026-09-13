@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import __version__
 from .config import Settings
+from .core import claims as claims_book
 from .core import learning, refs_sync, runtime
 from .core.guard import UploadTooLarge
 from .core.meta import SheetMeta
@@ -46,6 +47,8 @@ UNSAFE_NAME = re.compile(r"[\\/\x00]+")
 VERIFY_MODES = ("off", "model")
 # Поля формы сверки, у которых может быть несколько значений.
 META_MULTI_FIELDS = ("sellers", "seller_hours", "auditors")
+# Префикс полей формы с заявками реестра расхождений.
+CLAIM_PREFIX = "claim-"
 
 RESULTS: dict[str, PipelineResult] = {}
 # Режим «только чёткие пересорты» по токену результата: нужен при пересборке.
@@ -138,6 +141,7 @@ async def _run_pipeline(
     sheet_meta: SheetMeta | None = None,
     prev_path: Path | None = None,
     prev_name: str = "",
+    claim_decisions: dict[str, bool] | None = None,
 ) -> PipelineResult:
     """Запускает обработку в отдельном потоке: сервер остаётся отзывчивым."""
     return await run_in_threadpool(
@@ -150,6 +154,7 @@ async def _run_pipeline(
         sheet_meta,
         prev_path,
         prev_name,
+        claim_decisions,
     )
 
 
@@ -244,6 +249,7 @@ async def upload(
             None,
             prev_path,
             prev_name,
+            None,
         )
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
@@ -266,6 +272,7 @@ async def _rebuild(
     verify_mode: str,
     token: str,
     message: str = "",
+    claim_decisions: dict[str, bool] | None = None,
 ) -> HTMLResponse:
     """Собирает файл заново с теми же режимами, решениями и ручными полями."""
     folder = work_dir(settings)
@@ -279,6 +286,9 @@ async def _rebuild(
         prev_path = folder / old.prev_path.name
         await run_in_threadpool(shutil.copyfile, old.prev_path, prev_path)
 
+    if claim_decisions is None:
+        claim_decisions = dict(old.claim_decisions or {})
+
     try:
         result = await _run_pipeline(
             source,
@@ -290,6 +300,7 @@ async def _rebuild(
             sheet_meta,
             prev_path,
             old.prev_name,
+            claim_decisions,
         )
     except (ParseError, RepairError) as error:
         shutil.rmtree(folder, ignore_errors=True)
@@ -376,6 +387,41 @@ async def confirm(request: Request, token: str):
     )
 
 
+@app.post("/claims/{token}", response_class=HTMLResponse)
+async def claims_confirm(request: Request, token: str):
+    """Вносит подтверждённые заявки реестра расхождений в файл.
+
+    Подтверждение идёт по строкам: отмеченные галочкой заявки получают
+    пометку и выходят из подбора пересортов, остальные остаются как были.
+    """
+    old = RESULTS.get(token)
+    if old is None or old.source_path is None or not old.source_path.is_file():
+        return _error(request, EXPIRED)
+
+    form = await request.form()
+    claim_decisions: dict[str, bool] = dict(old.claim_decisions or {})
+    for key, value in form.multi_items():
+        if not key.startswith(CLAIM_PREFIX):
+            continue
+        claim_decisions[key[len(CLAIM_PREFIX):]] = _is_on(value)
+
+    strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
+    verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
+    chosen = sum(1 for value in claim_decisions.values() if value)
+
+    return await _rebuild(
+        request,
+        old,
+        dict(old.decisions or {}),
+        old.sheet_meta,
+        strict_on,
+        verify_mode,
+        token,
+        message=f"Заявки реестра внесены в файл: {chosen}.",
+        claim_decisions=claim_decisions,
+    )
+
+
 def _store_answers(old: PipelineResult, answers: dict[str, bool]) -> None:
     """Кладёт ответы по спорным парам в базу примеров."""
     samples = learning.samples_from_decisions(
@@ -437,6 +483,7 @@ def _result_page(
             "refs": result.refs,
             "meta": result.sheet_meta.to_form(),
             "comparison": result.comparison,
+            "claims": result.claims,
             "message": message,
         },
     )
@@ -472,6 +519,7 @@ def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLRespons
         context={
             "state": state,
             "books": refs_sync.book_status(settings.refs_dir),
+            "claims": claims_book.status(settings.refs_dir),
             "checker": settings.default_checker,
             "cells": settings.refs_cells(),
             "local_dir": settings.refs_dir,
@@ -495,18 +543,27 @@ async def refs_upload(
     request: Request,
     planning: UploadFile | None = File(default=None),
     schedule: UploadFile | None = File(default=None),
+    claims: UploadFile | None = File(default=None),
 ):
     """Ручная загрузка книг справочников. Книги только сохраняются."""
     state = refs_sync.load_state(settings.refs_state_path)
     saved: list[str] = []
 
-    for kind, sent in (("planning", planning), ("schedule", schedule)):
+    sent_books = (
+        ("planning", planning),
+        ("schedule", schedule),
+        ("claims", claims),
+    )
+    for kind, sent in sent_books:
         if sent is None or not (sent.filename or "").strip():
             continue
         name = _safe_name(sent.filename)
         if not name.lower().endswith(".xlsx"):
             return _refs_page(request, error=f"Нужен файл .xlsx, получен: {name}")
-        target = refs_sync.book_target(settings.refs_dir, kind)
+        if kind == "claims":
+            target = claims_book.book_path(settings.refs_dir)
+        else:
+            target = refs_sync.book_target(settings.refs_dir, kind)
         try:
             await _save_upload(sent, target, settings.max_upload_mb)
         except UploadTooLarge:
@@ -517,7 +574,11 @@ async def refs_upload(
         except OSError:
             logger.exception("Не удалось сохранить справочник")
             return _refs_page(request, error="Файл не сохранён. Подробности — в журнале службы.")
-        state = refs_sync.mark_upload(state, kind, name, settings.refs_state_path)
+        if kind == "claims":
+            # Кеш реестра перестроится сам при первой сверке.
+            claims_book.forget_cache(settings.refs_dir)
+        else:
+            state = refs_sync.mark_upload(state, kind, name, settings.refs_state_path)
         saved.append(name)
 
     if not saved:
@@ -537,11 +598,13 @@ def refs_check(request: Request):
     """
     state = refs_sync.load_state(settings.refs_state_path)
     state = refs_sync.measure(state, settings.refs_dir, settings.refs_state_path)
+    claims_info = claims_book.status(settings.refs_dir)
     if state.last_status == "ошибка":
         return _refs_page(request, error=f"Книги не разобраны. {state.last_error}")
+    tail = f", записей реестра {claims_info['rows']}" if claims_info.get("found") else ""
     return _refs_page(
         request,
-        note=f"Разбор готов: складов {state.stores}, фамилий {state.people}.",
+        note=f"Разбор готов: складов {state.stores}, фамилий {state.people}{tail}.",
     )
 
 
