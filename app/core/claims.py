@@ -158,6 +158,18 @@ def cache_path(refs_dir: str | Path) -> Path:
     return Path(refs_dir) / CACHE_FILE
 
 
+def forget_cache(refs_dir: str | Path) -> None:
+    """Убирает кеш разобранных строк: нужно после загрузки новой книги.
+
+    Кеш и так проверяется по размеру и времени правки файла, но после
+    ручной загрузки книги лишний файл на диске смысла не имеет.
+    """
+    try:
+        cache_path(refs_dir).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Кеш реестра не удалён", exc_info=True)
+
+
 def status(refs_dir: str | Path) -> dict:
     """Состояние книги реестра для страницы «Справочники»."""
     path = book_path(refs_dir)
