@@ -18,9 +18,88 @@
 			{% if verify == "model" and summary.verify_used %}<span class="badge badge-ok">логика + нейросеть</span>
 			{% elif verify == "model" %}<span class="badge badge-warn">модель не загрузилась</span>
 			{% else %}<span class="badge">только логика</span>{% endif %}
+			{% if comparison %}<span class="badge badge-ok">сравнение с прошлой сверкой</span>{% endif %}
 		</div>
 	</div>
 </section>
+
+{% if comparison %}
+<section class="card">
+	<h2>Сравнение с предыдущей инвентаризацией</h2>
+	<p class="card-sub">
+		Файл прошлой сверки: {{ comparison.file_name or "не указан" }}{% if comparison.date %} · {{ comparison.date }}{% endif %}.
+		Позиции сопоставляются по полному названию.
+	</p>
+
+	{% if comparison.problems %}
+	<ul>
+		{% for line in comparison.problems %}
+		<li class="error">{{ line }}</li>
+		{% endfor %}
+	</ul>
+	{% endif %}
+
+	<ul class="facts">
+		<li><span>Позиций в прошлой сверке</span><span>{{ comparison.items or 0 }}</span></li>
+		<li><span>Совпало по названию</span><span>{{ comparison.matched or 0 }}</span></li>
+		<li><span>Пометка «перез»</span><span>{{ comparison.credits | length }}</span></li>
+		<li><span>Пометка «не-»</span><span>{{ comparison.not_minus | length }}</span></li>
+		<li><span>Сумма перезачёта</span><span>{{ comparison.credit_sum or 0 }}</span></li>
+	</ul>
+
+	{% if comparison.notes %}
+	<ul>
+		{% for line in comparison.notes %}
+		<li class="hint">{{ line }}</li>
+		{% endfor %}
+	</ul>
+	{% endif %}
+
+	{% if comparison.shares %}
+	<h3 class="card-sub">Таблица «Перезачёт» в файле</h3>
+	<div class="table-wrap">
+		<table>
+			<thead>
+				<tr><th>Продавец прошлой сверки</th><th class="num">Сумма перезачёта</th></tr>
+			</thead>
+			<tbody>
+				{% for row in comparison.shares %}
+				<tr><td>{{ row[0] or "—" }}</td><td class="num">{{ row[1] }}</td></tr>
+				{% endfor %}
+			</tbody>
+		</table>
+	</div>
+	<p class="hint">Суммы разделены по весам продавцов из предыдущей сверки — так же, как эти позиции списывались в прошлый раз.</p>
+	{% endif %}
+
+	{% if comparison.credits or comparison.not_minus %}
+	<h3 class="card-sub">Помеченные позиции</h3>
+	<div class="table-wrap">
+		<table>
+			<thead>
+				<tr><th>Пометка</th><th>Группа</th><th>Позиция</th><th class="num">Строка</th><th class="num">Кол-во сейчас</th><th class="num">Сумма до обнуления</th><th class="num">Сумма в прошлый раз</th></tr>
+			</thead>
+			<tbody>
+				{% for row in comparison.credits + comparison.not_minus %}
+				<tr>
+					<td>{{ row.mark }}</td>
+					<td>{{ row.group }}</td>
+					<td>{{ row.name }}</td>
+					<td class="num">{{ row.row }}</td>
+					<td class="num">{{ row.diff }}</td>
+					<td class="num">{{ row.sum_before }}</td>
+					<td class="num">{{ row.prev_sum }}</td>
+				</tr>
+				{% endfor %}
+			</tbody>
+		</table>
+	</div>
+	<p class="hint">У этих строк разница суммы поставлена в 0, а строка выделена зелёным.</p>
+	{% else %}
+	<p class="hint">Перезачётов и снятых позиций не найдено.</p>
+	{% endif %}
+</section>
+{% endif %}
 
 {% if refs and refs.uncertain %}
 <section class="card">
