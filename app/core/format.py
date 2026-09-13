@@ -42,6 +42,9 @@ MARK_NOT_MINUS = "не-"
 MARK_CREDIT = "перез"
 COL_CURRENCY_LABEL = 8   # H
 COL_GRAND_TOTAL = 9      # I
+# Ячейка неучтёнки в образце стоит в B1, над титулом.
+EXTRA_CELL_ROW = 1
+COL_EXTRA = COL_NAME     # B
 TITLE_TARGET_ROW = 2     # В образце титул стоит во второй строке.
 SCAN_COLUMNS = 12
 
@@ -496,17 +499,23 @@ def write_grand_total(sheet, total_cells: list[str], row: int) -> None:
     style.style_grand_total_cell(cell)
 
 
-def write_extra_total(sheet, row: int) -> None:
-    """Шаг 6.5: ячейка неучтёнки под общим итогом.
+def write_extra_total(sheet, below_row: int) -> None:
+    """Шаг 6.5: ячейка неучтёнки в B1, как в образце.
 
-    Значение остаётся пустым: сумму неучтёнки вписывают руками.
-    Оформление — жёлтая заливка и средняя рамка, как в образце.
+    Значение остаётся пустым: сумму неучтёнки или пометку
+    «Неучтёнки нет» вписывают руками. Оформление — жёлтая заливка
+    и средняя рамка. Под общим итогом (`below_row`) ячейка не нужна:
+    там снимаются заливка и рамка.
     """
-    unmerge_cell(sheet, row, COL_GRAND_TOTAL)
-    cell = sheet.cell(row=row, column=COL_GRAND_TOTAL)
+    unmerge_cell(sheet, EXTRA_CELL_ROW, COL_EXTRA)
+    cell = sheet.cell(row=EXTRA_CELL_ROW, column=COL_EXTRA)
     if cell.value in (None, ""):
         cell.value = None
     style.style_extra_cell(cell)
+
+    below = sheet.cell(row=below_row, column=COL_GRAND_TOTAL)
+    below.value = None
+    style.clear(below)
 
 
 def format_workbook(
