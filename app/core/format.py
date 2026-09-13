@@ -10,7 +10,7 @@ from openpyxl.utils.cell import range_boundaries
 
 from . import prev as prev_book
 from . import style
-from .meta import SheetMeta
+from .meta import EXTRA_ROW_OFFSET, SheetMeta
 from .meta import apply as apply_meta
 from .parse import (
     COL_BOOK,
@@ -496,6 +496,19 @@ def write_grand_total(sheet, total_cells: list[str], row: int) -> None:
     style.style_grand_total_cell(cell)
 
 
+def write_extra_total(sheet, row: int) -> None:
+    """Шаг 6.5: ячейка неучтёнки под общим итогом.
+
+    Значение остаётся пустым: сумму неучтёнки вписывают руками.
+    Оформление — жёлтая заливка и средняя рамка, как в образце.
+    """
+    unmerge_cell(sheet, row, COL_GRAND_TOTAL)
+    cell = sheet.cell(row=row, column=COL_GRAND_TOTAL)
+    if cell.value in (None, ""):
+        cell.value = None
+    style.style_extra_cell(cell)
+
+
 def format_workbook(
     sheet,
     warehouse: str,
@@ -547,6 +560,8 @@ def format_workbook(
 
     if total_cells:
         write_grand_total(sheet, total_cells, header_row)
+    # Ячейка неучтёнки нужна всегда, даже если итогов групп нет.
+    write_extra_total(sheet, header_row + EXTRA_ROW_OFFSET)
 
     if previous is not None:
         shares, notes = credit_shares(previous, result.comparison.credit_sum)
