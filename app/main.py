@@ -1,9 +1,9 @@
-"""Веб-слой: загрузка, подтверждение спорных пар, выдача файла, справочники.
+"""Веб-слой: загрузка, спорные пары, ручные поля, справочники, обучение.
 
-Тяжёлая работа (ремонт, разбор, справочники) выполняется в отдельном потоке
-через `run_in_threadpool`. Внутри `async def` обработчика нельзя вызывать
-блокирующий код напрямую: на время разбора встаёт весь сервер, и даже /health
-не отвечает.
+Тяжёлая работа (ремонт, разбор, справочники, обучение) выполняется в
+отдельном потоке через `run_in_threadpool`. Внутри `async def` обработчика
+нельзя вызывать блокирующий код напрямую: на время разбора встаёт весь
+сервер, и даже /health не отвечает.
 """
 
 from __future__ import annotations
@@ -15,18 +15,20 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from . import __version__
 from .config import Settings
-from .core import refs_sync
+from .core import learning, refs_sync, runtime
 from .core.guard import UploadTooLarge
+from .core.meta import SheetMeta
 from .core.parse import ParseError
 from .core.pipeline import PipelineResult, process, sweep, work_dir
 from .core.repair import RepairError
+from .core.verify import model_status
 
 BASE_DIR = Path(__file__).resolve().parent
 settings = Settings.load()
@@ -41,20 +43,42 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 CHUNK = 1024 * 1024
 UNSAFE_NAME = re.compile(r"[\\/\x00]+")
 
+VERIFY_MODES = ("off", "model")
+# Поля формы сверки, у которых может быть несколько значений.
+META_MULTI_FIELDS = ("sellers", "seller_hours", "auditors")
+
 RESULTS: dict[str, PipelineResult] = {}
 # Режим «только чёткие пересорты» по токену результата: нужен при пересборке.
 STRICT_FLAGS: dict[str, bool] = {}
+# Режим второго слоя по токену результата.
+VERIFY_FLAGS: dict[str, str] = {}
 
 GENERIC_ERROR = "Не удалось обработать файл. Подробности — в журнале службы."
+EMPTY_UPLOAD = (
+    "Файл не дошёл целиком: похоже, его изменили после выбора. "
+    "Закройте его в Excel и выберите заново."
+)
+EXPIRED = "Срок хранения истёк. Загрузите сверку заново."
 
 
-def _settings_for(strict: bool) -> Settings:
-    """Настройки одного запроса с выбранным режимом подбора пар."""
-    return replace(settings, strict_resort=bool(strict))
+def _mode(value: object) -> str:
+    """Режим проверки из формы. Неизвестное значение — чистая логика."""
+    text = str(value or "").strip().lower()
+    return text if text in VERIFY_MODES else "off"
+
+
+def _base() -> Settings:
+    """Настройки с учётом переключателей из интерфейса."""
+    return runtime.apply(settings)
+
+
+def _settings_for(strict: bool, verify: str = "off") -> Settings:
+    """Настройки одного запроса с выбранными режимами."""
+    return replace(_base(), strict_resort=bool(strict), verify_mode=_mode(verify))
 
 
 def _is_on(value: object) -> bool:
-    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on", "да")
 
 
 def _safe_name(name: object) -> str:
@@ -68,6 +92,7 @@ def _forget(token: str) -> None:
     """Убирает результат из памяти и удаляет его рабочую папку."""
     result = RESULTS.pop(token, None)
     STRICT_FLAGS.pop(token, None)
+    VERIFY_FLAGS.pop(token, None)
     if result is not None:
         shutil.rmtree(result.output_path.parent, ignore_errors=True)
 
@@ -79,6 +104,7 @@ def _drop_expired() -> None:
         if not RESULTS[token].output_path.is_file():
             RESULTS.pop(token, None)
             STRICT_FLAGS.pop(token, None)
+            VERIFY_FLAGS.pop(token, None)
 
 
 async def _save_upload(file: UploadFile, target: Path, limit_mb: int) -> int:
@@ -106,17 +132,20 @@ async def _run_pipeline(
     source: Path,
     original_name: str,
     strict: bool,
+    verify: str,
     folder: Path,
     decisions: dict[str, bool] | None = None,
+    sheet_meta: SheetMeta | None = None,
 ) -> PipelineResult:
     """Запускает обработку в отдельном потоке: сервер остаётся отзывчивым."""
     return await run_in_threadpool(
         process,
         source,
         original_name,
-        _settings_for(strict),
+        _settings_for(strict, verify),
         decisions,
         folder,
+        sheet_meta,
     )
 
 
@@ -133,6 +162,9 @@ def index(request: Request):
         context={
             "max_upload_mb": settings.max_upload_mb,
             "strict": settings.strict_resort,
+            "verify": _mode(settings.verify_mode),
+            "model": model_status(settings),
+            "embed": runtime.embed_status(_base()),
         },
     )
 
@@ -142,56 +174,58 @@ async def upload(
     request: Request,
     file: UploadFile = File(...),
     strict: str | None = Form(default=None),
+    verify: str | None = Form(default=None),
 ):
     await run_in_threadpool(_drop_expired)
     strict_on = _is_on(strict)
+    verify_mode = _mode(verify)
     name = _safe_name(file.filename)
 
     if not name.lower().endswith(".xlsx"):
-        return _error(request, "Нужен файл с расширением .xlsx.", strict_on)
+        return _error(request, "Нужен файл с расширением .xlsx.", strict_on, verify_mode)
 
     folder = work_dir(settings)
     source = folder / name
     try:
-        await _save_upload(file, source, settings.max_upload_mb)
+        size = await _save_upload(file, source, settings.max_upload_mb)
     except UploadTooLarge:
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, f"Файл больше {settings.max_upload_mb} МБ.", strict_on)
+        return _error(
+            request,
+            f"Файл больше {settings.max_upload_mb} МБ.",
+            strict_on,
+            verify_mode,
+        )
+
+    if not size:
+        shutil.rmtree(folder, ignore_errors=True)
+        return _error(request, EMPTY_UPLOAD, strict_on, verify_mode)
 
     try:
-        result = await _run_pipeline(source, name, strict_on, folder)
+        result = await _run_pipeline(source, name, strict_on, verify_mode, folder)
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, str(error), strict_on)
+        return _error(request, str(error), strict_on, verify_mode)
     except Exception:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, GENERIC_ERROR, strict_on, status=500)
+        return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
 
-    return _result_page(request, result, strict_on)
+    return _result_page(request, result, strict_on, verify_mode)
 
 
-@app.post("/confirm/{token}", response_class=HTMLResponse)
-async def confirm(request: Request, token: str):
-    """Применяет решения по спорным пересортам и строит файл заново."""
-    old = RESULTS.get(token)
-    if old is None or old.source_path is None or not old.source_path.is_file():
-        return _error(request, "Срок хранения истёк. Загрузите сверку заново.")
-
-    form = await request.form()
-    decisions: dict[str, bool] = dict(old.decisions or {})
-    for key, value in form.multi_items():
-        if not key.startswith("pair-"):
-            continue
-        answer = str(value).strip()
-        if answer == "yes":
-            decisions[key[5:]] = True
-        elif answer == "no":
-            decisions[key[5:]] = False
-
-    # Режим подбора сохраняется с первого прогона.
-    strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
+async def _rebuild(
+    request: Request,
+    old: PipelineResult,
+    decisions: dict[str, bool],
+    sheet_meta: SheetMeta | None,
+    strict_on: bool,
+    verify_mode: str,
+    token: str,
+    message: str = "",
+) -> HTMLResponse:
+    """Собирает файл заново с теми же режимами, решениями и ручными полями."""
     folder = work_dir(settings)
     # Исходный файл переносится в новую папку: старая будет удалена.
     source = folder / old.source_path.name
@@ -202,19 +236,108 @@ async def confirm(request: Request, token: str):
             source,
             old.source_name,
             strict_on,
+            verify_mode,
             folder,
             decisions,
+            sheet_meta,
         )
     except (ParseError, RepairError) as error:
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, str(error), strict_on)
+        return _error(request, str(error), strict_on, verify_mode)
     except Exception:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, GENERIC_ERROR, strict_on, status=500)
+        return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
 
     _forget(token)
-    return _result_page(request, result, strict_on)
+    return _result_page(request, result, strict_on, verify_mode, message)
+
+
+@app.post("/meta/{token}", response_class=HTMLResponse)
+async def meta(request: Request, token: str):
+    """Вносит в сверку ручные поля: причину, дату, продавцов и подписи."""
+    old = RESULTS.get(token)
+    if old is None or old.source_path is None or not old.source_path.is_file():
+        return _error(request, EXPIRED)
+
+    form = await request.form()
+    # Продавцы, часы и ревизоры приходят повторяющимися полями.
+    payload = {
+        key: (form.getlist(key) if key in META_MULTI_FIELDS else form.get(key))
+        for key in form.keys()
+    }
+    sheet_meta = SheetMeta.from_form(payload)
+    strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
+    verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
+
+    return await _rebuild(
+        request,
+        old,
+        dict(old.decisions or {}),
+        sheet_meta,
+        strict_on,
+        verify_mode,
+        token,
+        message="Данные сверки внесены в файл.",
+    )
+
+
+@app.post("/confirm/{token}", response_class=HTMLResponse)
+async def confirm(request: Request, token: str):
+    """Применяет решения по спорным пересортам и строит файл заново."""
+    old = RESULTS.get(token)
+    if old is None or old.source_path is None or not old.source_path.is_file():
+        return _error(request, EXPIRED)
+
+    form = await request.form()
+    decisions: dict[str, bool] = dict(old.decisions or {})
+    answers: dict[str, bool] = {}
+    for key, value in form.multi_items():
+        if not key.startswith("pair-"):
+            continue
+        answer = str(value).strip()
+        if answer == "yes":
+            decisions[key[5:]] = True
+            answers[key[5:]] = True
+        elif answer == "no":
+            decisions[key[5:]] = False
+            answers[key[5:]] = False
+
+    # Режимы сохраняются с первого прогона.
+    strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
+    verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
+
+    # Ответы человека — готовые примеры для обучения.
+    if answers:
+        try:
+            await run_in_threadpool(_store_answers, old, answers)
+        except Exception:  # noqa: BLE001
+            logger.exception("Не удалось сохранить примеры обучения")
+
+    # Ручные поля сверки не теряются при пересборке.
+    return await _rebuild(
+        request,
+        old,
+        decisions,
+        old.sheet_meta,
+        strict_on,
+        verify_mode,
+        token,
+    )
+
+
+def _store_answers(old: PipelineResult, answers: dict[str, bool]) -> None:
+    """Кладёт ответы по спорным парам в базу примеров."""
+    samples = learning.samples_from_decisions(
+        old.doubtful,
+        answers,
+        source=old.source_name or "ручное подтверждение",
+    )
+    learning.append_samples(
+        settings.train_store_path,
+        samples,
+        settings.train_max_samples,
+    )
 
 
 def _note_refs(result: PipelineResult) -> None:
@@ -238,10 +361,13 @@ def _result_page(
     request: Request,
     result: PipelineResult,
     strict: bool = False,
+    verify: str = "off",
+    message: str = "",
 ) -> HTMLResponse:
     token = result.output_path.parent.name
     RESULTS[token] = result
     STRICT_FLAGS[token] = bool(strict)
+    VERIFY_FLAGS[token] = _mode(verify)
     _note_refs(result)
     # Подтверждённые пары в таблице не показываются.
     pending = [row for row in result.doubtful if not row.get("answered")]
@@ -257,7 +383,10 @@ def _result_page(
             "confirmed_count": len(result.doubtful) - len(pending),
             "output_name": result.output_name,
             "strict": bool(strict),
+            "verify": _mode(verify),
             "refs": result.refs,
+            "meta": result.sheet_meta.to_form(),
+            "message": message,
         },
     )
 
@@ -372,10 +501,137 @@ def refs_clear(request: Request):
     return _refs_page(request, note="Блок ошибок очищен.")
 
 
+# --- Режим обучения -------------------------------------------------------
+
+
+def _training_page(
+    request: Request,
+    message: str = "",
+    error: str = "",
+    report: dict | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request=request,
+        name="training.html",
+        context={
+            "model": model_status(settings),
+            "embed": runtime.embed_status(_base()),
+            "stats": learning.dataset_stats(settings.train_store_path),
+            "message": message,
+            "error": error,
+            "report": report,
+            "max_upload_mb": settings.max_upload_mb,
+        },
+        status_code=status_code,
+    )
+
+
+@app.get("/training", response_class=HTMLResponse)
+def training(request: Request):
+    return _training_page(request)
+
+
+@app.post("/training/samples", response_class=HTMLResponse)
+async def training_samples(
+    request: Request,
+    file: UploadFile = File(...),
+):
+    """Забирает примеры из ручной сверки: зелёные пары — да, остальные — нет."""
+    name = _safe_name(file.filename)
+    if not name.lower().endswith(".xlsx"):
+        return _training_page(request, error="Нужен файл с расширением .xlsx.", status_code=400)
+
+    folder = work_dir(settings)
+    source = folder / name
+    try:
+        size = await _save_upload(file, source, settings.max_upload_mb)
+    except UploadTooLarge:
+        shutil.rmtree(folder, ignore_errors=True)
+        return _training_page(
+            request,
+            error=f"Файл больше {settings.max_upload_mb} МБ.",
+            status_code=400,
+        )
+
+    if not size:
+        shutil.rmtree(folder, ignore_errors=True)
+        return _training_page(request, error=EMPTY_UPLOAD, status_code=400)
+
+    try:
+        samples, stored = await run_in_threadpool(_read_samples, source, name)
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Не удалось разобрать образец")
+        return _training_page(
+            request,
+            error=f"Не удалось разобрать образец: {error}",
+            status_code=400,
+        )
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+    positives = sum(1 for sample in samples if sample.label)
+    return _training_page(
+        request,
+        message=(
+            f"Из файла «{name}» добавлено {stored['added']} примеров "
+            f"({positives} подтверждённых пересортов), повторов пропущено "
+            f"{stored['skipped']}. Всего в базе: {stored['total']}."
+        ),
+    )
+
+
+def _read_samples(source: Path, name: str) -> tuple[list, dict]:
+    """Разбор образца ручной сверки и запись примеров в базу."""
+    samples = learning.samples_from_manual(
+        source,
+        tuple(settings.type_words),
+        source=name,
+    )
+    stored = learning.append_samples(
+        settings.train_store_path,
+        samples,
+        settings.train_max_samples,
+    )
+    return samples, stored
+
+
+@app.post("/training/train", response_class=HTMLResponse)
+def training_train(request: Request):
+    """Переобучает модель на всех накопленных примерах.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, и
+    долгое обучение не блокирует остальные страницы.
+    """
+    try:
+        report = learning.train_model(settings)
+    except ValueError as error:
+        return _training_page(request, error=str(error), status_code=400)
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Обучение не удалось")
+        return _training_page(request, error=f"Обучение не удалось: {error}", status_code=400)
+    return _training_page(request, message="Модель переобучена и сохранена.", report=report)
+
+
+@app.post("/training/embed")
+def training_embed(embed: str | None = Form(default=None)):
+    """Включает или выключает эмбеддинги имён без перезапуска службы."""
+    runtime.set_embed(settings, _is_on(embed))
+    return RedirectResponse(url="/training", status_code=303)
+
+
+@app.post("/training/clear")
+def training_clear():
+    """Очищает накопленные примеры. Модель остаётся прежней."""
+    learning.clear_samples(settings.train_store_path)
+    return RedirectResponse(url="/training", status_code=303)
+
+
 def _error(
     request: Request,
     message: str,
     strict: bool = False,
+    verify: str = "off",
     status: int = 400,
 ) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -385,6 +641,9 @@ def _error(
             "error": message,
             "max_upload_mb": settings.max_upload_mb,
             "strict": bool(strict),
+            "verify": _mode(verify),
+            "model": model_status(settings),
+            "embed": runtime.embed_status(_base()),
         },
         status_code=status,
     )
