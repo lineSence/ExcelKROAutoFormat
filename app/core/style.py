@@ -18,6 +18,8 @@ DATE_FORMAT = "DD.MM.YYYY"
 
 # В образце коробка общего итога шириной в две колонки: I:J.
 TOTAL_SPAN = 2
+# Коробка значения неучтёнки тоже шириной в две колонки: C:D.
+EXTRA_SPAN = 2
 
 # Ширины столбцов 1–12. Остальные остаются по умолчанию.
 COLUMN_WIDTHS = {
@@ -186,18 +188,44 @@ def style_grand_total_cell(cell) -> None:
     wide_box(cell)
 
 
-def style_extra_cell(cell) -> None:
-    """Ячейка неучтёнки в B1, как в образце.
+def style_net_total_cell(cell) -> None:
+    """Итог с вычетом неучтёнки (строка «С н. д/с:»).
 
-    Одиночная ячейка без объединения: жёлтая заливка, средняя
-    рамка, Arial 10 полужирный, текст влево и общий формат:
-    сумму или пометку «Неучтёнки нет» вписывают руками.
+    В образце это зелёная коробка I:J со средней рамкой:
+    именно от этого числа считается ставка продавцов.
+    """
+    cell.font = Font(name="Arial", size=10, bold=True)
+    cell.number_format = MONEY_FORMAT
+    cell.border = medium_border()
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    paint(cell, GREEN)
+    wide_box(cell)
+
+
+def style_extra_label_cell(cell) -> None:
+    """Подписи блока неучтёнки в B1 и B2.
+
+    Жёлтая заливка, средняя рамка, Arial 10 полужирный, текст влево.
     """
     cell.font = Font(name="Arial", size=10, bold=True)
     cell.number_format = "General"
     cell.border = medium_border()
     cell.alignment = Alignment(horizontal="left", vertical="center")
     paint(cell, YELLOW)
+
+
+def style_extra_value_cell(cell) -> None:
+    """Значения неучтёнки в C1 и C2.
+
+    В образце это жёлтая коробка на две колонки (C:D) со средней
+    рамкой и числом по центру.
+    """
+    cell.font = Font(name="Arial", size=10, bold=True)
+    cell.number_format = "General"
+    cell.border = medium_border()
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    paint(cell, YELLOW)
+    wide_box(cell, EXTRA_SPAN)
 
 
 def apply_geometry(sheet, last_row: int) -> None:
