@@ -23,8 +23,10 @@
   последнего известного;
 * подписи недель бывают сокращёнными («Янв 31- Февр 6», «Авг 31 - Сент 06»),
   поэтому месяц определяется по началу слова;
-* в графике фамилии ревизоров могут быть и внутри ячейки магазина через
-  перевод строки, и в строках ниже даты — читаются оба варианта.
+* в графике фамилии ревизоров могут быть внутри ячейки магазина через
+  перевод строки, в строках ниже даты или в соседних столбцах блока
+  администратора — читаются все варианты, а внутри ячейки фамилии могут
+  быть разделены запятой, слэшем или союзом «и».
 
 Подбор склада нечёткий, поэтому у каждого ответа есть уверенность:
 `RefsInfo.confidence` — схожесть имени склада, `day_shift` — сдвиг даты в
@@ -62,6 +64,10 @@ MAX_COLUMNS = 1000
 
 # Сколько строк под датой в графике относятся к этой же дате.
 BLOCK_ROWS = 8
+
+# Сколько столбцов справа от столбца администратора относятся к его блоку,
+# если следующий администратор стоит дальше: фамилии часто пишут рядом.
+BLOCK_COLUMNS = 3
 
 # Листы книги планирования, которые не относятся к администраторам.
 PLANNING_SKIP = (
@@ -121,6 +127,12 @@ FULL_NAME = re.compile(
 SHORT_NAME = re.compile(
     r"^([А-ЯЁ][а-яё\-]+)(?:\s*([А-ЯЁ])\.?(?:\s*([А-ЯЁ])\.?)?)?$",
 )
+# «Павлова Мария»: в графике фамилию с именем тоже пишут без отчества.
+PAIR_NAME = re.compile(
+    r"^([А-ЯЁ][а-яё\-]+)\s+([А-ЯЁ][а-яё]+)$",
+)
+# Разделители фамилий внутри одной ячейки распределения.
+PEOPLE_SPLIT = re.compile(r"[\n;,/+•·|]|\sи\s")
 
 NOT_A_NAME = (
     "дата",
@@ -132,6 +144,11 @@ NOT_A_NAME = (
     "отпуск",
     "выходной",
     "больничный",
+    "ревизор",
+    "помощник",
+    "переучет",
+    "переучёт",
+    "инвентариз",
 )
 
 # Порог, ниже которого подбор склада требует подтверждения человеком.
@@ -203,6 +220,16 @@ def similarity(first: str, second: str) -> float:
     return SequenceMatcher(None, first, second).ratio()
 
 
+def _name_case(text: str) -> str:
+    """«ИВАНОВА М.» -> «Иванова М.»: в графике фамилии часто пишут капсом."""
+    words = []
+    for word in _clean(text).split():
+        if word.isalpha() and word.isupper() and len(word) > 2:
+            word = word.capitalize()
+        words.append(word)
+    return " ".join(words)
+
+
 def _month_number(word: object) -> int:
     """Номер месяца по названию, в том числе сокращённому.
 
@@ -233,9 +260,27 @@ def _as_date(value: object) -> dt.date | None:
 
 
 def _looks_like_name(text: str) -> bool:
+    """Похоже на фамилию администратора в шапке графика."""
+    text = _name_case(text)
     if not text or any(word in text.lower() for word in NOT_A_NAME):
         return False
     return bool(SHORT_NAME.match(text) or FULL_NAME.match(text))
+
+
+def _looks_like_person(text: str) -> bool:
+    """Похоже на фамилию ревизора в блоке распределения.
+
+    Мягче, чем проверка администратора: принимаются «Фамилия Имя» и капс,
+    но отбрасывается всё с цифрами (даты, часы, номера магазинов).
+    """
+    text = _name_case(text)
+    if not text or any(word in text.lower() for word in NOT_A_NAME):
+        return False
+    if any(char.isdigit() for char in text):
+        return False
+    return bool(
+        SHORT_NAME.match(text) or FULL_NAME.match(text) or PAIR_NAME.match(text)
+    )
 
 
 # --- Чтение листа одним проходом --------------------------------------------
@@ -287,6 +332,12 @@ def _lines(rows: list[list], row: int, column: int) -> list[str]:
     """Непустые строки внутри одной ячейки."""
     parts = str(_at(rows, row, column) or "").split("\n")
     return [text for text in (_clean(part) for part in parts) if text]
+
+
+def _people_parts(rows: list[list], row: int, column: int) -> list[str]:
+    """Куски ячейки, каждый из которых может быть фамилией."""
+    raw = str(_at(rows, row, column) or "")
+    return [text for text in (_clean(part) for part in PEOPLE_SPLIT.split(raw)) if text]
 
 
 # --- Книга планирования -----------------------------------------------------
@@ -443,7 +494,7 @@ def _admin_columns(rows: list[list], header_row: int) -> dict[int, str]:
     for column in range(2, _width(rows) + 1):
         name = _clean(_at(rows, header_row, column))
         if name and _looks_like_name(name):
-            columns[column] = name
+            columns[column] = _name_case(name)
     return columns
 
 
@@ -465,6 +516,17 @@ def _block_end(rows: list[list], row: int) -> int:
     return last
 
 
+def _block_columns(columns: list[int], index: int, width: int) -> range:
+    """Столбцы блока администратора: его столбец и соседние справа.
+
+    Фамилии ревизоров пишут то в ту же ячейку, то в соседний столбец, поэтому
+    блок тянется до следующего администратора, но не более BLOCK_COLUMNS.
+    """
+    start = columns[index]
+    stop = columns[index + 1] if index + 1 < len(columns) else width + 1
+    return range(start, min(stop, start + BLOCK_COLUMNS))
+
+
 def read_schedule(path: str | Path) -> tuple[
     dict[tuple[str, dt.date], tuple[str, tuple[str, ...]]],
     dict[str, list[str]],
@@ -484,6 +546,7 @@ def read_schedule(path: str | Path) -> tuple[
             return visits, by_surname
 
         rows = _matrix(book[SCHEDULE_SHEET])
+        width = _width(rows)
         admins: dict[int, str] = {}
         row = 1
         while row <= len(rows):
@@ -500,34 +563,86 @@ def read_schedule(path: str | Path) -> tuple[
                 row += 1
                 continue
             last = _block_end(rows, row)
-            for column, admin in admins.items():
-                lines: list[str] = []
+            columns = sorted(admins)
+            for index, column in enumerate(columns):
+                admin = admins[column]
+                own: list[str] = []
                 for line_row in range(row, last + 1):
-                    lines.extend(_lines(rows, line_row, column))
-                if not lines:
+                    own.extend(_lines(rows, line_row, column))
+                if not own:
                     continue
-                store = normalize_store(lines[0])
-                people = tuple(part for part in lines[1:] if _looks_like_name(part))
+                store = normalize_store(own[0])
                 if not store:
                     continue
-                visits[(store, day)] = (admin, people)
+                people: list[str] = []
+                for line_row in range(row, last + 1):
+                    for block_column in _block_columns(columns, index, width):
+                        for part in _people_parts(rows, line_row, block_column):
+                            if normalize_store(part) == store:
+                                continue
+                            if not _looks_like_person(part):
+                                continue
+                            name = _name_case(part)
+                            if name not in people:
+                                people.append(name)
+                visits[(store, day)] = (admin, tuple(people))
             row = last + 1
     finally:
         book.close()
     return visits, by_surname
 
 
+def debug_schedule_block(
+    path: str | Path, day: dt.date, limit: int = 200
+) -> list[str]:
+    """Сырые непустые ячейки блока графика на указанную дату.
+
+    Нужна для разбора «неудобных» книг: показывает, что реально лежит в
+    строках под датой, до всякого распознавания фамилий.
+    """
+    book = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        if SCHEDULE_SHEET not in book.sheetnames:
+            return [f"В книге графика нет листа {SCHEDULE_SHEET}"]
+        rows = _matrix(book[SCHEDULE_SHEET])
+    finally:
+        book.close()
+
+    out: list[str] = []
+    for row in range(1, len(rows) + 1):
+        values = rows[row - 1]
+        if _as_date(values[0] if values else None) != day:
+            continue
+        last = _block_end(rows, row)
+        out.append(f"Дата найдена в строке {row}, блок строк {row}..{last}")
+        for line_row in range(row, last + 1):
+            for column in range(1, _width(rows) + 1):
+                text = _clean(_at(rows, line_row, column))
+                if not text:
+                    continue
+                raw = str(_at(rows, line_row, column))
+                mark = "ФАМИЛИЯ" if _looks_like_person(raw) else ""
+                out.append(f"  r{line_row} c{column} {mark:8} {raw!r}")
+                if len(out) >= limit:
+                    out.append("  … вывод обрезан")
+                    return out
+    if not out:
+        out.append("Дата в первом столбце листа не найдена")
+    return out
+
+
 def _collect_names(sheet, by_surname: dict[str, list[str]]) -> None:
     for row in sheet.iter_rows(values_only=True):
         for value in row:
             for text in (_clean(part) for part in str(value or "").split("\n")):
-                match = FULL_NAME.match(text)
+                match = FULL_NAME.match(_name_case(text))
                 if not match:
                     continue
                 key = _surname_key(match.group(1))
                 names = by_surname.setdefault(key, [])
-                if text not in names:
-                    names.append(text)
+                full = _name_case(text)
+                if full not in names:
+                    names.append(full)
 
 
 # --- Разворот фамилии в полное ФИО ------------------------------------------
@@ -535,7 +650,7 @@ def _collect_names(sheet, by_surname: dict[str, list[str]]) -> None:
 
 def full_name(short: str, by_surname: dict[str, list[str]]) -> str:
     """Разворачивает «Павлова М.» в полное ФИО. Иначе отдаёт как есть."""
-    text = _clean(short)
+    text = _name_case(short)
     if FULL_NAME.match(text):
         return text
     match = SHORT_NAME.match(text)
@@ -695,8 +810,10 @@ def lookup(
                 )
             if not people:
                 notes.append(
-                    "Ревизоры в графике не распознаны: в ячейке распределения "
-                    "фамилий нет. Впишите их вручную."
+                    "Ревизоры в графике не распознаны: в блоке распределения "
+                    "фамилий нет. Впишите их вручную. Проверить, что лежит в "
+                    "книге, можно командой: python -m tools.refs_doctor "
+                    f"--dump --date {day:%d.%m.%Y}"
                 )
 
     reason = ""

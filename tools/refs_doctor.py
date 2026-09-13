@@ -4,10 +4,15 @@
 сколько магазинов, недель, записей распределения и ФИО, а для конкретной
 пары «склад + дата» — что попадёт в файл сверки и почему.
 
+Если ревизоры не подставляются, ключ `--dump` печатает сырые ячейки блока
+графика на указанную дату: видно, где в книге лежат фамилии и какие из них
+программа считает фамилиями.
+
 Запуск:
 
     python -m tools.refs_doctor
     python -m tools.refs_doctor --warehouse "ОхтаМол СМА" --date 12.08.2026
+    python -m tools.refs_doctor --dump --date 09.09.2026
     python -m tools.refs_doctor --planning /path/plan.xlsx --schedule /path/graf.xlsx
 """
 
@@ -47,6 +52,11 @@ def main() -> int:
     parser.add_argument(
         "--stores", type=int, default=0, help="Показать N названий складов из книг"
     )
+    parser.add_argument(
+        "--dump",
+        action="store_true",
+        help="Показать сырые ячейки блока графика на дату из --date",
+    )
     args = parser.parse_args()
 
     settings = Settings.load()
@@ -54,10 +64,18 @@ def main() -> int:
     for path in (planning, schedule):
         print(f"Файл: {path}{'' if Path(path).is_file() else '  — НЕ НАЙДЕН'}")
 
+    if args.dump:
+        if args.date is None:
+            print("Для --dump нужна дата: --date 09.09.2026")
+            return 2
+        print(f"\nСырой блок графика на {args.date:%d.%m.%Y}:")
+        for line in refs.debug_schedule_block(schedule, args.date):
+            print(line)
+
     books = refs.load_books(planning, schedule, force=True)
     weeks = sum(len(entries) for entries in books.plans.values())
     print(
-        f"Прочитано: магазинов в планировании {len(books.plans)}, "
+        f"\nПрочитано: магазинов в планировании {len(books.plans)}, "
         f"записей причин {weeks}, записей распределения {len(books.visits)}, "
         f"фамилий с полным ФИО {len(books.by_surname)}"
     )
