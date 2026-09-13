@@ -34,6 +34,12 @@
 		<li>Проверяющий: {{ refs.checker or "—" }}</li>
 		<li>Ревизоры: {% if refs.auditors %}{{ refs.auditors | join(", ") }}{% else %}не определены{% endif %}</li>
 	</ul>
+	{% if refs.counts %}
+	<p class="hint">
+		В справочниках прочитано: магазинов в планировании {{ refs.counts.plans or 0 }},
+		записей в графике {{ refs.counts.visits or 0 }}, фамилий с полным ФИО {{ refs.counts.people or 0 }}.
+	</p>
+	{% endif %}
 	{% if refs.problems %}
 	<h3>Ошибки справочников</h3>
 	<ul>
@@ -57,6 +63,21 @@
 		<tr><td>{{ row.group }}</td><td>{{ row.pieces }}</td><td>{{ row.resort_sum }}</td><td>{{ row.shortage_sum }}</td><td>{{ row.single_rows }}</td></tr>
 		{% endfor %}
 	</table>
+
+	{% if clusters %}
+	<h2>Состав гроздей</h2>
+	<p class="hint">Какие строки программа собрала в одну гроздь пересорта. Отключается настройкой REPORT_CLUSTER_MEMBERS.</p>
+	<table>
+		<tr>
+			{% for name in clusters[0].keys() %}<th>{{ name }}</th>{% endfor %}
+		</tr>
+		{% for row in clusters %}
+		<tr>
+			{% for value in row.values() %}<td>{{ value }}</td>{% endfor %}
+		</tr>
+		{% endfor %}
+	</table>
+	{% endif %}
 
 	{% if confirmed_count %}
 	<p class="hint">Подтверждено пар: {{ confirmed_count }}. Подтверждённые пары в таблице не показываются.</p>
