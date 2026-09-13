@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
-from app.core.format import output_filename
+from app.core.format import accept_date, output_filename
 from app.core.parse import parse, warehouse_from_filename
 from app.core.pipeline import process, sweep
 from app.core.repair import describe, needs_repair, repair_by_inject
@@ -131,6 +131,15 @@ def test_output_filename() -> None:
     assert output_filename("ОхтаМоллСМА", "09.09.2026") == "ОхтаМоллСМА 09.09.2026.xlsx"
 
 
+def test_accept_date_adds_three_days() -> None:
+    """Срок приёма товара: три дня без текущего."""
+    assert accept_date("09.09.2026") == "12.09.2026"
+    # Переход через конец месяца считается календарно.
+    assert accept_date("30.09.2026") == "03.10.2026"
+    # Без даты остаётся заглушка для ручного ввода.
+    assert accept_date("") == "ДД.ММ.ГГГГ"
+
+
 def test_normalize_folds_names() -> None:
     words = ("сигареты", "стики")
     first = normalize("Сигареты Parliament Aqua Blue", words)
@@ -193,8 +202,17 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert sheet["B2"].value == "Неподтверждённая неучтёнка"
     # Неподтверждённая неучтёнка всегда пустая: её вписывают руками.
     assert sheet["C2"].value is None
+    # Плашка срока приёма: дата инвентаризации плюс три дня.
+    assert sheet["E1"].value == "Найденный товар принимается до:12.09.2026"
     assert str(sheet["I5"].value).startswith("=SUM(")
     assert str(sheet["I6"].value).startswith("=I5")
+    # Подписи итогов стоят в G:H.
+    assert sheet["G5"].value == "Недостача:"
+    assert sheet["G6"].value == "С неучтёнкой:"
+    # Подписи шапки в столбце B, значения в C.
+    assert sheet["B5"].value == "Склад:"
+    assert sheet["A5"].value is None
+    assert sheet["B6"].value == "Причина инвентаризации:"
     assert sheet["C5"].value == "ОхтаМоллСМА"
     assert sheet.auto_filter.ref.startswith("K1:K")
 
