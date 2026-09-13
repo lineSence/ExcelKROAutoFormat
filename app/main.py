@@ -1,4 +1,10 @@
-"""Веб-слой: загрузка, подтверждение спорных пар, выдача файла, справочники."""
+"""Веб-слой: загрузка, подтверждение спорных пар, выдача файла, справочники.
+
+Тяжёлая работа (ремонт, разбор, справочники) выполняется в отдельном потоке
+через `run_in_threadpool`. Внутри `async def` обработчика нельзя вызывать
+блокирующий код напрямую: на время разбора встаёт весь сервер, и даже /health
+не отвечает.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,7 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from . import __version__
 from .config import Settings
@@ -95,6 +102,24 @@ async def _save_upload(file: UploadFile, target: Path, limit_mb: int) -> int:
     return size
 
 
+async def _run_pipeline(
+    source: Path,
+    original_name: str,
+    strict: bool,
+    folder: Path,
+    decisions: dict[str, bool] | None = None,
+) -> PipelineResult:
+    """Запускает обработку в отдельном потоке: сервер остаётся отзывчивым."""
+    return await run_in_threadpool(
+        process,
+        source,
+        original_name,
+        _settings_for(strict),
+        decisions,
+        folder,
+    )
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "version": app.version}
@@ -118,7 +143,7 @@ async def upload(
     file: UploadFile = File(...),
     strict: str | None = Form(default=None),
 ):
-    _drop_expired()
+    await run_in_threadpool(_drop_expired)
     strict_on = _is_on(strict)
     name = _safe_name(file.filename)
 
@@ -134,7 +159,7 @@ async def upload(
         return _error(request, f"Файл больше {settings.max_upload_mb} МБ.", strict_on)
 
     try:
-        result = process(source, name, _settings_for(strict_on), folder=folder)
+        result = await _run_pipeline(source, name, strict_on, folder)
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
         shutil.rmtree(folder, ignore_errors=True)
@@ -170,15 +195,15 @@ async def confirm(request: Request, token: str):
     folder = work_dir(settings)
     # Исходный файл переносится в новую папку: старая будет удалена.
     source = folder / old.source_path.name
-    shutil.copyfile(old.source_path, source)
+    await run_in_threadpool(shutil.copyfile, old.source_path, source)
 
     try:
-        result = process(
+        result = await _run_pipeline(
             source,
             old.source_name,
-            _settings_for(strict_on),
+            strict_on,
+            folder,
             decisions,
-            folder=folder,
         )
     except (ParseError, RepairError) as error:
         shutil.rmtree(folder, ignore_errors=True)
@@ -204,7 +229,7 @@ def _note_refs(result: PipelineResult) -> None:
             found=bool(info.get("found")),
             problems=list(info.get("problems") or []),
         )
-    except OSError:
+    except Exception:  # noqa: BLE001
         # Запись журнала не должна мешать выдаче готового файла.
         logger.warning("Итог справочников не записан в состояние", exc_info=True)
 
@@ -227,6 +252,7 @@ def _result_page(
             "token": token,
             "summary": result.summary,
             "groups": result.groups,
+            "clusters": result.clusters,
             "doubtful": pending,
             "confirmed_count": len(result.doubtful) - len(pending),
             "output_name": result.output_name,
@@ -324,7 +350,11 @@ async def refs_upload(
 
 @app.post("/refs/check", response_class=HTMLResponse)
 def refs_check(request: Request):
-    """Разбирает загруженные книги по кнопке и показывает итог."""
+    """Разбирает загруженные книги по кнопке и показывает итог.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, поэтому
+    долгий разбор книг не блокирует остальные страницы.
+    """
     state = refs_sync.load_state(settings.refs_state_path)
     state = refs_sync.measure(state, settings.refs_dir, settings.refs_state_path)
     if state.last_status == "ошибка":
