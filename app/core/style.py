@@ -12,9 +12,12 @@ YELLOW = "FFFFFF00"
 ORANGE = "FFFFC000"
 GREEN = "FF92D050"
 BLACK = "FF000000"
+WHITE = "FFFFFFFF"
 
 # В образце формат без разделителя тысяч.
 MONEY_FORMAT = "0.00"
+# Штуки пишутся целым числом без нулей после запятой.
+COUNT_FORMAT = "0"
 DATE_FORMAT = "DD.MM.YYYY"
 
 # В образце коробка общего итога шириной в две колонки: I:J.
@@ -241,11 +244,11 @@ def style_extra_value_cell(cell) -> None:
 def style_notice_cell(cell) -> None:
     """Плашка «Найденный товар принимается до:» в E1:J1.
 
-    В образце это широкая ячейка с заливкой темы, текстом
-    по центру и средней линией слева — она отделяет плашку
-    от коробки неучтёнки.
+    Широкая ячейка с заливкой темы, белый текст по центру
+    и средняя линия слева — она отделяет плашку от коробки
+    неучтёнки.
     """
-    cell.font = Font(name="Arial", size=10)
+    cell.font = Font(name="Arial", size=10, color=WHITE)
     cell.number_format = "General"
     cell.border = Border(left=medium_side())
     cell.alignment = Alignment(horizontal="center", vertical="center")
