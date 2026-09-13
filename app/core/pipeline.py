@@ -109,11 +109,119 @@ def doc_day(value: object) -> dt.date | None:
     return None
 
 
+def _closest_store(store: str, names: list[str]) -> tuple[str, float]:
+    """Ближайшее известное имя склада и оценка схожести."""
+    best, score = "", 0.0
+    for name in names:
+        ratio = refs.similarity(store, name)
+        if ratio > score:
+            best, score = name, ratio
+    return best, score
+
+
+def _visit_days(books: refs.RefsBooks, store: str) -> list[dt.date]:
+    return sorted({day for name, day in books.visits if name == store})
+
+
+def refs_problems(
+    warehouse: str,
+    day: dt.date | None,
+    books: refs.RefsBooks,
+    settings: Settings,
+) -> list[str]:
+    """Готовит понятные причины, почему справочники не дали данных.
+
+    Сообщения показываются на странице результата и на странице «Справочники».
+    В сам файл сверки они не попадают никогда.
+    """
+    planning, schedule = local_paths(settings.refs_dir)
+    problems: list[str] = []
+
+    if not planning.is_file():
+        problems.append(
+            "Книга планирования не загружена: причину инвентаризации брать неоткуда."
+        )
+    elif not books.plans:
+        problems.append(
+            "Книга планирования прочитана, но ни одного магазина не распознано. "
+            "Ожидается: на листе администратора во второй строке недели вида «Январь 10-16», "
+            "во втором столбце названия магазинов, данные с третьей строки."
+        )
+
+    if not schedule.is_file():
+        problems.append(
+            "Книга графика не загружена: администратора и ревизоров брать неоткуда."
+        )
+    elif not books.visits:
+        problems.append(
+            f"В книге графика не разобрано распределение (лист «{refs.SCHEDULE_SHEET}»). "
+            "Ожидается: даты в первом столбце, шапка с фамилиями администраторов "
+            "(не меньше трёх в строке), в ячейке — магазин, а под ним фамилии ревизоров."
+        )
+
+    if day is None:
+        problems.append(
+            "Дата инвентаризации не определена из титула файла: без даты справочники "
+            "не ищутся. Проверьте ячейку с датой в выгрузке 1С."
+        )
+
+    store = refs.normalize_store(warehouse)
+    if not store:
+        problems.append(
+            f"Имя склада «{warehouse}» после очистки пустое: проверьте имя файла сверки."
+        )
+        return problems
+
+    threshold = settings.refs_match_min_score
+
+    if books.visits:
+        names = sorted({name for name, _ in books.visits})
+        best, score = _closest_store(store, names)
+        if score < threshold:
+            problems.append(
+                f"Склад «{warehouse}» не найден в графике (администратор и ревизоры). "
+                f"Ближе всего «{best}», схожесть {score:.2f}, нужно не меньше {threshold:.2f} "
+                "(настройка REFS_MATCH_MIN_SCORE)."
+            )
+        elif day is not None:
+            days = _visit_days(books, best)
+            near = [
+                one
+                for one in days
+                if abs((one - day).days) <= settings.refs_days_around
+            ]
+            if not near:
+                span = f"{days[0]:%d.%m.%Y} — {days[-1]:%d.%m.%Y}" if days else "записей нет"
+                problems.append(
+                    f"Склад в графике есть («{best}»), но на {day:%d.%m.%Y} "
+                    f"±{settings.refs_days_around} дн. записи нет. Даты этого склада в графике: {span}."
+                )
+
+    if books.plans:
+        names = sorted(books.plans)
+        best, score = _closest_store(store, names)
+        if score < threshold:
+            problems.append(
+                f"Склад «{warehouse}» не найден в книге планирования (причина). "
+                f"Ближе всего «{best}», схожесть {score:.2f}, нужно не меньше {threshold:.2f}."
+            )
+        elif day is not None:
+            weeks = books.plans.get(best, [])
+            if not any(start <= day <= end for start, end, _, _ in weeks):
+                problems.append(
+                    f"Склад в планировании есть («{best}»), но неделя с датой {day:%d.%m.%Y} "
+                    "не заполнена или не распознана: причина осталась пустой."
+                )
+
+    return problems
+
+
 def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) -> dict:
     """Подставляет данные справочников в готовый файл.
 
     Если пара «склад + дата» в распределении не найдена, поля остаются
-    пустыми. Служебные пометки в сверку не пишутся никогда.
+    пустыми, а причина попадает в problems — её показывает интерфейс.
+    Служебные пометки в сверку не пишутся никогда.
     """
     planning, schedule = local_paths(settings.refs_dir)
     books = refs.load_books(str(planning), str(schedule))
@@ -126,6 +234,9 @@ def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) ->
         days_around=settings.refs_days_around,
     )
     written = refs.write_cells(sheet, info, settings.refs_cells())
+    problems = refs_problems(warehouse, day, books, settings) if not info.found else []
+    if info.found and not info.reason:
+        problems = refs_problems(warehouse, day, books, settings)
     return {
         "reason": info.reason,
         "admin": info.admin,
@@ -133,6 +244,12 @@ def fill_refs(sheet, warehouse: str, day: dt.date | None, settings: Settings) ->
         "auditors": list(info.auditors),
         "found": info.found,
         "cells": written,
+        "problems": problems,
+        "counts": {
+            "plans": len(books.plans),
+            "visits": len(books.visits),
+            "people": len(books.by_surname),
+        },
     }
 
 
@@ -170,7 +287,7 @@ def process(
             doc_day(format_result.document.doc_date),
             settings,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001
         # Сбой справочников не должен мешать выдаче файла сверки.
         logger.exception("Справочники не применены")
         refs_info = {
@@ -180,6 +297,10 @@ def process(
             "auditors": [],
             "found": False,
             "cells": [],
+            "problems": [
+                f"Сбой при работе со справочниками: {type(error).__name__}: {error}"
+            ],
+            "counts": {},
         }
 
     output_name = output_filename(warehouse, format_result.document.doc_date)
