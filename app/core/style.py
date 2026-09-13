@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import copy
 
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils.cell import range_boundaries
 
 YELLOW = "FFFFFF00"
 ORANGE = "FFFFC000"
@@ -14,6 +15,9 @@ BLACK = "FF000000"
 # В образце формат без разделителя тысяч.
 MONEY_FORMAT = "0.00"
 DATE_FORMAT = "DD.MM.YYYY"
+
+# В образце коробка итога шириной в две колонки: I:J.
+TOTAL_SPAN = 2
 
 # Ширины столбцов 1–12. Остальные остаются по умолчанию.
 COLUMN_WIDTHS = {
@@ -72,7 +76,7 @@ def fill(color: str) -> PatternFill:
 
 
 def no_fill() -> PatternFill:
-    """Пустая заливка: в образце общий итог без цвета."""
+    """Пустая заливка."""
     return PatternFill(fill_type=None)
 
 
@@ -91,6 +95,35 @@ def paint(cell, color: str) -> None:
 
 def frame(cell) -> None:
     cell.border = medium_border()
+
+
+def unmerge_at(sheet, row: int, column: int) -> None:
+    """Снимает объединение, если ячейка в него входит."""
+    for text in [str(item) for item in sheet.merged_cells.ranges]:
+        min_col, min_row, max_col, max_row = range_boundaries(text)
+        if min_row <= row <= max_row and min_col <= column <= max_col:
+            sheet.unmerge_cells(text)
+
+
+def wide_box(cell, span: int = TOTAL_SPAN) -> None:
+    """Растягивает коробку итога на две колонки, как в образце (I:J).
+
+    Оформление берётся с левой ячейки: openpyxl сам раскидывает
+    рамку по контуру объединённого диапазона.
+    """
+    sheet = getattr(cell, "parent", None)
+    if sheet is None or span < 2:
+        return
+    row = cell.row
+    column = cell.column
+    for shift in range(span):
+        unmerge_at(sheet, row, column + shift)
+    sheet.merge_cells(
+        start_row=row,
+        start_column=column,
+        end_row=row,
+        end_column=column + span - 1,
+    )
 
 
 def frame_block(sheet, rows, column: int) -> None:
@@ -131,27 +164,30 @@ def style_total_cell(cell) -> None:
 def style_grand_total_cell(cell) -> None:
     """Общий итог в столбце I.
 
-    В образце жёлтой заливкой отмечена только пустая ячейка неучтёнки
-    строкой ниже, а сам итог стоит без цвета — в средней рамке.
-    """
-    cell.font = Font(name="Arial", size=10, bold=True)
-    cell.number_format = MONEY_FORMAT
-    cell.border = medium_border()
-    cell.alignment = Alignment(horizontal="center", vertical="center")
-    cell.fill = no_fill()
-
-
-def style_extra_cell(cell) -> None:
-    """Ячейка неучтёнки под общим итогом.
-
-    По образцу она пустая, с жёлтой заливкой и средней рамкой:
-    сумму неучтёнки вписывают руками, и она входит в ставку продавцов.
+    В образце итог стоит в жёлтой коробке со средней рамкой,
+    шириной в две колонки (I:J), число по центру.
     """
     cell.font = Font(name="Arial", size=10, bold=True)
     cell.number_format = MONEY_FORMAT
     cell.border = medium_border()
     cell.alignment = Alignment(horizontal="center", vertical="center")
     paint(cell, YELLOW)
+    wide_box(cell)
+
+
+def style_extra_cell(cell) -> None:
+    """Ячейка неучтёнки под общим итогом.
+
+    По образцу она пустая, в такой же жёлтой коробке, как итог:
+    сумму или пометку вписывают руками, поэтому формат общий
+    и текст прижат влево — как в образце с «Неучтёнки нет».
+    """
+    cell.font = Font(name="Arial", size=10, bold=True)
+    cell.number_format = "General"
+    cell.border = medium_border()
+    cell.alignment = Alignment(horizontal="left", vertical="center")
+    paint(cell, YELLOW)
+    wide_box(cell)
 
 
 def apply_geometry(sheet, last_row: int) -> None:
