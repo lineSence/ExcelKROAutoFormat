@@ -17,10 +17,8 @@
 Режим «только чёткие пересорты» (`strict_brand_only=True`): в пару ставятся
 только позиции одного бренда, цена в подборе не участвует вовсе.
 
-Второй слой (`verifier`, см. `verify.py`) — необязательный проверяющий. Он
-не придумывает пары, а судит те, что предложила детерминированная логика:
-слабую пару снимает, уверенную усиливает, сомнительную отправляет в
-спорные на ручное подтверждение. Решения пользователя главнее модели.
+Второй слой (`verify.py`) необязателен: модель судит только те пары,
+которые предложил слой 1, и не умеет добавлять свои.
 
 Зелёная заливка и метка `не-` — ручной тег по внешним данным. Программа его
 не ставит и не воспроизводит.
@@ -31,6 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 PUNCTUATION = re.compile(r"[.,\"\u00ab\u00bb\-/()]+")
 SPACES = re.compile(r"\s+")
@@ -49,9 +48,20 @@ DECISION_SURPLUS = "излишек"
 DECISION_SHORTAGE = "недостача"
 DECISION_NONE = "без разбора"
 
+# Источник попадания пары в список спорных.
+SOURCE_SIMILARITY = "схожесть"
+SOURCE_MODEL = "модель"
+
 # Границы отношения цены излишка к цене недостачи для пары разных брендов.
+# Значения по умолчанию; рабочие берутся из настроек (.env).
 PRICE_GATE_LOW = 0.95
 PRICE_GATE_HIGH = 1.50
+
+# Ниже этой оценки пара не считается пересортом.
+MATCH_MIN_SCORE = 1.10
+
+# Предел числа спорных пар в ответе: иначе страница разрастается.
+DOUBTFUL_LIMIT = 200
 
 
 @dataclass
@@ -100,7 +110,11 @@ class Cluster:
 
 @dataclass
 class DoubtfulPair:
-    """Пара имён в полосе сомнения."""
+    """Пара имён в полосе сомнения.
+
+    Числа строк хранятся рядом: ответ человека сразу становится
+    примером для обучения модели.
+    """
 
     first_row: int
     first_name: str
@@ -110,13 +124,13 @@ class DoubtfulPair:
     linked: bool
     key: str = ""
     answered: bool = False
-    # Сырые числа пары: нужны режиму обучения, чтобы сохранить ответ человека.
     first_diff: float = 0.0
     first_sum: float = 0.0
     second_diff: float = 0.0
     second_sum: float = 0.0
+    # Шанс модели, если второй слой работал.
     model_prob: float | None = None
-    source: str = "схожесть"
+    source: str = SOURCE_SIMILARITY
 
 
 def normalize(name: str, type_words: tuple[str, ...] = ()) -> str:
@@ -136,8 +150,26 @@ def normalize(name: str, type_words: tuple[str, ...] = ()) -> str:
     return " ".join(folded)
 
 
-def similarity(first: str, second: str) -> float:
+@lru_cache(maxsize=200_000)
+def _ratio(first: str, second: str) -> float:
     return SequenceMatcher(None, first, second).ratio()
+
+
+def similarity(first: str, second: str) -> float:
+    """Схожесть имён. Значения кешируются: одна пара считается один раз."""
+    if first == second:
+        return 1.0
+    return _ratio(first, second) if first <= second else _ratio(second, first)
+
+
+def maybe_similar(first: str, second: str, floor: float) -> bool:
+    """Быстрый отсев явно разных имён без полного сравнения."""
+    if not first or not second:
+        return False
+    matcher = SequenceMatcher(None, first, second)
+    if matcher.real_quick_ratio() < floor:
+        return False
+    return matcher.quick_ratio() >= floor
 
 
 def _price_bonus(first: Item, second: Item) -> float:
@@ -172,6 +204,8 @@ def same_brand(first: Item, second: Item, threshold: float) -> bool:
     """
     if len(first.words) >= 2 and first.words[:2] == second.words[:2]:
         return True
+    if not maybe_similar(first.key, second.key, threshold):
+        return False
     return similarity(first.key, second.key) >= threshold
 
 
@@ -182,11 +216,17 @@ def price_ratio(plus: Item, minus: Item) -> float:
     return plus.price / minus.price
 
 
-def price_allowed(plus: Item, minus: Item, threshold: float) -> bool:
+def price_allowed(
+    plus: Item,
+    minus: Item,
+    threshold: float,
+    gate_low: float = PRICE_GATE_LOW,
+    gate_high: float = PRICE_GATE_HIGH,
+) -> bool:
     """Проверка цены для пары разных брендов."""
-    if same_brand(plus, minus, threshold):
+    if gate_low <= price_ratio(plus, minus) <= gate_high:
         return True
-    return PRICE_GATE_LOW <= price_ratio(plus, minus) <= PRICE_GATE_HIGH
+    return same_brand(plus, minus, threshold)
 
 
 def covers(plus: Item, minus: Item) -> bool:
@@ -245,10 +285,6 @@ def brand_score(first: Item, second: Item) -> float:
     )
 
 
-# Ниже этого порога пара не считается пересортом.
-MATCH_MIN_SCORE = 1.10
-
-
 class _Union:
     def __init__(self, size: int) -> None:
         self.parent = list(range(size))
@@ -270,7 +306,16 @@ def pair_key(first_row: int, second_row: int) -> str:
     return f"{min(first_row, second_row)}-{max(first_row, second_row)}"
 
 
-def _doubtful(plus: Item, minus: Item, ratio: float, answered: bool, prob, source: str) -> DoubtfulPair:
+def _doubtful(
+    plus: Item,
+    minus: Item,
+    ratio: float,
+    key: str,
+    answered: bool,
+    model_prob: float | None,
+    source: str,
+) -> DoubtfulPair:
+    """Спорная пара со всеми числами для режима обучения."""
     return DoubtfulPair(
         first_row=plus.row,
         first_name=plus.name,
@@ -278,13 +323,13 @@ def _doubtful(plus: Item, minus: Item, ratio: float, answered: bool, prob, sourc
         second_name=minus.name,
         ratio=round(ratio, 3),
         linked=False,
-        key=pair_key(plus.row, minus.row),
+        key=key,
         answered=answered,
         first_diff=plus.diff,
-        first_sum=plus.sum_diff,
+        first_sum=round(plus.sum_diff, 2),
         second_diff=minus.diff,
-        second_sum=minus.sum_diff,
-        model_prob=round(prob, 3) if prob is not None else None,
+        second_sum=round(minus.sum_diff, 2),
+        model_prob=round(model_prob, 3) if model_prob is not None else None,
         source=source,
     )
 
@@ -296,6 +341,10 @@ def build_clusters(
     doubtful_max: float,
     decisions: dict[str, bool] | None = None,
     strict_brand_only: bool = False,
+    price_gate_low: float = PRICE_GATE_LOW,
+    price_gate_high: float = PRICE_GATE_HIGH,
+    match_min_score: float = MATCH_MIN_SCORE,
+    doubtful_limit: int = DOUBTFUL_LIMIT,
     verifier=None,
 ) -> tuple[list[Cluster], list[DoubtfulPair]]:
     """Подбирает пары пересорта: каждый излишек к своей недостаче.
@@ -303,7 +352,12 @@ def build_clusters(
     При `strict_brand_only=True` разрешены только пары одного бренда,
     а цена не влияет ни на допуск пары, ни на её оценку.
 
-    `verifier` — второй слой проверки из `verify.py` или None.
+    `verifier` — второй слой. Он судит только готовые кандидаты: может
+    снять пару, усилить её оценку или отправить в спорные. Решение
+    человека (decisions) всегда главнее модели.
+
+    Список спорных пар ограничен `doubtful_limit`: самые схожие пары идут
+    в отчёт первыми.
     """
     union = _Union(len(items))
     plus = [index for index, item in enumerate(items) if item.diff > 0]
@@ -323,34 +377,53 @@ def build_clusters(
                 if strict_brand_only:
                     if not same_brand(items[p], items[m], threshold):
                         continue
-                elif not price_allowed(items[p], items[m], threshold):
+                elif not price_allowed(
+                    items[p], items[m], threshold, price_gate_low, price_gate_high
+                ):
                     continue
-            score = brand_score(items[p], items[m]) if strict_brand_only else pair_score(items[p], items[m])
+            if strict_brand_only:
+                score = brand_score(items[p], items[m])
+            else:
+                score = pair_score(items[p], items[m])
 
-            verdict = None
+            # Второй слой: только для пар, по которым человек ещё не ответил.
+            model_prob: float | None = None
             if verifier is not None and answer is not True:
                 verdict = verifier.check(items[p], items[m])
+                model_prob = verdict.prob
                 if not verdict.accept:
-                    # Модель уверена, что это разные товары: пара снята.
                     continue
                 score += verdict.bonus
+                if verdict.gray and key not in seen_doubtful:
+                    seen_doubtful.add(key)
+                    doubtful.append(
+                        _doubtful(
+                            items[p],
+                            items[m],
+                            similarity(items[p].key, items[m].key),
+                            key,
+                            key in choices,
+                            model_prob,
+                            SOURCE_MODEL,
+                        )
+                    )
 
             if answer is True:
                 score += 10.0
             ranked.append((score, p, m))
-
+            # Полная схожесть считается только для прошедших отбор пар.
             ratio = similarity(items[p].key, items[m].key)
-            gray = verdict is not None and verdict.gray
-            if (doubtful_min <= ratio <= doubtful_max or gray) and key not in seen_doubtful:
+            if doubtful_min <= ratio <= doubtful_max and key not in seen_doubtful:
                 seen_doubtful.add(key)
                 doubtful.append(
                     _doubtful(
                         items[p],
                         items[m],
                         ratio,
+                        key,
                         key in choices,
-                        verdict.prob if verdict is not None else None,
-                        "модель" if gray else "схожесть",
+                        model_prob,
+                        SOURCE_SIMILARITY,
                     )
                 )
 
@@ -359,7 +432,7 @@ def build_clusters(
     free_minus = {index: abs(items[index].diff) for index in minus}
     taken_plus: dict[int, int] = {}
     for score, p, m in ranked:
-        if score < MATCH_MIN_SCORE:
+        if score < match_min_score:
             break
         if p in taken_plus or free_minus.get(m, 0) <= 0:
             continue
@@ -383,11 +456,16 @@ def build_clusters(
         if best is not None:
             union.union(best[1], index)
 
+    linked_pairs = {
+        pair_key(items[p].row, items[m].row) for p, m in taken_plus.items()
+    }
     for pair in doubtful:
-        pair.linked = any(
-            items[p].row == pair.first_row and items[m].row == pair.second_row
-            for p, m in taken_plus.items()
-        )
+        pair.linked = pair.key in linked_pairs
+
+    # Сначала самые схожие пары, потом по номеру строки.
+    doubtful.sort(key=lambda pair: (-pair.ratio, pair.first_row, pair.second_row))
+    if doubtful_limit > 0:
+        doubtful = doubtful[:doubtful_limit]
 
     buckets: dict[int, Cluster] = {}
     for index, item in enumerate(items):
