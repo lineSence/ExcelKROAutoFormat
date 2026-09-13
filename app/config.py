@@ -70,6 +70,33 @@ class Settings:
     strict_resort: bool = False
     log_level: str = "INFO"
 
+    # --- Второй слой проверки пересортов (docs/07-ml-verifier.md) ---
+    # off   — только детерминированная логика;
+    # model — пары дополнительно судит локальная модель.
+    verify_mode: str = "off"
+    model_path: str = "data/verifier.json"
+    train_store_path: str = "data/train-samples.jsonl"
+    # Ниже этого шанса пара снимается. Значение маленькое намеренно:
+    # модель вмешивается только там, где она уверена.
+    verify_reject: float = 0.05
+    # Полоса сомнения: такие пары уходят в «Спорные пересорты».
+    verify_gray_low: float = 0.35
+    verify_gray_high: float = 0.55
+    # Сколько веса мнение модели добавляет к оценке пары.
+    verify_weight: float = 0.30
+
+    # Эмбеддинги имён: выключены по умолчанию (VPS 1 ГБ) и переключаются в интерфейсе.
+    # Если пакетов или файлов модели нет, программа тихо работает без них.
+    embed_enabled: bool = False
+    embed_model_path: str = "models/rubert-tiny2-int8.onnx"
+    embed_tokenizer_path: str = "models/rubert-tiny2-tokenizer.json"
+    embed_cache_path: str = "data/embed-cache.json"
+    embed_cache_limit: int = 20000
+
+    # Обучение в интерфейсе.
+    train_epochs: int = 300
+    train_max_samples: int = 60000
+
     # --- Справочники (причина, администратор, ревизоры) ---
     # Папка местных копий книг и файл расписания.
     refs_dir: str = "/var/lib/excelkro/refs"
@@ -126,6 +153,20 @@ class Settings:
             report_cluster_members=_flag("REPORT_CLUSTER_MEMBERS", True),
             strict_resort=_flag("STRICT_RESORT", False),
             log_level=_text("LOG_LEVEL", "INFO"),
+            verify_mode=_text("VERIFY_MODE", "off").lower(),
+            model_path=_text("VERIFIER_MODEL_PATH", "data/verifier.json"),
+            train_store_path=_text("TRAIN_STORE_PATH", "data/train-samples.jsonl"),
+            verify_reject=_number("VERIFY_REJECT", 0.05),
+            verify_gray_low=_number("VERIFY_GRAY_LOW", 0.35),
+            verify_gray_high=_number("VERIFY_GRAY_HIGH", 0.55),
+            verify_weight=_number("VERIFY_WEIGHT", 0.30),
+            embed_enabled=_flag("EMBED_ENABLED", False),
+            embed_model_path=_text("EMBED_MODEL_PATH", "models/rubert-tiny2-int8.onnx"),
+            embed_tokenizer_path=_text("EMBED_TOKENIZER_PATH", "models/rubert-tiny2-tokenizer.json"),
+            embed_cache_path=_text("EMBED_CACHE_PATH", "data/embed-cache.json"),
+            embed_cache_limit=int(_number("EMBED_CACHE_LIMIT", 20000)),
+            train_epochs=int(_number("TRAIN_EPOCHS", 300)),
+            train_max_samples=int(_number("TRAIN_MAX_SAMPLES", 60000)),
             refs_dir=refs_dir,
             refs_state_path=_text("REFS_STATE_PATH", str(Path(refs_dir) / "state.json")),
             default_checker=_text("DEFAULT_CHECKER", "Разумовский"),
