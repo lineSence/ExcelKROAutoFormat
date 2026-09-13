@@ -16,7 +16,7 @@ BLACK = "FF000000"
 MONEY_FORMAT = "0.00"
 DATE_FORMAT = "DD.MM.YYYY"
 
-# В образце коробка итога шириной в две колонки: I:J.
+# В образце коробка общего итога шириной в две колонки: I:J.
 TOTAL_SPAN = 2
 
 # Ширины столбцов 1–12. Остальные остаются по умолчанию.
@@ -80,6 +80,11 @@ def no_fill() -> PatternFill:
     return PatternFill(fill_type=None)
 
 
+def no_border() -> Border:
+    """Отсутствие рамки."""
+    return Border()
+
+
 def medium_side() -> Side:
     return Side(style="medium", color=BLACK)
 
@@ -91,6 +96,12 @@ def medium_border() -> Border:
 
 def paint(cell, color: str) -> None:
     cell.fill = fill(color)
+
+
+def clear(cell) -> None:
+    """Снимает заливку и рамку: ячейка остаётся чистой."""
+    cell.fill = no_fill()
+    cell.border = no_border()
 
 
 def frame(cell) -> None:
@@ -176,18 +187,17 @@ def style_grand_total_cell(cell) -> None:
 
 
 def style_extra_cell(cell) -> None:
-    """Ячейка неучтёнки под общим итогом.
+    """Ячейка неучтёнки в B1, как в образце.
 
-    По образцу она пустая, в такой же жёлтой коробке, как итог:
-    сумму или пометку вписывают руками, поэтому формат общий
-    и текст прижат влево — как в образце с «Неучтёнки нет».
+    Одиночная ячейка без объединения: жёлтая заливка, средняя
+    рамка, Arial 10 полужирный, текст влево и общий формат:
+    сумму или пометку «Неучтёнки нет» вписывают руками.
     """
     cell.font = Font(name="Arial", size=10, bold=True)
     cell.number_format = "General"
     cell.border = medium_border()
     cell.alignment = Alignment(horizontal="left", vertical="center")
     paint(cell, YELLOW)
-    wide_box(cell)
 
 
 def apply_geometry(sheet, last_row: int) -> None:
