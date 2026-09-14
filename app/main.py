@@ -35,6 +35,7 @@ from .core import claims as claims_book
 from .core import embed as embed_core
 from .core import judge as judge_core
 from .core import learning, photo_mark, refs_sync, runtime
+from .core import mail as mail_core
 from .core import update as ota
 from .core import vision as vision_core
 from .core.guard import UploadTooLarge
@@ -79,6 +80,11 @@ PHOTOS: dict[str, list] = {}
 # Строки с подтверждённым фото по токену результата: по ним снимается
 # пометка «нет фото» после каждой сборки файла.
 PHOTO_ROWS: dict[str, set[int]] = {}
+# Письма последнего захода в ящик. Ящик один на службу, поэтому токена
+# сверки здесь нет: список общий. Перезапуск службы его стирает, как и
+# разобранные сверки; сами снимки при этом остаются на диске.
+MAIL_LETTERS: list = []
+MAIL_SKIPPED: list[str] = []
 
 GENERIC_ERROR = "Не удалось обработать файл. Подробности — в журнале службы."
 EMPTY_UPLOAD = (
@@ -944,6 +950,209 @@ def vision_key_clear(request: Request, token: str = Form(default="")):
     """Удаляет ключ API из настроек."""
     vision_core.forget_key(settings)
     return _vision_page(request, message="Ключ API удалён из настроек.", token=token)
+
+
+# --- Почта ревизоров -------------------------------------------------------
+
+
+def _mail_page(
+    request: Request,
+    message: str = "",
+    error: str = "",
+    status_code: int = 200,
+) -> HTMLResponse:
+    """Страница почты: состояние ящика, письма последнего захода, настройки."""
+    return templates.TemplateResponse(
+        request=request,
+        name="mail.html",
+        context={
+            "mail": mail_core.status(settings),
+            "letters": MAIL_LETTERS,
+            "skipped": MAIL_SKIPPED,
+            "message": message,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+@app.get("/mail", response_class=HTMLResponse)
+def mail_page(request: Request):
+    """Раздел «Почта ревизоров». Письма забираются только по кнопке."""
+    return _mail_page(request)
+
+
+@app.post("/mail/settings")
+def mail_settings(
+    request: Request,
+    enabled: str | None = Form(default=None),
+    host: str | None = Form(default=None),
+    port: str | None = Form(default=None),
+    login: str | None = Form(default=None),
+    password: str | None = Form(default=None),
+    folder: str | None = Form(default=None),
+    senders: str | None = Form(default=None),
+    since_days: str | None = Form(default=None),
+    max_letters: str | None = Form(default=None),
+    max_photos: str | None = Form(default=None),
+    max_photo_mb: str | None = Form(default=None),
+    timeout: str | None = Form(default=None),
+    keep_days: str | None = Form(default=None),
+    only_unseen: str | None = Form(default=None),
+    mark_seen: str | None = Form(default=None),
+):
+    """Сохраняет настройки ящика без перезапуска службы.
+
+    Пустое поле пароля означает «оставить как было»: вводить его заново при
+    каждой правке не нужно. Пустой список адресов — особый случай: его
+    записываем принудительно, иначе белый список нельзя было бы снять.
+    """
+    values: dict[str, object] = {
+        "mail_enabled": _is_on(enabled),
+        "mail_only_unseen": _is_on(only_unseen),
+        "mail_mark_seen": _is_on(mark_seen),
+        "mail_host": host,
+        "mail_port": port,
+        "mail_login": login,
+        "mail_password": password,
+        "mail_folder": folder,
+        "mail_senders": senders,
+        "mail_since_days": since_days,
+        "mail_max_letters": max_letters,
+        "mail_max_photos": max_photos,
+        "mail_max_photo_mb": max_photo_mb,
+        "mail_timeout": timeout,
+        "mail_keep_days": keep_days,
+    }
+    try:
+        mail_core.save_config(settings, values)
+        if senders is not None and not str(senders).strip():
+            path = runtime.runtime_path(settings)
+            stored = runtime.load(path)
+            stored["mail_senders"] = ""
+            runtime.save(stored, path)
+    except OSError as error:
+        logger.exception("Настройки почты не сохранены")
+        return _mail_page(
+            request,
+            error=(
+                f"Настройки не сохранены: {error}. Файл настроек — "
+                f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
+            ),
+            status_code=500,
+        )
+    return RedirectResponse(url="/mail", status_code=303)
+
+
+@app.post("/mail/check", response_class=HTMLResponse)
+def mail_check(request: Request):
+    """Проверяет вход в ящик и считает письма к разбору. Ничего не скачивает.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, поэтому
+    медленный почтовый сервер не держит остальные страницы.
+    """
+    ok, note = mail_core.check(settings)
+    if not ok:
+        return _mail_page(request, error=note, status_code=400)
+    return _mail_page(request, message=note)
+
+
+@app.post("/mail/fetch", response_class=HTMLResponse)
+async def mail_fetch(request: Request):
+    """Забирает письма ревизоров и складывает вложения на диск.
+
+    Заход идёт по кнопке: состояние сверок живёт в памяти процесса, и
+    фоновому сбору было бы некуда складывать результат.
+    """
+    try:
+        report = await run_in_threadpool(mail_core.collect, settings)
+    except mail_core.MailError as error:
+        return _mail_page(request, error=str(error), status_code=400)
+    except OSError as error:
+        logger.exception("Снимки из почты не сохранены")
+        return _mail_page(
+            request,
+            error=f"Снимки не сохранены: {error}. Проверьте права на папку данных.",
+            status_code=500,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Заход в почту не удался")
+        return _mail_page(
+            request,
+            error="Заход в почту не удался. Подробности — в журнале службы.",
+            status_code=500,
+        )
+
+    letters = list(report.get("letters") or [])
+    MAIL_LETTERS[:] = letters
+    MAIL_SKIPPED[:] = list(report.get("skipped") or [])
+    cleaned = int(report.get("cleaned") or 0)
+
+    if not letters:
+        message = (
+            "Новых писем нет. Уже разобранные письма второй раз не тянутся: "
+            "их номера хранятся в mail-state.json."
+        )
+    else:
+        message = (
+            f"Разобрано писем: {len(letters)}, снимков скачано: "
+            f"{int(report.get('photos') or 0)}."
+        )
+    if cleaned:
+        message += f" Удалено старых снимков: {cleaned}."
+    return _mail_page(request, message=message)
+
+
+@app.post("/mail/password/clear", response_class=HTMLResponse)
+def mail_password_clear(request: Request):
+    """Удаляет пароль приложения из настроек."""
+    try:
+        mail_core.forget_password(settings)
+    except OSError as error:
+        logger.exception("Пароль ящика не удалён")
+        return _mail_page(
+            request,
+            error=(
+                f"Пароль не удалён: {error}. Файл настроек — "
+                f"{runtime.runtime_path(settings)}."
+            ),
+            status_code=500,
+        )
+    return _mail_page(request, message="Пароль ящика удалён из настроек.")
+
+
+@app.get("/mail/photo/{uid}/{name}")
+def mail_photo(uid: str, name: str):
+    """Отдаёт скачанный из письма снимок.
+
+    На диске файл лежит с номером по порядку («01-photo.jpg»), а в письме у
+    него своё имя, поэтому ищем и по тому, и по другому. Имена чистятся
+    `safe_name`, а путь дополнительно сверяется с папкой снимков: письмо
+    может принести «../../etc/passwd».
+    """
+    root = mail_core.photos_dir(settings)
+    wanted = mail_core.safe_name(name)
+    folder = root / mail_core.safe_name(uid)
+    target: Path | None = None
+    if folder.is_dir():
+        for file in sorted(folder.iterdir()):
+            if not file.is_file():
+                continue
+            if file.name == wanted or file.name.split("-", 1)[-1] == wanted:
+                target = file
+                break
+    if target is None:
+        return HTMLResponse(
+            "Снимок не найден: возможно, он уже удалён по сроку хранения.",
+            status_code=404,
+        )
+    try:
+        inside = target.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError):
+        inside = False
+    if not inside:
+        return HTMLResponse("Снимок не найден.", status_code=404)
+    return FileResponse(path=target, filename=wanted)
 
 
 # --- Справочники ------------------------------------------------------------
