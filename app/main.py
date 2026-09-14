@@ -10,9 +10,14 @@
 ничего не стирают: работа продолжается с того же места.
 
 У сверки два переключателя второго слоя: сам режим (`verify`: логика,
-локальная модель или LLM через OpenRouter) и влияние детерминированной
-логики (`logic`, 0…100%). Оба запоминаются по токену, чтобы пересборка
-шла в тех же условиях.
+локальная модель или LLM внешнего провайдера) и влияние
+детерминированной логики (`logic`, 0…100%). Оба запоминаются по токену,
+чтобы пересборка шла в тех же условиях.
+
+Письма ревизоров из последнего захода в ящик показываются и на странице
+готовой сверки: рядом с кнопкой скачивания файла есть кнопка архива
+письма, а подсказки из текста (товар в списке несосчитанного, ФИО
+ночного продавца) попадают в форму данных сверки.
 """
 
 from __future__ import annotations
@@ -592,6 +597,7 @@ def _result_page(
         _note_refs(result)
     # Подтверждённые пары в таблице не показываются.
     pending = [row for row in result.doubtful if not row.get("answered")]
+    note = _mail_note()
     return templates.TemplateResponse(
         request=request,
         name="result.html",
@@ -612,6 +618,8 @@ def _result_page(
             "claims": result.claims,
             "message": message,
             "photos": len(PHOTOS.get(token, [])),
+            "mail_note": note,
+            "mail_letters": note["letters"],
         },
     )
 
@@ -955,6 +963,81 @@ def vision_key_clear(request: Request, token: str = Form(default="")):
 # --- Почта ревизоров -------------------------------------------------------
 
 
+def _mail_note() -> dict:
+    """Что нашлось в письмах последнего захода в ящик.
+
+    Этим пользуется страница готовой сверки: кнопки архивов писем,
+    предупреждение о товаре в списке несосчитанного и ФИО ночного
+    продавца для автоподстановки в форму.
+    """
+    letters: list[dict] = []
+    in_list = False
+    words: list[str] = []
+    seller = ""
+    for letter in MAIL_LETTERS:
+        hints = getattr(letter, "hints", None) or {}
+        if hints.get("in_list"):
+            in_list = True
+            for word in hints.get("list_words") or []:
+                if word not in words:
+                    words.append(word)
+        if not seller and hints.get("seller"):
+            seller = str(hints.get("seller"))
+        letters.append(
+            {
+                "uid": str(getattr(letter, "uid", "")),
+                "subject": str(getattr(letter, "subject", "") or "без темы"),
+                "store": str(hints.get("store") or ""),
+                "in_list": bool(hints.get("in_list")),
+                "seller": str(hints.get("seller") or ""),
+            }
+        )
+    return {"letters": letters, "in_list": in_list, "list_words": words, "seller": seller}
+
+
+def _letter_by_uid(uid: str):
+    """Письмо последнего захода по его номеру в ящике."""
+    wanted = str(uid or "").strip()
+    for letter in MAIL_LETTERS:
+        if str(getattr(letter, "uid", "")) == wanted:
+            return letter
+    return None
+
+
+def _name_photos(letter, token: str = "") -> None:
+    """Даёт снимкам письма имя товара, который узнала нейросеть.
+
+    Кандидаты берутся из открытой сверки, если она есть. Нет ключа,
+    выключено распознавание или нет сверки — снимки просто остаются
+    со своими именами: архив всё равно должен скачаться.
+    """
+    photos = [item for item in (letter.photos or []) if item.path]
+    if not photos:
+        return
+    base = _base()
+    config = vision_core.load_config(base)
+    if not config["vision_enabled"] or not config["vision_api_key"]:
+        return
+    result = RESULTS.get(token)
+    items = _vision_items(result) if result is not None else []
+    if not items:
+        return
+    paths = [Path(item.path) for item in photos if Path(item.path).is_file()]
+    if not paths:
+        return
+    try:
+        found = vision_core.recognize_all(paths, items, base)
+    except Exception:  # noqa: BLE001
+        logger.exception("Снимки письма не разобраны")
+        return
+    by_name = {item.photo: item for item in found}
+    for photo in photos:
+        answer = by_name.get(Path(photo.path).name)
+        best = answer.best if answer is not None else None
+        if best is not None and best.name:
+            photo.title = best.name
+
+
 def _mail_page(
     request: Request,
     message: str = "",
@@ -1005,621 +1088,4 @@ def mail_settings(
 
     Пустое поле пароля означает «оставить как было»: вводить его заново при
     каждой правке не нужно. Пустой список адресов — особый случай: его
-    записываем принудительно, иначе белый список нельзя было бы снять.
-    """
-    values: dict[str, object] = {
-        "mail_enabled": _is_on(enabled),
-        "mail_only_unseen": _is_on(only_unseen),
-        "mail_mark_seen": _is_on(mark_seen),
-        "mail_host": host,
-        "mail_port": port,
-        "mail_login": login,
-        "mail_password": password,
-        "mail_folder": folder,
-        "mail_senders": senders,
-        "mail_since_days": since_days,
-        "mail_max_letters": max_letters,
-        "mail_max_photos": max_photos,
-        "mail_max_photo_mb": max_photo_mb,
-        "mail_timeout": timeout,
-        "mail_keep_days": keep_days,
-    }
-    try:
-        mail_core.save_config(settings, values)
-        if senders is not None and not str(senders).strip():
-            path = runtime.runtime_path(settings)
-            stored = runtime.load(path)
-            stored["mail_senders"] = ""
-            runtime.save(stored, path)
-    except OSError as error:
-        logger.exception("Настройки почты не сохранены")
-        return _mail_page(
-            request,
-            error=(
-                f"Настройки не сохранены: {error}. Файл настроек — "
-                f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
-            ),
-            status_code=500,
-        )
-    return RedirectResponse(url="/mail", status_code=303)
-
-
-@app.post("/mail/check", response_class=HTMLResponse)
-def mail_check(request: Request):
-    """Проверяет вход в ящик и считает письма к разбору. Ничего не скачивает.
-
-    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, поэтому
-    медленный почтовый сервер не держит остальные страницы.
-    """
-    ok, note = mail_core.check(settings)
-    if not ok:
-        return _mail_page(request, error=note, status_code=400)
-    return _mail_page(request, message=note)
-
-
-@app.post("/mail/fetch", response_class=HTMLResponse)
-async def mail_fetch(request: Request):
-    """Забирает письма ревизоров и складывает вложения на диск.
-
-    Заход идёт по кнопке: состояние сверок живёт в памяти процесса, и
-    фоновому сбору было бы некуда складывать результат.
-    """
-    try:
-        report = await run_in_threadpool(mail_core.collect, settings)
-    except mail_core.MailError as error:
-        return _mail_page(request, error=str(error), status_code=400)
-    except OSError as error:
-        logger.exception("Снимки из почты не сохранены")
-        return _mail_page(
-            request,
-            error=f"Снимки не сохранены: {error}. Проверьте права на папку данных.",
-            status_code=500,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Заход в почту не удался")
-        return _mail_page(
-            request,
-            error="Заход в почту не удался. Подробности — в журнале службы.",
-            status_code=500,
-        )
-
-    letters = list(report.get("letters") or [])
-    MAIL_LETTERS[:] = letters
-    MAIL_SKIPPED[:] = list(report.get("skipped") or [])
-    cleaned = int(report.get("cleaned") or 0)
-
-    if not letters:
-        message = (
-            "Новых писем нет. Уже разобранные письма второй раз не тянутся: "
-            "их номера хранятся в mail-state.json."
-        )
-    else:
-        message = (
-            f"Разобрано писем: {len(letters)}, снимков скачано: "
-            f"{int(report.get('photos') or 0)}."
-        )
-    if cleaned:
-        message += f" Удалено старых снимков: {cleaned}."
-    return _mail_page(request, message=message)
-
-
-@app.post("/mail/password/clear", response_class=HTMLResponse)
-def mail_password_clear(request: Request):
-    """Удаляет пароль приложения из настроек."""
-    try:
-        mail_core.forget_password(settings)
-    except OSError as error:
-        logger.exception("Пароль ящика не удалён")
-        return _mail_page(
-            request,
-            error=(
-                f"Пароль не удалён: {error}. Файл настроек — "
-                f"{runtime.runtime_path(settings)}."
-            ),
-            status_code=500,
-        )
-    return _mail_page(request, message="Пароль ящика удалён из настроек.")
-
-
-@app.get("/mail/photo/{uid}/{name}")
-def mail_photo(uid: str, name: str):
-    """Отдаёт скачанный из письма снимок.
-
-    На диске файл лежит с номером по порядку («01-photo.jpg»), а в письме у
-    него своё имя, поэтому ищем и по тому, и по другому. Имена чистятся
-    `safe_name`, а путь дополнительно сверяется с папкой снимков: письмо
-    может принести «../../etc/passwd».
-    """
-    root = mail_core.photos_dir(settings)
-    wanted = mail_core.safe_name(name)
-    folder = root / mail_core.safe_name(uid)
-    target: Path | None = None
-    if folder.is_dir():
-        for file in sorted(folder.iterdir()):
-            if not file.is_file():
-                continue
-            if file.name == wanted or file.name.split("-", 1)[-1] == wanted:
-                target = file
-                break
-    if target is None:
-        return HTMLResponse(
-            "Снимок не найден: возможно, он уже удалён по сроку хранения.",
-            status_code=404,
-        )
-    try:
-        inside = target.resolve().is_relative_to(root.resolve())
-    except (OSError, ValueError):
-        inside = False
-    if not inside:
-        return HTMLResponse("Снимок не найден.", status_code=404)
-    return FileResponse(path=target, filename=wanted)
-
-
-# --- Справочники ------------------------------------------------------------
-
-
-def _refs_page(request: Request, note: str = "", error: str = "") -> HTMLResponse:
-    """Страница справочников. Книги здесь не разбираются: только состояние."""
-    state = refs_sync.load_state(settings.refs_state_path)
-    return templates.TemplateResponse(
-        request=request,
-        name="refs.html",
-        context={
-            "state": state,
-            "books": refs_sync.book_status(settings.refs_dir),
-            "claims": claims_book.status(settings.refs_dir),
-            "checker": settings.default_checker,
-            "cells": settings.refs_cells(),
-            "local_dir": settings.refs_dir,
-            "max_upload_mb": settings.max_upload_mb,
-            "fill_log": state.fill_log,
-            "min_score": settings.refs_match_min_score,
-            "days_around": settings.refs_days_around,
-            "note": note,
-            "error": error,
-        },
-    )
-
-
-@app.get("/refs", response_class=HTMLResponse)
-def refs_page(request: Request):
-    return _refs_page(request)
-
-
-@app.post("/refs/upload", response_class=HTMLResponse)
-async def refs_upload(
-    request: Request,
-    planning: UploadFile | None = File(default=None),
-    schedule: UploadFile | None = File(default=None),
-    claims: UploadFile | None = File(default=None),
-):
-    """Ручная загрузка книг справочников. Книги только сохраняются."""
-    state = refs_sync.load_state(settings.refs_state_path)
-    saved: list[str] = []
-
-    sent_books = (
-        ("planning", planning),
-        ("schedule", schedule),
-        ("claims", claims),
-    )
-    for kind, sent in sent_books:
-        if sent is None or not (sent.filename or "").strip():
-            continue
-        name = _safe_name(sent.filename)
-        if not name.lower().endswith(".xlsx"):
-            return _refs_page(request, error=f"Нужен файл .xlsx, получен: {name}")
-        if kind == "claims":
-            target = claims_book.book_path(settings.refs_dir)
-        else:
-            target = refs_sync.book_target(settings.refs_dir, kind)
-        try:
-            await _save_upload(sent, target, settings.max_upload_mb)
-        except UploadTooLarge:
-            return _refs_page(
-                request,
-                error=f"Файл {name} больше {settings.max_upload_mb} МБ.",
-            )
-        except OSError:
-            logger.exception("Не удалось сохранить справочник")
-            return _refs_page(request, error="Файл не сохранён. Подробности — в журнале службы.")
-        if kind == "claims":
-            # Кеш реестра перестроится сам при первой сверке.
-            claims_book.forget_cache(settings.refs_dir)
-        else:
-            state = refs_sync.mark_upload(state, kind, name, settings.refs_state_path)
-        saved.append(name)
-
-    if not saved:
-        return _refs_page(request, error="Файлы не выбраны.")
-    return _refs_page(
-        request,
-        note="Загружено: " + ", ".join(saved) + ". Книги разберутся при первой сверке.",
-    )
-
-
-@app.post("/refs/check", response_class=HTMLResponse)
-def refs_check(request: Request):
-    """Разбирает загруженные книги по кнопке и показывает итог.
-
-    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, поэтому
-    долгий разбор книг не блокирует остальные страницы.
-    """
-    state = refs_sync.load_state(settings.refs_state_path)
-    state = refs_sync.measure(state, settings.refs_dir, settings.refs_state_path)
-    claims_info = claims_book.status(settings.refs_dir)
-    if state.last_status == "ошибка":
-        return _refs_page(request, error=f"Книги не разобраны. {state.last_error}")
-    tail = f", записей реестра {claims_info['rows']}" if claims_info.get("found") else ""
-    return _refs_page(
-        request,
-        note=f"Разбор готов: складов {state.stores}, фамилий {state.people}{tail}.",
-    )
-
-
-@app.post("/refs/clear", response_class=HTMLResponse)
-def refs_clear(request: Request):
-    """Очищает блок ошибок справочников."""
-    refs_sync.clear_fill_log(settings.refs_state_path)
-    return _refs_page(request, note="Блок ошибок очищен.")
-
-
-# --- Обновление программы (OTA) ---------------------------------------------
-
-
-def _update_page(
-    request: Request,
-    message: str = "",
-    error: str = "",
-    status_code: int = 200,
-) -> HTMLResponse:
-    """Страница обновления: текущая версия, кнопки и состояние последнего запуска."""
-    info = ota.status()
-    return templates.TemplateResponse(
-        request=request,
-        name="update.html",
-        context={
-            "status": info,
-            "state": info["state"],
-            "message": message,
-            "error": error,
-        },
-        status_code=status_code,
-    )
-
-
-@app.get("/update", response_class=HTMLResponse)
-def update_page(request: Request):
-    return _update_page(request)
-
-
-@app.post("/update/check", response_class=HTMLResponse)
-def update_check(request: Request):
-    """Смотрит, есть ли в Git версия новее установленной. Файлы не меняются."""
-    try:
-        ota.start("check")
-    except ota.UpdateError as error:
-        return _update_page(request, error=str(error), status_code=400)
-    return _update_page(request, message="Проверка запущена. Итог появится в блоке состояния.")
-
-
-@app.post("/update/apply", response_class=HTMLResponse)
-def update_apply(request: Request):
-    """Ставит последнюю версию и перезапускает службу.
-
-    Обновление идёт в отдельной службе systemd, поэтому перезапуск этого же
-    веб-слоя не обрывает работу на полпути. Страница отвечает сразу, а ход
-    работы виден в блоке состояния.
-    """
-    try:
-        ota.start("apply")
-    except ota.UpdateError as error:
-        return _update_page(request, error=str(error), status_code=400)
-    return _update_page(
-        request,
-        message=(
-            "Обновление запущено. Служба перезапустится сама: если страница "
-            "ненадолго перестанет отвечать, обновите её через полминуты."
-        ),
-    )
-
-
-@app.get("/update/state")
-def update_state() -> dict:
-    """Состояние обновления в виде JSON: удобно для проверок извне."""
-    return ota.status()
-
-
-# --- Режим обучения -------------------------------------------------------
-
-
-def _training_page(
-    request: Request,
-    message: str = "",
-    error: str = "",
-    report: dict | None = None,
-    status_code: int = 200,
-) -> HTMLResponse:
-    base = _base()
-    return templates.TemplateResponse(
-        request=request,
-        name="training.html",
-        context={
-            "model": model_status(settings),
-            "embed": runtime.embed_status(base),
-            "judge": runtime.judge_status(base),
-            "stats": learning.dataset_stats(settings.train_store_path),
-            "message": message,
-            "error": error,
-            "report": report,
-            "max_upload_mb": settings.max_upload_mb,
-        },
-        status_code=status_code,
-    )
-
-
-@app.get("/training", response_class=HTMLResponse)
-def training(request: Request):
-    return _training_page(request)
-
-
-@app.post("/training/samples", response_class=HTMLResponse)
-async def training_samples(
-    request: Request,
-    file: UploadFile = File(...),
-):
-    """Забирает примеры из ручной сверки: зелёные пары — да, остальные — нет."""
-    name = _safe_name(file.filename)
-    if not name.lower().endswith(".xlsx"):
-        return _training_page(request, error="Нужен файл с расширением .xlsx.", status_code=400)
-
-    folder = work_dir(settings)
-    source = folder / name
-    try:
-        size = await _save_upload(file, source, settings.max_upload_mb)
-    except UploadTooLarge:
-        shutil.rmtree(folder, ignore_errors=True)
-        return _training_page(
-            request,
-            error=f"Файл больше {settings.max_upload_mb} МБ.",
-            status_code=400,
-        )
-
-    if not size:
-        shutil.rmtree(folder, ignore_errors=True)
-        return _training_page(request, error=EMPTY_UPLOAD, status_code=400)
-
-    try:
-        samples, stored = await run_in_threadpool(_read_samples, source, name)
-    except Exception as error:  # noqa: BLE001
-        logger.exception("Не удалось разобрать образец")
-        return _training_page(
-            request,
-            error=f"Не удалось разобрать образец: {error}",
-            status_code=400,
-        )
-    finally:
-        shutil.rmtree(folder, ignore_errors=True)
-
-    positives = sum(1 for sample in samples if sample.label)
-    return _training_page(
-        request,
-        message=(
-            f"Из файла «{name}» добавлено {stored['added']} примеров "
-            f"({positives} подтверждённых пересортов), повторов пропущено "
-            f"{stored['skipped']}. Всего в базе: {stored['total']}."
-        ),
-    )
-
-
-def _read_samples(source: Path, name: str) -> tuple[list, dict]:
-    """Разбор образца ручной сверки и запись примеров в базу."""
-    samples = learning.samples_from_manual(
-        source,
-        tuple(settings.type_words),
-        source=name,
-    )
-    stored = learning.append_samples(
-        settings.train_store_path,
-        samples,
-        settings.train_max_samples,
-    )
-    return samples, stored
-
-
-@app.post("/training/train", response_class=HTMLResponse)
-def training_train(request: Request):
-    """Переобучает модель на всех накопленных примерах.
-
-    Обработчик синхронный: FastAPI сам уносит его в отдельный поток, и
-    долгое обучение не блокирует остальные страницы.
-    """
-    try:
-        report = learning.train_model(settings)
-    except ValueError as error:
-        return _training_page(request, error=str(error), status_code=400)
-    except Exception as error:  # noqa: BLE001
-        logger.exception("Обучение не удалось")
-        return _training_page(request, error=f"Обучение не удалось: {error}", status_code=400)
-    return _training_page(request, message="Модель переобучена и сохранена.", report=report)
-
-
-@app.post("/training/embed")
-def training_embed(
-    request: Request,
-    embed: str | None = Form(default=None),
-    provider: str | None = Form(default=None),
-    api_key: str | None = Form(default=None),
-    model: str | None = Form(default=None),
-    timeout: str | None = Form(default=None),
-    max_requests: str | None = Form(default=None),
-):
-    """Сохраняет настройки эмбеддингов имён без перезапуска службы.
-
-    Провайдер выбирается здесь же: файл ONNX на сервере или OpenRouter по
-    сети. Ключ задаётся только в интерфейсе, пустое поле означает
-    «оставить как было».
-    """
-    values: dict[str, object] = {
-        "embed_enabled": _is_on(embed),
-        "embed_api_key": api_key,
-        "embed_timeout": timeout,
-        "embed_max_requests": max_requests,
-    }
-    if str(provider or "").strip():
-        values["embed_provider"] = provider
-    if str(model or "").strip():
-        values["embed_model"] = model
-    try:
-        runtime.save_embed(settings, values)
-    except OSError as error:
-        logger.exception("Настройки эмбеддингов не сохранены")
-        return _training_page(
-            request,
-            error=(
-                f"Настройки не сохранены: {error}. Файл настроек — "
-                f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
-            ),
-            status_code=500,
-        )
-    return RedirectResponse(url="/training", status_code=303)
-
-
-@app.post("/training/embed/check", response_class=HTMLResponse)
-def training_embed_check(request: Request):
-    """Проверяет ключ и модель эмбеддингов одним коротким запросом.
-
-    Обработчик синхронный: FastAPI сам уносит его в отдельный поток.
-    """
-    ok, note = embed_core.check_remote(_base())
-    if not ok:
-        return _training_page(request, error=note, status_code=400)
-    return _training_page(request, message=note)
-
-
-@app.post("/training/embed/key/clear", response_class=HTMLResponse)
-def training_embed_key_clear(request: Request):
-    """Удаляет ключ сервиса эмбеддингов из настроек."""
-    try:
-        runtime.forget_embed_key(settings)
-    except OSError as error:
-        logger.exception("Ключ эмбеддингов не удалён")
-        return _training_page(
-            request,
-            error=(
-                f"Ключ не удалён: {error}. Файл настроек — "
-                f"{runtime.runtime_path(settings)}."
-            ),
-            status_code=500,
-        )
-    return _training_page(request, message="Ключ сервиса эмбеддингов удалён из настроек.")
-
-
-@app.post("/training/judge")
-def training_judge(
-    request: Request,
-    api_key: str | None = Form(default=None),
-    model: str | None = Form(default=None),
-    api_url: str | None = Form(default=None),
-    timeout: str | None = Form(default=None),
-    retries: str | None = Form(default=None),
-    max_requests: str | None = Form(default=None),
-    batch: str | None = Form(default=None),
-    max_pairs: str | None = Form(default=None),
-    logic: str | None = Form(default=None),
-):
-    """Сохраняет настройки LLM-судьи без перезапуска службы.
-
-    Ключ задаётся только здесь; пустое поле означает «оставить как было».
-    Влияние логики здесь — значение по умолчанию для страницы загрузки.
-    """
-    values: dict[str, object] = {
-        "judge_api_key": api_key,
-        "judge_timeout": timeout,
-        "judge_retries": retries,
-        "judge_max_requests": max_requests,
-        "judge_batch": batch,
-        "judge_max_pairs": max_pairs,
-    }
-    if str(model or "").strip():
-        values["judge_model"] = model
-    if str(api_url or "").strip():
-        values["judge_api_url"] = api_url
-    if str(logic if logic is not None else "").strip():
-        values["logic_weight"] = _percent(logic) / 100.0
-    try:
-        runtime.save_judge(settings, values)
-    except OSError as error:
-        logger.exception("Настройки LLM не сохранены")
-        return _training_page(
-            request,
-            error=(
-                f"Настройки не сохранены: {error}. Файл настроек — "
-                f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
-            ),
-            status_code=500,
-        )
-    return RedirectResponse(url="/training", status_code=303)
-
-
-@app.post("/training/judge/check", response_class=HTMLResponse)
-def training_judge_check(request: Request):
-    """Проверяет ключ и модель LLM одной пробной парой.
-
-    Обработчик синхронный: FastAPI сам уносит его в отдельный поток.
-    """
-    ok, note = judge_core.check_key(_base())
-    if not ok:
-        return _training_page(request, error=note, status_code=400)
-    return _training_page(request, message=note)
-
-
-@app.post("/training/judge/key/clear", response_class=HTMLResponse)
-def training_judge_key_clear(request: Request):
-    """Удаляет ключ OpenRouter для LLM из настроек."""
-    try:
-        runtime.forget_judge_key(settings)
-    except OSError as error:
-        logger.exception("Ключ LLM не удалён")
-        return _training_page(
-            request,
-            error=(
-                f"Ключ не удалён: {error}. Файл настроек — "
-                f"{runtime.runtime_path(settings)}."
-            ),
-            status_code=500,
-        )
-    return _training_page(request, message="Ключ OpenRouter для LLM удалён из настроек.")
-
-
-@app.post("/training/clear")
-def training_clear():
-    """Очищает накопленные примеры. Модель остаётся прежней."""
-    learning.clear_samples(settings.train_store_path)
-    return RedirectResponse(url="/training", status_code=303)
-
-
-def _error(
-    request: Request,
-    message: str,
-    strict: bool = False,
-    verify: str = "off",
-    logic: int = DEFAULT_LOGIC,
-    status: int = 400,
-) -> HTMLResponse:
-    base = _base()
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={
-            "error": message,
-            "max_upload_mb": settings.max_upload_mb,
-            "strict": bool(strict),
-            "verify": _mode(verify),
-            "logic": _percent(logic),
-            "model": model_status(settings),
-            "embed": runtime.embed_status(base),
-            "judge": runtime.judge_status(base),
-            "jobs": _jobs(),
-        },
-        status_code=status,
-    )
+    
