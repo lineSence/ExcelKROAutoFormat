@@ -27,6 +27,10 @@
 				{% else %}выключены{% endif %}
 			</span>
 		</div>
+		<div class="stat">
+			<span class="stat-label">Откуда векторы</span>
+			<span class="stat-value">{{ embed.provider_label if embed else "—" }}</span>
+		</div>
 	</div>
 	{% if model.ready and model.trained_at %}
 	<p class="hint">Обучена {{ model.trained_at }} на {{ model.samples }} примерах. Файл: {{ model.path }}</p>
@@ -74,11 +78,48 @@
 	<p class="alert alert-warn">Сейчас пересорты считаются без эмбеддингов — работе это не мешает.</p>
 	{% endif %}
 	<form action="/training/embed" method="post">
-		<input type="hidden" name="embed" value="{% if embed and embed.enabled %}off{% else %}on{% endif %}" />
-		<div class="actions">
-			<button class="button-secondary" type="submit">{% if embed and embed.enabled %}Выключить эмбеддинги{% else %}Включить эмбеддинги{% endif %}</button>
+		<div class="field">
+			<label for="embed-provider">Откуда брать векторы</label>
+			<select id="embed-provider" name="provider">
+				{% for item in embed.providers %}
+				<option value="{{ item.value }}" {% if embed.provider == item.value %}selected{% endif %}>{{ item.label }}</option>
+				{% endfor %}
+			</select>
+			<p class="hint">На сервере — без интернета и бесплатно. OpenRouter — запросы уходят в интернет и тратят баланс ключа.</p>
 		</div>
+		<div class="field">
+			<label for="embed-key">Ключ OpenRouter</label>
+			<input id="embed-key" type="password" name="api_key" autocomplete="off" placeholder="{% if embed.has_key %}сохранён, оканчивается на {{ embed.key_tail }}{% else %}ключ не задан{% endif %}" />
+			<p class="hint">Пустое поле — оставить ключ как было. Ключ хранится только в настройках службы и на странице не показывается.</p>
+		</div>
+		<div class="field">
+			<label for="embed-model">Модель эмбеддингов</label>
+			<input id="embed-model" type="text" name="model" value="{{ embed.model }}" />
+			<p class="hint">Нужна только для OpenRouter, например qwen/qwen3-embedding-0.6b.</p>
+		</div>
+		<div class="field">
+			<label for="embed-timeout">Ожидание ответа, секунд</label>
+			<input id="embed-timeout" type="number" name="timeout" min="1" max="120" step="1" value="{{ embed.timeout | round | int }}" />
+		</div>
+		<div class="field">
+			<label for="embed-max-requests">Предел запросов до перезапуска</label>
+			<input id="embed-max-requests" type="number" name="max_requests" min="0" max="100000" step="10" value="{{ embed.max_requests }}" />
+			<p class="hint">Защита от неожиданных трат: когда предел исчерпан, сверка идёт без эмбеддингов. 0 — без предела.</p>
+		</div>
+		<div class="field field-check">
+			<label><input type="checkbox" name="embed" value="on" {% if embed and embed.enabled %}checked{% endif %} /> Использовать эмбеддинги имён</label>
+		</div>
+		<div class="actions"><button type="submit">Сохранить</button></div>
 	</form>
+	<form action="/training/embed/check" method="post">
+		<div class="actions"><button class="button-secondary" type="submit">Проверить ключ</button></div>
+	</form>
+	{% if embed and embed.has_key %}
+	<form action="/training/embed/key/clear" method="post" onsubmit="return confirm('Удалить ключ из настроек?');">
+		<div class="actions"><button class="button-danger" type="submit">Удалить ключ</button></div>
+	</form>
+	{% endif %}
+	<p class="hint">После смены провайдера или модели переобучите модель: веса признаков по эмбеддингам считаются на обучении.</p>
 </section>
 
 <section class="card">
