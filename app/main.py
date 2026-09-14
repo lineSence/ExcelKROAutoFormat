@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from . import __version__
 from .config import Settings
 from .core import claims as claims_book
-from .core import learning, refs_sync, runtime
+from .core import learning, photo_mark, refs_sync, runtime
 from .core import update as ota
 from .core import vision as vision_core
 from .core.guard import UploadTooLarge
@@ -57,6 +57,9 @@ RESULTS: dict[str, PipelineResult] = {}
 STRICT_FLAGS: dict[str, bool] = {}
 # Режим второго слоя по токену результата.
 VERIFY_FLAGS: dict[str, str] = {}
+# Разобранные снимки по токену результата: подтверждение одного снимка
+# не должно стирать остальные ответы модели.
+PHOTOS: dict[str, list] = {}
 
 GENERIC_ERROR = "Не удалось обработать файл. Подробности — в журнале службы."
 EMPTY_UPLOAD = (
@@ -98,6 +101,7 @@ def _forget(token: str) -> None:
     result = RESULTS.pop(token, None)
     STRICT_FLAGS.pop(token, None)
     VERIFY_FLAGS.pop(token, None)
+    PHOTOS.pop(token, None)
     if result is not None:
         shutil.rmtree(result.output_path.parent, ignore_errors=True)
 
@@ -110,6 +114,7 @@ def _drop_expired() -> None:
             RESULTS.pop(token, None)
             STRICT_FLAGS.pop(token, None)
             VERIFY_FLAGS.pop(token, None)
+            PHOTOS.pop(token, None)
 
 
 async def _save_upload(file: UploadFile, target: Path, limit_mb: int) -> int:
@@ -525,7 +530,11 @@ def _vision_page(
     token: str = "",
     status_code: int = 200,
 ) -> HTMLResponse:
-    """Страница распознавания: состояние, снимки и все настройки."""
+    """Страница распознавания: состояние, снимки и все настройки.
+
+    Разобранные снимки берутся из памяти по токену сверки, поэтому
+    подтверждение одного снимка не стирает остальные ответы модели.
+    """
     base = _base()
     config = vision_core.load_config(base)
     jobs = []
@@ -540,6 +549,7 @@ def _vision_page(
                 "surplus": len(vision_core.surplus_items(_vision_items(result))),
             }
         )
+    shown = results if results is not None else PHOTOS.get(token, [])
     return templates.TemplateResponse(
         request=request,
         name="vision.html",
@@ -549,7 +559,7 @@ def _vision_page(
             "vision_max_photo_mb": config["vision_max_photo_mb"],
             "jobs": jobs,
             "token": token,
-            "results": results or [],
+            "results": shown,
             "message": message,
             "error": error,
         },
@@ -595,11 +605,14 @@ def vision_settings(
         values["vision_model"] = model
     try:
         vision_core.save_config(settings, values)
-    except OSError:
+    except OSError as error:
         logger.exception("Настройки распознавания не сохранены")
         return _vision_page(
             request,
-            error="Настройки не сохранены. Подробности — в журнале службы.",
+            error=(
+                f"Настройки не сохранены: {error}. Файл настроек — "
+                f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
+            ),
             status_code=500,
         )
     return _vision_page(request, message="Настройки сохранены.")
@@ -667,17 +680,38 @@ async def vision_photos(
         logger.exception("Разбор фото не удался")
         return _vision_page(request, error=GENERIC_ERROR, token=token, status_code=500)
 
+    # Разобранное живёт до подтверждения каждого снимка.
+    PHOTOS[token] = list(found)
     return _vision_page(
         request,
-        message=f"Разобрано снимков: {len(found)}. В файл сверки ничего не записано.",
-        results=found,
+        message=(
+            f"Разобрано снимков: {len(found)}. Подтверждайте по одному: остальные "
+            "останутся на странице."
+        ),
         token=token,
     )
+
+
+def _drop_photo(token: str, photo: str, digest: str) -> None:
+    """Убирает со страницы только тот снимок, по которому дан ответ."""
+    kept = [
+        item
+        for item in PHOTOS.get(token, [])
+        if not (
+            item.photo == photo
+            and (not digest or not item.digest or item.digest == digest)
+        )
+    ]
+    if kept:
+        PHOTOS[token] = kept
+    else:
+        PHOTOS.pop(token, None)
 
 
 @app.post("/vision/confirm", response_class=HTMLResponse)
 def vision_confirm(
     request: Request,
+    token: str = Form(default=""),
     photo: str = Form(default=""),
     digest: str = Form(default=""),
     text: str = Form(default=""),
@@ -686,12 +720,18 @@ def vision_confirm(
     source: str = Form(default=""),
     picked: str = Form(default="on"),
 ):
-    """Запоминает ответ человека по снимку. В файл сверки ничего не пишется."""
+    """Запоминает ответ человека по снимку и ставит пометку в сверку.
+
+    Уходит со страницы только этот снимок; остальные ответы модели остаются.
+    При подтверждённой строке в столбец 12 готового файла дописывается
+    комментарий «есть фото».
+    """
     try:
         number = int(str(row or "0").strip() or 0)
     except ValueError:
         number = 0
     chosen = _is_on(picked) and number > 0
+
     vision_core.remember(
         settings,
         photo=photo,
@@ -702,11 +742,28 @@ def vision_confirm(
         picked=chosen,
         source=source,
     )
+
+    note = ""
+    warning = ""
+    result = RESULTS.get(token)
+    if chosen and result is not None:
+        ok, detail = photo_mark.mark(
+            result.output_path, number, sheet_name=settings.sheet_name
+        )
+        if ok:
+            note = f" {detail} Скачайте файл заново, чтобы увидеть пометку."
+        else:
+            warning = detail
+    elif chosen and token:
+        warning = EXPIRED
+
+    _drop_photo(token, photo, digest)
+
     if chosen:
-        message = f"Ответ записан: строка {number}, {name}."
+        message = f"Ответ записан: строка {number}, {name}.{note}"
     else:
         message = "Ответ записан: ни одна из предложенных строк не подходит."
-    return _vision_page(request, message=message)
+    return _vision_page(request, message=message, error=warning, token=token)
 
 
 @app.post("/vision/check", response_class=HTMLResponse)
