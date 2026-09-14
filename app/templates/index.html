@@ -62,7 +62,7 @@
 	<div class="field">
 		<span class="field-label">Проверка пар</span>
 		<label class="choice">
-			<input type="radio" name="verify" value="off" {% if verify != "model" %}checked{% endif %} />
+			<input type="radio" name="verify" value="off" {% if verify not in ("model", "llm") %}checked{% endif %} />
 			<span>
 				<span class="choice-title">Только детерминированная логика</span>
 				<span class="choice-note">Результат повторяемый и самый быстрый.</span>
@@ -78,6 +78,29 @@
 				</span>
 			</span>
 		</label>
+		<label class="choice{% if not judge or not judge.has_key %} choice-disabled{% endif %}">
+			<input type="radio" name="verify" value="llm" {% if verify == "llm" %}checked{% endif %} {% if not judge or not judge.has_key %}disabled{% endif %} />
+			<span>
+				<span class="choice-title">Логика + LLM (OpenRouter)</span>
+				<span class="choice-note">
+					{% if judge and judge.has_key %}Пары судит языковая модель {{ judge.model }}. Имена товаров, цены и количества уходят во внешний сервис и тратят баланс ключа; сверка идёт медленнее.
+					{% else %}Нужен ключ OpenRouter — задайте его на странице «Модель и обучение».{% endif %}
+				</span>
+			</span>
+		</label>
+	</div>
+
+	<div class="field">
+		<label class="field-label" for="logic">Влияние детерминированной логики, %</label>
+		<input id="logic" type="number" name="logic" min="0" max="100" step="1" value="{{ logic if logic is not none else 100 }}" />
+		<p class="hint">
+			Действует только при включённом втором слое. 100% — прежнее поведение:
+			ворота по бренду и цене отсеивают пары, ответ слоя 2 лишь уточняет оценку.
+			0% — решает только второй слой: ворота не отсеивают ничего, пара
+			оценивается по ответу модели. Промежуточные значения смешивают обе оценки.
+			При значении меньше 100% оцениваются все пары «излишек × недостача»,
+			поэтому на больших складах сверка идёт заметно дольше.
+		</p>
 	</div>
 
 	<div class="actions">
@@ -103,10 +126,17 @@
 			</span>
 		</li>
 		<li>
+			<span>LLM (OpenRouter)</span>
+			<span>
+				{% if judge and judge.has_key %}<span class="badge badge-ok">ключ задан</span> {{ judge.model }}
+				{% else %}<span class="badge">ключ не задан</span>{% endif %}
+			</span>
+		</li>
+		<li>
 			<span>Справочники</span>
 			<span><a class="link" href="/refs">книги, разбор, ошибки</a></span>
 		</li>
 	</ul>
-	<p class="hint">Режимы модели и эмбеддингов переключаются на странице «Модель и обучение».</p>
+	<p class="hint">Режимы модели, эмбеддингов и LLM настраиваются на странице «Модель и обучение».</p>
 </section>
 {% endblock %}
