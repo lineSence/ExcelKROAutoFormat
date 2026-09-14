@@ -4,6 +4,10 @@
 фото) выполняется в отдельном потоке через `run_in_threadpool`. Внутри
 `async def` обработчика нельзя вызывать блокирующий код напрямую: на время
 разбора встаёт весь сервер, и даже /health не отвечает.
+
+Разобранная сверка живёт в памяти по токену, поэтому у неё есть свой
+постоянный адрес `/result/{токен}`. Уход на другую страницу и возврат
+ничего не стирают: работа продолжается с того же места.
 """
 
 from __future__ import annotations
@@ -117,6 +121,30 @@ def _drop_expired() -> None:
             PHOTOS.pop(token, None)
 
 
+def _jobs(with_surplus: bool = False) -> list[dict]:
+    """Сверки, которые ещё живут в памяти.
+
+    Этот список показывается на главной странице и на странице фото: по нему
+    человек возвращается к своей работе после перехода в другой раздел.
+    """
+    jobs: list[dict] = []
+    for key, result in RESULTS.items():
+        if not result.output_path.is_file():
+            continue
+        job = {
+            "token": key,
+            "warehouse": str(result.summary.get("warehouse") or "сверка"),
+            "date": str(result.summary.get("date") or "без даты"),
+            "file": result.output_name,
+            "pending": sum(1 for row in result.doubtful if not row.get("answered")),
+            "photos": len(PHOTOS.get(key, [])),
+        }
+        if with_surplus:
+            job["surplus"] = len(vision_core.surplus_items(_vision_items(result)))
+        jobs.append(job)
+    return jobs
+
+
 async def _save_upload(file: UploadFile, target: Path, limit_mb: int) -> int:
     """Пишет загрузку на диск по частям и обрывает её при превышении предела."""
     limit = limit_mb * 1024 * 1024
@@ -181,6 +209,7 @@ def index(request: Request):
             "verify": _mode(settings.verify_mode),
             "model": model_status(settings),
             "embed": runtime.embed_status(_base()),
+            "jobs": _jobs(),
         },
     )
 
@@ -317,7 +346,13 @@ async def _rebuild(
         shutil.rmtree(folder, ignore_errors=True)
         return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
 
+    # Разобранные снимки переезжают на новый токен: правки в сверке не должны
+    # стирать ответы модели по фото.
+    kept_photos = PHOTOS.get(token, [])
     _forget(token)
+    new_token = result.output_path.parent.name
+    if kept_photos:
+        PHOTOS[new_token] = kept_photos
     return _result_page(request, result, strict_on, verify_mode, message)
 
 
@@ -466,12 +501,15 @@ def _result_page(
     strict: bool = False,
     verify: str = "off",
     message: str = "",
+    note_refs: bool = True,
 ) -> HTMLResponse:
     token = result.output_path.parent.name
     RESULTS[token] = result
     STRICT_FLAGS[token] = bool(strict)
     VERIFY_FLAGS[token] = _mode(verify)
-    _note_refs(result)
+    # При простом открытии уже готовой сверки журнал справочников не трогаем.
+    if note_refs:
+        _note_refs(result)
     # Подтверждённые пары в таблице не показываются.
     pending = [row for row in result.doubtful if not row.get("answered")]
     return templates.TemplateResponse(
@@ -492,7 +530,28 @@ def _result_page(
             "comparison": result.comparison,
             "claims": result.claims,
             "message": message,
+            "photos": len(PHOTOS.get(token, [])),
         },
+    )
+
+
+@app.get("/result/{token}", response_class=HTMLResponse)
+def result_page(request: Request, token: str):
+    """Открывает сверку по её постоянному адресу.
+
+    Благодаря этому переход на «Фото товара» и обратно не теряет работу:
+    страница со спорными парами, ручными полями и заявками открывается
+    в том же виде, в каком её оставили.
+    """
+    result = RESULTS.get(token)
+    if result is None or not result.output_path.is_file():
+        return _error(request, EXPIRED, status=404)
+    return _result_page(
+        request,
+        result,
+        STRICT_FLAGS.get(token, False),
+        VERIFY_FLAGS.get(token, "off"),
+        note_refs=False,
     )
 
 
@@ -537,18 +596,10 @@ def _vision_page(
     """
     base = _base()
     config = vision_core.load_config(base)
-    jobs = []
-    for key, result in RESULTS.items():
-        if not result.output_path.is_file():
-            continue
-        jobs.append(
-            {
-                "token": key,
-                "warehouse": str(result.summary.get("warehouse") or "сверка"),
-                "date": str(result.summary.get("date") or "без даты"),
-                "surplus": len(vision_core.surplus_items(_vision_items(result))),
-            }
-        )
+    jobs = _jobs(with_surplus=True)
+    # Если сверка одна, показываем её снимки без лишнего выбора.
+    if not token and len(jobs) == 1:
+        token = jobs[0]["token"]
     shown = results if results is not None else PHOTOS.get(token, [])
     return templates.TemplateResponse(
         request=request,
@@ -568,8 +619,9 @@ def _vision_page(
 
 
 @app.get("/vision", response_class=HTMLResponse)
-def vision_page(request: Request):
-    return _vision_page(request)
+def vision_page(request: Request, token: str = ""):
+    """Страница фото. Токен в адресе открывает снимки нужной сверки."""
+    return _vision_page(request, token=token if token in RESULTS else "")
 
 
 @app.post("/vision/settings", response_class=HTMLResponse)
@@ -585,6 +637,7 @@ def vision_settings(
     pause_seconds: str | None = Form(default=None),
     text_min_score: str | None = Form(default=None),
     cache_limit: str | None = Form(default=None),
+    token: str = Form(default=""),
 ):
     """Сохраняет настройки распознавания без перезапуска службы.
 
@@ -613,9 +666,10 @@ def vision_settings(
                 f"Настройки не сохранены: {error}. Файл настроек — "
                 f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
             ),
+            token=token,
             status_code=500,
         )
-    return _vision_page(request, message="Настройки сохранены.")
+    return _vision_page(request, message="Настройки сохранены.", token=token)
 
 
 @app.post("/vision/photos", response_class=HTMLResponse)
@@ -767,29 +821,31 @@ def vision_confirm(
 
 
 @app.post("/vision/check", response_class=HTMLResponse)
-def vision_check(request: Request):
+def vision_check(request: Request, token: str = Form(default="")):
     """Проверяет ключ и модель коротким запросом без картинки.
 
     Обработчик синхронный: FastAPI сам уносит его в отдельный поток.
     """
     ok, note = vision_core.check(_base())
     if not ok:
-        return _vision_page(request, error=note, status_code=400)
-    return _vision_page(request, message=note)
+        return _vision_page(request, error=note, token=token, status_code=400)
+    return _vision_page(request, message=note, token=token)
 
 
 @app.post("/vision/cache/clear", response_class=HTMLResponse)
-def vision_cache_clear(request: Request):
+def vision_cache_clear(request: Request, token: str = Form(default="")):
     """Забывает разобранные снимки: следующий разбор пойдёт заново."""
     forgotten = vision_core.clear_cache(_base())
-    return _vision_page(request, message=f"Кеш очищен, забыто снимков: {forgotten}.")
+    return _vision_page(
+        request, message=f"Кеш очищен, забыто снимков: {forgotten}.", token=token
+    )
 
 
 @app.post("/vision/key/clear", response_class=HTMLResponse)
-def vision_key_clear(request: Request):
+def vision_key_clear(request: Request, token: str = Form(default="")):
     """Удаляет ключ API из настроек."""
     vision_core.forget_key(settings)
-    return _vision_page(request, message="Ключ API удалён из настроек.")
+    return _vision_page(request, message="Ключ API удалён из настроек.", token=token)
 
 
 # --- Справочники ------------------------------------------------------------
@@ -1109,6 +1165,7 @@ def _error(
             "verify": _mode(verify),
             "model": model_status(settings),
             "embed": runtime.embed_status(_base()),
+            "jobs": _jobs(),
         },
         status_code=status,
     )
