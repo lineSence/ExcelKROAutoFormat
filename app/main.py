@@ -64,6 +64,9 @@ VERIFY_FLAGS: dict[str, str] = {}
 # Разобранные снимки по токену результата: подтверждение одного снимка
 # не должно стирать остальные ответы модели.
 PHOTOS: dict[str, list] = {}
+# Строки с подтверждённым фото по токену результата: по ним снимается
+# пометка «нет фото» после каждой сборки файла.
+PHOTO_ROWS: dict[str, set[int]] = {}
 
 GENERIC_ERROR = "Не удалось обработать файл. Подробности — в журнале службы."
 EMPTY_UPLOAD = (
@@ -106,6 +109,7 @@ def _forget(token: str) -> None:
     STRICT_FLAGS.pop(token, None)
     VERIFY_FLAGS.pop(token, None)
     PHOTOS.pop(token, None)
+    PHOTO_ROWS.pop(token, None)
     if result is not None:
         shutil.rmtree(result.output_path.parent, ignore_errors=True)
 
@@ -119,6 +123,7 @@ def _drop_expired() -> None:
             STRICT_FLAGS.pop(token, None)
             VERIFY_FLAGS.pop(token, None)
             PHOTOS.pop(token, None)
+            PHOTO_ROWS.pop(token, None)
 
 
 def _jobs(with_surplus: bool = False) -> list[dict]:
@@ -296,6 +301,8 @@ async def upload(
         shutil.rmtree(folder, ignore_errors=True)
         return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
 
+    # Плюсующие строки сразу получают пометку «нет фото»: фото по ним ещё нет.
+    await run_in_threadpool(_photo_notes, result.output_path.parent.name, result)
     return _result_page(request, result, strict_on, verify_mode)
 
 
@@ -346,13 +353,19 @@ async def _rebuild(
         shutil.rmtree(folder, ignore_errors=True)
         return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
 
-    # Разобранные снимки переезжают на новый токен: правки в сверке не должны
-    # стирать ответы модели по фото.
+    # Разобранные снимки и ответы по фото переезжают на новый токен: правки
+    # в сверке не должны стирать работу по фото.
     kept_photos = PHOTOS.get(token, [])
+    kept_rows = set(PHOTO_ROWS.get(token, set()))
     _forget(token)
     new_token = result.output_path.parent.name
     if kept_photos:
         PHOTOS[new_token] = kept_photos
+    if kept_rows:
+        PHOTO_ROWS[new_token] = kept_rows
+    # Пересборка идёт от исходника и пишет столбец 12 заново, поэтому пометки
+    # о фото возвращаются на место сразу после сборки.
+    await run_in_threadpool(_photo_notes, new_token, result)
     return _result_page(request, result, strict_on, verify_mode, message)
 
 
@@ -581,6 +594,23 @@ def _vision_items(result: PipelineResult) -> list:
     return vision_core.items_from_rows(result.clusters, tuple(settings.type_words))
 
 
+def _photo_notes(token: str, result: PipelineResult) -> tuple[bool, str]:
+    """Ставит в файл пометки «нет фото» и снимает их со строк с фото.
+
+    Вызывается после каждой сборки файла: пересборка идёт от исходника и
+    пишет столбец 12 заново, поэтому раньше пометки не доходили до
+    скачанного файла.
+    """
+    ok, detail = photo_mark.apply(
+        result.output_path,
+        PHOTO_ROWS.get(token, set()),
+        sheet_name=settings.sheet_name,
+    )
+    if not ok:
+        logger.warning("Пометки о фото не записаны: %s", detail)
+    return ok, detail
+
+
 def _vision_page(
     request: Request,
     message: str = "",
@@ -774,11 +804,11 @@ def vision_confirm(
     source: str = Form(default=""),
     picked: str = Form(default="on"),
 ):
-    """Запоминает ответ человека по снимку и ставит пометку в сверку.
+    """Запоминает ответ человека по снимку и правит пометки в сверке.
 
     Уходит со страницы только этот снимок; остальные ответы модели остаются.
-    При подтверждённой строке в столбец 12 готового файла дописывается
-    комментарий «есть фото».
+    Подтверждённая строка попадает в список строк с фото, и пометка
+    «нет фото» с неё снимается; у остальных плюсующих строк она остаётся.
     """
     try:
         number = int(str(row or "0").strip() or 0)
@@ -801,11 +831,13 @@ def vision_confirm(
     warning = ""
     result = RESULTS.get(token)
     if chosen and result is not None:
-        ok, detail = photo_mark.mark(
-            result.output_path, number, sheet_name=settings.sheet_name
-        )
+        PHOTO_ROWS.setdefault(token, set()).add(number)
+        ok, detail = _photo_notes(token, result)
         if ok:
-            note = f" {detail} Скачайте файл заново, чтобы увидеть пометку."
+            note = (
+                f" Пометка «нет фото» с этой строки снята. {detail}"
+                " Скачайте файл заново, чтобы увидеть изменения."
+            )
         else:
             warning = detail
     elif chosen and token:
@@ -816,7 +848,10 @@ def vision_confirm(
     if chosen:
         message = f"Ответ записан: строка {number}, {name}.{note}"
     else:
-        message = "Ответ записан: ни одна из предложенных строк не подходит."
+        message = (
+            "Ответ записан: ни одна из предложенных строк не подходит. "
+            "Пометки «нет фото» остались на месте."
+        )
     return _vision_page(request, message=message, error=warning, token=token)
 
 
