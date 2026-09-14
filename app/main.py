@@ -14,13 +14,19 @@
 логики (`logic`, 0…100%). Оба запоминаются по токену, чтобы пересборка
 шла в тех же условиях.
 
-Письма ревизоров из последнего захода в ящик связаны со сверкой напрямую:
-сразу после обработки сверки снимки из писем уходят в распознавание
-(`mail_vision`), ответы модели попадают на страницу «Фото товара» по тому
-же токену, а кнопка архива письма рядом со скачиванием файла отдаёт уже
-обработанный архив со снимками по имени узнанного товара. Подсказки из
-текста (товар в списке несосчитанного, ФИО ночного продавца) по-прежнему
-попадают в форму данных сверки.
+Письма ревизоров связаны со сверкой напрямую: сразу после обработки
+сверки снимки из писем уходят в распознавание (`mail_vision`), ответы
+модели попадают на страницу «Фото товара» по тому же токену, а кнопка
+архива письма рядом со скачиванием файла отдаёт уже обработанный архив со
+снимками по имени узнанного товара. Подсказки из текста (товар в списке
+несосчитанного, ФИО ночного продавца) по-прежнему попадают в форму данных
+сверки.
+
+Список писем не теряется при перезапуске службы: он читается с диска
+(`mail_store`, файл `mail-letters.json`). Без этого кнопки архивов
+пропадали после каждого перезапуска, а вернуть их было нечем — номера
+разобранных писем лежат в `mail-state.json`, и повторный заход в ящик
+отвечал «новых писем нет».
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ from .config import Settings
 from .core import claims as claims_book
 from .core import embed as embed_core
 from .core import judge as judge_core
-from .core import learning, mail_vision, photo_mark, refs_sync, runtime
+from .core import learning, mail_store, mail_vision, photo_mark, refs_sync, runtime
 from .core import mail as mail_core
 from .core import update as ota
 from .core import vision as vision_core
@@ -91,11 +97,16 @@ PHOTO_ROWS: dict[str, set[int]] = {}
 # Отчёт о разборе снимков из писем по токену сверки: разбор идёт один раз
 # при обработке, а не при каждом скачивании архива письма.
 MAIL_VISION: dict[str, dict] = {}
-# Письма последнего захода в ящик. Ящик один на службу, поэтому токена
-# сверки здесь нет: список общий. Перезапуск службы его стирает, как и
-# разобранные сверки; сами снимки при этом остаются на диске.
+# Разобранные письма. Ящик один на службу, поэтому токена сверки здесь нет:
+# список общий. Он читается с диска при старте и пишется после каждого
+# захода в ящик, иначе кнопки архивов пропадали бы после перезапуска.
 MAIL_LETTERS: list = []
 MAIL_SKIPPED: list[str] = []
+
+try:
+    MAIL_LETTERS[:] = mail_store.load(settings)
+except Exception:  # noqa: BLE001
+    logger.warning("Письма прошлых заходов не восстановлены", exc_info=True)
 
 GENERIC_ERROR = "Не удалось обработать файл. Подробности — в журнале службы."
 EMPTY_UPLOAD = (
@@ -736,6 +747,10 @@ def _mail_vision(token: str, result: PipelineResult) -> dict:
             known.add(key)
             kept.append(answer)
         PHOTOS[token] = kept
+    # Имена, которые дала нейросеть, должны дожить до скачивания архива и
+    # после перезапуска службы.
+    if report.get("named"):
+        mail_store.save(settings, MAIL_LETTERS)
     return report
 
 
@@ -1015,7 +1030,7 @@ def vision_key_clear(request: Request, token: str = Form(default="")):
 
 
 def _mail_note() -> dict:
-    """Подсказки из писем последнего захода в ящик.
+    """Подсказки из разобранных писем.
 
     Этим пользуется страница готовой сверки: кнопки архивов писем,
     предупреждение о товаре в списке несосчитанного и ФИО ночного
@@ -1047,10 +1062,19 @@ def _mail_note() -> dict:
 
 
 def _letter_by_uid(uid: str):
-    """Письмо последнего захода по его номеру в ящике."""
+    """Письмо по его номеру в ящике.
+
+    Сначала смотрим в памяти, затем на диске: после перезапуска службы
+    список писем восстанавливается из `mail-letters.json`, и кнопка архива
+    на странице сверки должна работать без нового захода в ящик.
+    """
     wanted = str(uid or "").strip()
     for letter in MAIL_LETTERS:
         if str(getattr(letter, "uid", "")) == wanted:
+            return letter
+    for letter in mail_store.load(settings):
+        if str(getattr(letter, "uid", "")) == wanted:
+            MAIL_LETTERS.append(letter)
             return letter
     return None
 
@@ -1086,11 +1110,15 @@ def _name_photos(letter, token: str = "") -> None:
         logger.exception("Снимки письма не разобраны")
         return
     by_name = {item.photo: item for item in found}
+    named = 0
     for photo in photos:
         answer = by_name.get(Path(photo.path).name)
         best = answer.best if answer is not None else None
         if best is not None and best.name:
             photo.title = best.name
+            named += 1
+    if named:
+        mail_store.save(settings, MAIL_LETTERS)
 
 
 def _mail_page(
@@ -1099,7 +1127,7 @@ def _mail_page(
     error: str = "",
     status_code: int = 200,
 ) -> HTMLResponse:
-    """Страница почты: состояние ящика, письма последнего захода, настройки."""
+    """Страница почты: состояние ящика, разобранные письма, настройки."""
     return templates.TemplateResponse(
         request=request,
         name="mail.html",
@@ -1200,7 +1228,9 @@ async def mail_fetch(request: Request):
     """Забирает письма ревизоров и складывает вложения на диск.
 
     Заход идёт по кнопке: состояние сверок живёт в памяти процесса, и
-    фоновому сбору было бы некуда складывать результат.
+    фоновому сбору было бы некуда складывать результат. Разобранные письма
+    складываются к прежним и пишутся на диск, поэтому кнопки архивов не
+    пропадают, когда новых писем в ящике нет.
     """
     try:
         report = await run_in_threadpool(mail_core.collect, settings)
@@ -1221,19 +1251,22 @@ async def mail_fetch(request: Request):
             status_code=500,
         )
 
-    letters = list(report.get("letters") or [])
-    MAIL_LETTERS[:] = letters
+    fresh = list(report.get("letters") or [])
+    kept = await run_in_threadpool(mail_store.remember, settings, fresh)
+    MAIL_LETTERS[:] = kept
     MAIL_SKIPPED[:] = list(report.get("skipped") or [])
     cleaned = int(report.get("cleaned") or 0)
 
-    if not letters:
+    if not fresh:
         message = (
             "Новых писем нет. Уже разобранные письма второй раз не тянутся: "
             "их номера хранятся в mail-state.json."
         )
+        if kept:
+            message += f" Письма прошлых заходов на месте: {len(kept)}."
     else:
         message = (
-            f"Разобрано писем: {len(letters)}, снимков скачано: "
+            f"Разобрано писем: {len(fresh)}, снимков скачано: "
             f"{int(report.get('photos') or 0)}."
         )
     if cleaned:
