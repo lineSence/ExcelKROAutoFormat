@@ -8,6 +8,11 @@
 Разобранная сверка живёт в памяти по токену, поэтому у неё есть свой
 постоянный адрес `/result/{токен}`. Уход на другую страницу и возврат
 ничего не стирают: работа продолжается с того же места.
+
+У сверки два переключателя второго слоя: сам режим (`verify`: логика,
+локальная модель или LLM через OpenRouter) и влияние детерминированной
+логики (`logic`, 0…100%). Оба запоминаются по токену, чтобы пересборка
+шла в тех же условиях.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from . import __version__
 from .config import Settings
 from .core import claims as claims_book
 from .core import embed as embed_core
+from .core import judge as judge_core
 from .core import learning, photo_mark, refs_sync, runtime
 from .core import update as ota
 from .core import vision as vision_core
@@ -51,7 +57,10 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 CHUNK = 1024 * 1024
 UNSAFE_NAME = re.compile(r"[\\/\x00]+")
 
-VERIFY_MODES = ("off", "model")
+# off — только логика, model — локальная модель, llm — языковая модель.
+VERIFY_MODES = ("off", "model", "llm")
+# Влияние логики по умолчанию: решает детерминированный расчёт.
+DEFAULT_LOGIC = 100
 # Поля формы сверки, у которых может быть несколько значений.
 META_MULTI_FIELDS = ("sellers", "seller_hours", "auditors")
 # Префикс полей формы с заявками реестра расхождений.
@@ -62,6 +71,8 @@ RESULTS: dict[str, PipelineResult] = {}
 STRICT_FLAGS: dict[str, bool] = {}
 # Режим второго слоя по токену результата.
 VERIFY_FLAGS: dict[str, str] = {}
+# Влияние логики (проценты) по токену результата.
+LOGIC_FLAGS: dict[str, int] = {}
 # Разобранные снимки по токену результата: подтверждение одного снимка
 # не должно стирать остальные ответы модели.
 PHOTOS: dict[str, list] = {}
@@ -83,14 +94,31 @@ def _mode(value: object) -> str:
     return text if text in VERIFY_MODES else "off"
 
 
+def _percent(value: object, default: int = DEFAULT_LOGIC) -> int:
+    """Влияние логики из формы: целое число от 0 до 100."""
+    text = str(value if value is not None else "").strip().replace(",", ".")
+    if not text:
+        return default
+    try:
+        number = int(round(float(text)))
+    except ValueError:
+        return default
+    return min(100, max(0, number))
+
+
 def _base() -> Settings:
     """Настройки с учётом переключателей из интерфейса."""
     return runtime.apply(settings)
 
 
-def _settings_for(strict: bool, verify: str = "off") -> Settings:
+def _settings_for(strict: bool, verify: str = "off", logic: int = DEFAULT_LOGIC) -> Settings:
     """Настройки одного запроса с выбранными режимами."""
-    return replace(_base(), strict_resort=bool(strict), verify_mode=_mode(verify))
+    return replace(
+        _base(),
+        strict_resort=bool(strict),
+        verify_mode=_mode(verify),
+        logic_weight=_percent(logic) / 100.0,
+    )
 
 
 def _is_on(value: object) -> bool:
@@ -109,6 +137,7 @@ def _forget(token: str) -> None:
     result = RESULTS.pop(token, None)
     STRICT_FLAGS.pop(token, None)
     VERIFY_FLAGS.pop(token, None)
+    LOGIC_FLAGS.pop(token, None)
     PHOTOS.pop(token, None)
     PHOTO_ROWS.pop(token, None)
     if result is not None:
@@ -123,6 +152,7 @@ def _drop_expired() -> None:
             RESULTS.pop(token, None)
             STRICT_FLAGS.pop(token, None)
             VERIFY_FLAGS.pop(token, None)
+            LOGIC_FLAGS.pop(token, None)
             PHOTOS.pop(token, None)
             PHOTO_ROWS.pop(token, None)
 
@@ -183,13 +213,14 @@ async def _run_pipeline(
     prev_path: Path | None = None,
     prev_name: str = "",
     claim_decisions: dict[str, bool] | None = None,
+    logic: int = DEFAULT_LOGIC,
 ) -> PipelineResult:
     """Запускает обработку в отдельном потоке: сервер остаётся отзывчивым."""
     return await run_in_threadpool(
         process,
         source,
         original_name,
-        _settings_for(strict, verify),
+        _settings_for(strict, verify, logic),
         decisions,
         folder,
         sheet_meta,
@@ -206,6 +237,7 @@ def health() -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    base = _base()
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -213,8 +245,10 @@ def index(request: Request):
             "max_upload_mb": settings.max_upload_mb,
             "strict": settings.strict_resort,
             "verify": _mode(settings.verify_mode),
+            "logic": _percent(round(float(getattr(base, "logic_weight", 1.0)) * 100)),
             "model": model_status(settings),
-            "embed": runtime.embed_status(_base()),
+            "embed": runtime.embed_status(base),
+            "judge": runtime.judge_status(base),
             "jobs": _jobs(),
         },
     )
@@ -227,14 +261,18 @@ async def upload(
     prev: UploadFile | None = File(default=None),
     strict: str | None = Form(default=None),
     verify: str | None = Form(default=None),
+    logic: str | None = Form(default=None),
 ):
     await run_in_threadpool(_drop_expired)
     strict_on = _is_on(strict)
     verify_mode = _mode(verify)
+    logic_percent = _percent(logic)
     name = _safe_name(file.filename)
 
     if not name.lower().endswith(".xlsx"):
-        return _error(request, "Нужен файл с расширением .xlsx.", strict_on, verify_mode)
+        return _error(
+            request, "Нужен файл с расширением .xlsx.", strict_on, verify_mode, logic_percent
+        )
 
     folder = work_dir(settings)
     source = folder / name
@@ -247,11 +285,12 @@ async def upload(
             f"Файл больше {settings.max_upload_mb} МБ.",
             strict_on,
             verify_mode,
+            logic_percent,
         )
 
     if not size:
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, EMPTY_UPLOAD, strict_on, verify_mode)
+        return _error(request, EMPTY_UPLOAD, strict_on, verify_mode, logic_percent)
 
     # Второй файл — предыдущая инвентаризация, он необязательный.
     prev_path: Path | None = None
@@ -265,6 +304,7 @@ async def upload(
                 "Предыдущая сверка должна быть файлом .xlsx.",
                 strict_on,
                 verify_mode,
+                logic_percent,
             )
         prev_path = folder / f"prev-{prev_name}"
         try:
@@ -276,6 +316,7 @@ async def upload(
                 f"Предыдущая сверка больше {settings.max_upload_mb} МБ.",
                 strict_on,
                 verify_mode,
+                logic_percent,
             )
         if not prev_size:
             prev_path, prev_name = None, ""
@@ -292,19 +333,22 @@ async def upload(
             prev_path,
             prev_name,
             None,
+            logic_percent,
         )
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, str(error), strict_on, verify_mode)
+        return _error(request, str(error), strict_on, verify_mode, logic_percent)
     except Exception:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
+        return _error(
+            request, GENERIC_ERROR, strict_on, verify_mode, logic_percent, status=500
+        )
 
     # Плюсующие строки сразу получают пометку «нет фото»: фото по ним ещё нет.
     await run_in_threadpool(_photo_notes, result.output_path.parent.name, result)
-    return _result_page(request, result, strict_on, verify_mode)
+    return _result_page(request, result, strict_on, verify_mode, logic=logic_percent)
 
 
 async def _rebuild(
@@ -317,6 +361,7 @@ async def _rebuild(
     token: str,
     message: str = "",
     claim_decisions: dict[str, bool] | None = None,
+    logic: int = DEFAULT_LOGIC,
 ) -> HTMLResponse:
     """Собирает файл заново с теми же режимами, решениями и ручными полями."""
     folder = work_dir(settings)
@@ -345,14 +390,15 @@ async def _rebuild(
             prev_path,
             old.prev_name,
             claim_decisions,
+            logic,
         )
     except (ParseError, RepairError) as error:
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, str(error), strict_on, verify_mode)
+        return _error(request, str(error), strict_on, verify_mode, logic)
     except Exception:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, GENERIC_ERROR, strict_on, verify_mode, status=500)
+        return _error(request, GENERIC_ERROR, strict_on, verify_mode, logic, status=500)
 
     # Разобранные снимки и ответы по фото переезжают на новый токен: правки
     # в сверке не должны стирать работу по фото.
@@ -367,7 +413,7 @@ async def _rebuild(
     # Пересборка идёт от исходника и пишет столбец 12 заново, поэтому пометки
     # о фото возвращаются на место сразу после сборки.
     await run_in_threadpool(_photo_notes, new_token, result)
-    return _result_page(request, result, strict_on, verify_mode, message)
+    return _result_page(request, result, strict_on, verify_mode, message, logic=logic)
 
 
 @app.post("/meta/{token}", response_class=HTMLResponse)
@@ -386,6 +432,9 @@ async def meta(request: Request, token: str):
     sheet_meta = SheetMeta.from_form(payload)
     strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
     verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
+    logic_percent = _percent(
+        form.get("logic"), LOGIC_FLAGS.get(token, DEFAULT_LOGIC)
+    )
 
     return await _rebuild(
         request,
@@ -396,6 +445,7 @@ async def meta(request: Request, token: str):
         verify_mode,
         token,
         message="Данные сверки внесены в файл.",
+        logic=logic_percent,
     )
 
 
@@ -423,6 +473,9 @@ async def confirm(request: Request, token: str):
     # Режимы сохраняются с первого прогона.
     strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
     verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
+    logic_percent = _percent(
+        form.get("logic"), LOGIC_FLAGS.get(token, DEFAULT_LOGIC)
+    )
 
     # Ответы человека — готовые примеры для обучения.
     if answers:
@@ -440,6 +493,7 @@ async def confirm(request: Request, token: str):
         strict_on,
         verify_mode,
         token,
+        logic=logic_percent,
     )
 
 
@@ -463,6 +517,9 @@ async def claims_confirm(request: Request, token: str):
 
     strict_on = _is_on(form.get("strict")) or STRICT_FLAGS.get(token, False)
     verify_mode = _mode(form.get("verify") or VERIFY_FLAGS.get(token, "off"))
+    logic_percent = _percent(
+        form.get("logic"), LOGIC_FLAGS.get(token, DEFAULT_LOGIC)
+    )
     chosen = sum(1 for value in claim_decisions.values() if value)
 
     return await _rebuild(
@@ -475,6 +532,7 @@ async def claims_confirm(request: Request, token: str):
         token,
         message=f"Заявки реестра внесены в файл: {chosen}.",
         claim_decisions=claim_decisions,
+        logic=logic_percent,
     )
 
 
@@ -516,11 +574,13 @@ def _result_page(
     verify: str = "off",
     message: str = "",
     note_refs: bool = True,
+    logic: int = DEFAULT_LOGIC,
 ) -> HTMLResponse:
     token = result.output_path.parent.name
     RESULTS[token] = result
     STRICT_FLAGS[token] = bool(strict)
     VERIFY_FLAGS[token] = _mode(verify)
+    LOGIC_FLAGS[token] = _percent(logic)
     # При простом открытии уже готовой сверки журнал справочников не трогаем.
     if note_refs:
         _note_refs(result)
@@ -539,6 +599,7 @@ def _result_page(
             "output_name": result.output_name,
             "strict": bool(strict),
             "verify": _mode(verify),
+            "logic": _percent(logic),
             "refs": result.refs,
             "meta": result.sheet_meta.to_form(),
             "comparison": result.comparison,
@@ -566,6 +627,7 @@ def result_page(request: Request, token: str):
         STRICT_FLAGS.get(token, False),
         VERIFY_FLAGS.get(token, "off"),
         note_refs=False,
+        logic=LOGIC_FLAGS.get(token, DEFAULT_LOGIC),
     )
 
 
@@ -1068,12 +1130,14 @@ def _training_page(
     report: dict | None = None,
     status_code: int = 200,
 ) -> HTMLResponse:
+    base = _base()
     return templates.TemplateResponse(
         request=request,
         name="training.html",
         context={
             "model": model_status(settings),
-            "embed": runtime.embed_status(_base()),
+            "embed": runtime.embed_status(base),
+            "judge": runtime.judge_status(base),
             "stats": learning.dataset_stats(settings.train_store_path),
             "message": message,
             "error": error,
@@ -1241,6 +1305,83 @@ def training_embed_key_clear(request: Request):
     return _training_page(request, message="Ключ сервиса эмбеддингов удалён из настроек.")
 
 
+@app.post("/training/judge")
+def training_judge(
+    request: Request,
+    api_key: str | None = Form(default=None),
+    model: str | None = Form(default=None),
+    api_url: str | None = Form(default=None),
+    timeout: str | None = Form(default=None),
+    retries: str | None = Form(default=None),
+    max_requests: str | None = Form(default=None),
+    batch: str | None = Form(default=None),
+    max_pairs: str | None = Form(default=None),
+    logic: str | None = Form(default=None),
+):
+    """Сохраняет настройки LLM-судьи без перезапуска службы.
+
+    Ключ задаётся только здесь; пустое поле означает «оставить как было».
+    Влияние логики здесь — значение по умолчанию для страницы загрузки.
+    """
+    values: dict[str, object] = {
+        "judge_api_key": api_key,
+        "judge_timeout": timeout,
+        "judge_retries": retries,
+        "judge_max_requests": max_requests,
+        "judge_batch": batch,
+        "judge_max_pairs": max_pairs,
+    }
+    if str(model or "").strip():
+        values["judge_model"] = model
+    if str(api_url or "").strip():
+        values["judge_api_url"] = api_url
+    if str(logic if logic is not None else "").strip():
+        values["logic_weight"] = _percent(logic) / 100.0
+    try:
+        runtime.save_judge(settings, values)
+    except OSError as error:
+        logger.exception("Настройки LLM не сохранены")
+        return _training_page(
+            request,
+            error=(
+                f"Настройки не сохранены: {error}. Файл настроек — "
+                f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
+            ),
+            status_code=500,
+        )
+    return RedirectResponse(url="/training", status_code=303)
+
+
+@app.post("/training/judge/check", response_class=HTMLResponse)
+def training_judge_check(request: Request):
+    """Проверяет ключ и модель LLM одной пробной парой.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток.
+    """
+    ok, note = judge_core.check_key(_base())
+    if not ok:
+        return _training_page(request, error=note, status_code=400)
+    return _training_page(request, message=note)
+
+
+@app.post("/training/judge/key/clear", response_class=HTMLResponse)
+def training_judge_key_clear(request: Request):
+    """Удаляет ключ OpenRouter для LLM из настроек."""
+    try:
+        runtime.forget_judge_key(settings)
+    except OSError as error:
+        logger.exception("Ключ LLM не удалён")
+        return _training_page(
+            request,
+            error=(
+                f"Ключ не удалён: {error}. Файл настроек — "
+                f"{runtime.runtime_path(settings)}."
+            ),
+            status_code=500,
+        )
+    return _training_page(request, message="Ключ OpenRouter для LLM удалён из настроек.")
+
+
 @app.post("/training/clear")
 def training_clear():
     """Очищает накопленные примеры. Модель остаётся прежней."""
@@ -1253,8 +1394,10 @@ def _error(
     message: str,
     strict: bool = False,
     verify: str = "off",
+    logic: int = DEFAULT_LOGIC,
     status: int = 400,
 ) -> HTMLResponse:
+    base = _base()
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -1263,8 +1406,10 @@ def _error(
             "max_upload_mb": settings.max_upload_mb,
             "strict": bool(strict),
             "verify": _mode(verify),
+            "logic": _percent(logic),
             "model": model_status(settings),
-            "embed": runtime.embed_status(_base()),
+            "embed": runtime.embed_status(base),
+            "judge": runtime.judge_status(base),
             "jobs": _jobs(),
         },
         status_code=status,
