@@ -8,7 +8,8 @@
 Модель — логистическая регрессия на признаках пары. Чистый Python, вес
 файла несколько килобайт, инференс за микросекунды: это важно для VPS с
 1 ядром и 1 ГБ памяти. Эмбеддинги имён (`embed.py`) подключаются как ещё
-один признак и по умолчанию выключены.
+один признак и по умолчанию выключены; провайдер векторов (файл ONNX на
+сервере или OpenRouter по сети) выбирается в интерфейсе.
 """
 
 from __future__ import annotations
@@ -305,7 +306,17 @@ def load_verifier(settings) -> Verifier | None:
     if not path or not path.is_file():
         return None
     embed_enabled = bool(getattr(settings, "embed_enabled", False))
-    key = (str(path), path.stat().st_mtime_ns, embed_enabled)
+    # В ключе кэша есть и настройки эмбеддингов: смена провайдера,
+    # модели или ключа в интерфейсе должна давать новый второй слой.
+    key = (
+        str(path),
+        path.stat().st_mtime_ns,
+        embed_enabled,
+        str(getattr(settings, "embed_provider", "local")),
+        str(getattr(settings, "embed_model", "")),
+        str(getattr(settings, "embed_api_url", "")),
+        bool(str(getattr(settings, "embed_api_key", "") or "").strip()),
+    )
     if key in _CACHE:
         return _CACHE[key]
 
