@@ -32,7 +32,7 @@
 			<span class="stat-value">{{ embed.provider_label if embed else "—" }}</span>
 		</div>
 		<div class="stat">
-			<span class="stat-label">LLM (OpenRouter)</span>
+			<span class="stat-label">LLM ({{ judge.provider_label if judge else "—" }})</span>
 			<span class="stat-value">{% if judge and judge.has_key %}ключ задан{% else %}ключ не задан{% endif %}</span>
 		</div>
 		<div class="stat">
@@ -131,29 +131,39 @@
 </section>
 
 <section class="card">
-	<h2>4. LLM как второй слой (OpenRouter)</h2>
+	<h2>4. LLM как второй слой</h2>
 	<p class="card-sub">{{ judge.reason if judge else "Состояние неизвестно." }}</p>
 	<p class="alert alert-warn">
-		Внешний сервис: имена товаров, цены и количества пар уходят в OpenRouter, каждый
-		запрос тратит баланс ключа. Режим выключен по умолчанию — он включается на
-		странице загрузки выбором «Логика + LLM». Если эмбеддинги имён включены, их
-		близость попадает в подсказку модели: так LLM работает в связке с ними.
+		Внешний сервис: имена товаров, цены и количества пар уходят выбранному
+		провайдеру, каждый запрос тратит его баланс. Режим выключен по
+		умолчанию — он включается на странице загрузки выбором «Логика + LLM».
+		Если эмбеддинги имён включены, их близость попадает в подсказку модели:
+		так LLM работает в связке с ними.
 	</p>
 	<form action="/training/judge" method="post">
 		<div class="field">
-			<label for="judge-key">Ключ OpenRouter</label>
+			<label for="judge-provider">Провайдер LLM</label>
+			<select id="judge-provider" name="provider">
+				{% for item in judge.providers %}
+				<option value="{{ item.value }}" {% if judge.provider == item.value %}selected{% endif %}>{{ item.label }}</option>
+				{% endfor %}
+			</select>
+			<p class="hint">GigaChat — тот же сервис Сбера, что и для распознавания фото: нужен ключ авторизации и модель вроде GigaChat-2, адрес запроса при этом не используется.</p>
+		</div>
+		<div class="field">
+			<label for="judge-key">Ключ провайдера</label>
 			<input id="judge-key" type="password" name="api_key" autocomplete="off" placeholder="{% if judge and judge.has_key %}сохранён, оканчивается на {{ judge.key_tail }}{% else %}ключ не задан{% endif %}" />
-			<p class="hint">Пустое поле — оставить ключ как было. Ключ хранится только в настройках службы и на странице не показывается. Он отдельный от ключа эмбеддингов, но можно ввести тот же.</p>
+			<p class="hint">Пустое поле — оставить ключ как было. Для OpenRouter это ключ API, для GigaChat — ключ авторизации (Authorization key). Ключ хранится только в настройках службы и на странице не показывается. При смене провайдера ключ нужно ввести заново.</p>
 		</div>
 		<div class="field">
 			<label for="judge-model">Модель</label>
 			<input id="judge-model" type="text" name="model" value="{{ judge.model if judge else "" }}" />
-			<p class="hint">Имя модели OpenRouter, например openai/gpt-4o-mini. Дешёвые модели отвечают хуже — это и есть предмет проверки.</p>
+			<p class="hint">Для OpenRouter — например openai/gpt-4o-mini, для GigaChat — GigaChat-2. Дешёвые модели отвечают хуже — это и есть предмет проверки.</p>
 		</div>
 		<div class="field">
 			<label for="judge-url">Адрес запроса</label>
 			<input id="judge-url" type="text" name="api_url" value="{{ judge.api_url if judge else "" }}" />
-			<p class="hint">По умолчанию https://openrouter.ai/api/v1/chat/completions. Менять нужно только для другого совместимого сервиса.</p>
+			<p class="hint">По умолчанию https://openrouter.ai/api/v1/chat/completions. Менять нужно только для другого совместимого сервиса; для GigaChat поле не используется.</p>
 		</div>
 		<div class="field">
 			<label for="judge-timeout">Ожидание ответа, секунд</label>
