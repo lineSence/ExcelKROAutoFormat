@@ -15,7 +15,9 @@ Environment=SERVICE_NAME=excelkro
 Environment=SERVICE_USER=excelkro
 Environment=UPDATE_BRANCH=main
 Environment=HEALTH_URL=http://127.0.0.1:8000/health
-ExecStart=/opt/excelkro/deploy/ota-update.sh %i
+# Скрипт запускается через bash, а не напрямую: `git reset --hard` во время
+# обновления возвращает файлу права из репозитория и снимает флаг +x.
+ExecStart=/bin/bash /opt/excelkro/deploy/ota-update.sh %i
 TimeoutStartSec=900
 
 [Install]

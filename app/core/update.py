@@ -16,6 +16,10 @@
 - под служебным пользователем — через `sudo` и узкое правило `/etc/sudoers.d/excelkro`;
 - от root — напрямую, без `sudo` и без правила.
 
+Сам скрипт обновления служба запускает через `bash`, поэтому право запуска
+у файла не требуется: `git reset --hard` при каждом обновлении возвращает
+файлам права из репозитория и снимает выставленный вручную флаг `+x`.
+
 Ход работы скрипт пишет в файл состояния и журнал, а интерфейс их читает.
 """
 
@@ -121,19 +125,23 @@ def parts() -> dict:
     Проверка только читает файловую систему: ничего не запускается.
     Правило sudo нужно только служебному пользователю: под root программа
     запускает службу напрямую, и файла правила на сервере может не быть.
+
+    Право запуска у самого скрипта не проверяется: служба вызывает его
+    через `bash`, а флаг `+x` всё равно снимается при каждом `git reset
+    --hard` во время обновления.
     """
     script = app_dir() / "deploy" / "ota-update.sh"
     root = as_root()
     unit = UNIT_FILE.is_file()
     sudoers = root or SUDOERS_FILE.exists()
-    runnable = script.is_file() and os.access(script, os.X_OK)
+    runnable = script.is_file()
     missing: list[str] = []
     if not unit:
         missing.append("разовая служба excelkro-update@.service")
     if not sudoers:
         missing.append("правило sudo /etc/sudoers.d/excelkro")
     if not runnable:
-        missing.append("право запуска у deploy/ota-update.sh")
+        missing.append("файл deploy/ota-update.sh")
     return {
         "unit": unit,
         "sudoers": sudoers,
