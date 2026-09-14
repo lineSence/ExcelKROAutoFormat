@@ -142,41 +142,46 @@
 	<form action="/training/judge" method="post">
 		<div class="field">
 			<label for="judge-key">Ключ OpenRouter</label>
-			<input id="judge-key" type="password" name="judge_api_key" autocomplete="off" placeholder="{% if judge and judge.has_key %}сохранён, оканчивается на {{ judge.key_tail }}{% else %}ключ не задан{% endif %}" />
+			<input id="judge-key" type="password" name="api_key" autocomplete="off" placeholder="{% if judge and judge.has_key %}сохранён, оканчивается на {{ judge.key_tail }}{% else %}ключ не задан{% endif %}" />
 			<p class="hint">Пустое поле — оставить ключ как было. Ключ хранится только в настройках службы и на странице не показывается. Он отдельный от ключа эмбеддингов, но можно ввести тот же.</p>
 		</div>
 		<div class="field">
 			<label for="judge-model">Модель</label>
-			<input id="judge-model" type="text" name="judge_model" value="{{ judge.model if judge else "" }}" />
+			<input id="judge-model" type="text" name="model" value="{{ judge.model if judge else "" }}" />
 			<p class="hint">Имя модели OpenRouter, например openai/gpt-4o-mini. Дешёвые модели отвечают хуже — это и есть предмет проверки.</p>
 		</div>
 		<div class="field">
 			<label for="judge-url">Адрес запроса</label>
-			<input id="judge-url" type="text" name="judge_api_url" value="{{ judge.api_url if judge else "" }}" />
+			<input id="judge-url" type="text" name="api_url" value="{{ judge.api_url if judge else "" }}" />
 			<p class="hint">По умолчанию https://openrouter.ai/api/v1/chat/completions. Менять нужно только для другого совместимого сервиса.</p>
 		</div>
 		<div class="field">
 			<label for="judge-timeout">Ожидание ответа, секунд</label>
-			<input id="judge-timeout" type="number" name="judge_timeout" min="5" max="300" step="5" value="{{ (judge.timeout | round | int) if judge else 60 }}" />
+			<input id="judge-timeout" type="number" name="timeout" min="5" max="300" step="5" value="{{ (judge.timeout | round | int) if judge else 60 }}" />
+		</div>
+		<div class="field">
+			<label for="judge-retries">Повторов при сбое</label>
+			<input id="judge-retries" type="number" name="retries" min="0" max="5" step="1" value="{{ judge.retries if judge and judge.retries is defined else 1 }}" />
+			<p class="hint">Повтор идёт только при обрыве связи или ответах 429 и 5xx: ошибку ключа или модели повтором не исправить.</p>
 		</div>
 		<div class="field">
 			<label for="judge-batch">Пар в одном запросе</label>
-			<input id="judge-batch" type="number" name="judge_batch" min="1" max="50" step="1" value="{{ judge.batch if judge else 20 }}" />
+			<input id="judge-batch" type="number" name="batch" min="1" max="50" step="1" value="{{ judge.batch if judge else 20 }}" />
 			<p class="hint">Чем больше пачка, тем меньше запросов и трат, но тем хуже модель держит внимание.</p>
 		</div>
 		<div class="field">
 			<label for="judge-max-pairs">Предел пар на один файл</label>
-			<input id="judge-max-pairs" type="number" name="judge_max_pairs" min="0" max="100000" step="10" value="{{ judge.max_pairs if judge else 200 }}" />
+			<input id="judge-max-pairs" type="number" name="max_pairs" min="0" max="100000" step="10" value="{{ judge.max_pairs if judge else 200 }}" />
 			<p class="hint">Когда предел исчерпан, остальные пары решает логика. 0 — без предела.</p>
 		</div>
 		<div class="field">
 			<label for="judge-max-requests">Предел запросов до перезапуска</label>
-			<input id="judge-max-requests" type="number" name="judge_max_requests" min="0" max="100000" step="10" value="{{ judge.max_requests if judge else 60 }}" />
+			<input id="judge-max-requests" type="number" name="max_requests" min="0" max="100000" step="10" value="{{ judge.max_requests if judge else 60 }}" />
 			<p class="hint">Защита от неожиданных трат на весь процесс службы. 0 — без предела.</p>
 		</div>
 		<div class="field">
 			<label for="judge-logic">Влияние логики по умолчанию, %</label>
-			<input id="judge-logic" type="number" name="logic_weight" min="0" max="100" step="1" value="{{ judge.logic_percent if judge else 100 }}" />
+			<input id="judge-logic" type="number" name="logic" min="0" max="100" step="1" value="{{ judge.logic_percent if judge else 100 }}" />
 			<p class="hint">Значение, которое подставляется на странице загрузки. 100% — прежнее поведение, 0% — решает только второй слой.</p>
 		</div>
 		<div class="actions"><button type="submit">Сохранить</button></div>
