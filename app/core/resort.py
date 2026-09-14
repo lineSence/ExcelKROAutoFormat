@@ -17,8 +17,23 @@
 Режим «только чёткие пересорты» (`strict_brand_only=True`): в пару ставятся
 только позиции одного бренда, цена в подборе не участвует вовсе.
 
-Второй слой (`verify.py`) необязателен: модель судит только те пары,
-которые предложил слой 1, и не умеет добавлять свои.
+Второй слой (`verify.py` — логистическая регрессия, `judge.py` — LLM)
+необязателен: обычно модель судит только те пары, которые предложил
+слой 1, и не умеет добавлять свои.
+
+Влияние логики регулируется `logic_weight` (0…1, в интерфейсе 0…100%) и
+работает только при включённом втором слое:
+
+- 1.0 — как раньше: ворота по бренду и цене отсеивают кандидатов,
+  оценка пары детерминированная, модель лишь чуть двигает её (bonus)
+  и может пару снять;
+- меньше 1.0 — ворота становятся мягкими (кандидатом считается любая
+  пара «излишек — недостача»), а итоговая оценка складывается как
+  `w * оценка логики + (1 - w) * 2 * порог * шанс модели`. При шансе 0.5
+  вклад модели равен порогу, поэтому при 0% решение целиком за моделью.
+
+Цена мягких ворот — время: при `logic_weight < 1` оценка считается для
+всех пар плюс×минус внутри группы, а не только для прошедших ворота.
 
 Зелёная заливка и метка `не-` — ручной тег по внешним данным. Программа его
 не ставит и не воспроизводит.
@@ -26,10 +41,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
+
+logger = logging.getLogger("excelkro.resort")
 
 PUNCTUATION = re.compile(r"[.,\"\u00ab\u00bb\-/()]+")
 SPACES = re.compile(r"\s+")
@@ -62,6 +80,18 @@ MATCH_MIN_SCORE = 1.10
 
 # Предел числа спорных пар в ответе: иначе страница разрастается.
 DOUBTFUL_LIMIT = 200
+
+# Влияние логики по умолчанию: всё решает детерминированный расчёт.
+DEFAULT_LOGIC_WEIGHT = 1.0
+
+
+def clamp_weight(value) -> float:
+    """Доля влияния логики: число от 0 до 1."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_LOGIC_WEIGHT
+    return min(1.0, max(0.0, number))
 
 
 @dataclass
@@ -131,6 +161,18 @@ class DoubtfulPair:
     # Шанс модели, если второй слой работал.
     model_prob: float | None = None
     source: str = SOURCE_SIMILARITY
+
+
+@dataclass
+class _Candidate:
+    """Пара-кандидат первого слоя до суда второго слоя."""
+
+    score: float
+    plus: int
+    minus: int
+    key: str
+    confirmed: bool
+    gate_ok: bool
 
 
 def normalize(name: str, type_words: tuple[str, ...] = ()) -> str:
@@ -285,6 +327,21 @@ def brand_score(first: Item, second: Item) -> float:
     )
 
 
+def mixed_score(
+    logic_score: float,
+    prob: float,
+    weight: float,
+    match_min_score: float = MATCH_MIN_SCORE,
+) -> float:
+    """Смешанная оценка пары: часть от логики, часть от модели.
+
+    При `weight = 1` остаётся только логика. При `weight = 0` пара
+    проходит порог ровно тогда, когда модель дала шанс выше 0.5.
+    """
+    model_part = 2.0 * match_min_score * min(1.0, max(0.0, prob))
+    return weight * logic_score + (1.0 - weight) * model_part
+
+
 class _Union:
     def __init__(self, size: int) -> None:
         self.parent = list(range(size))
@@ -346,15 +403,24 @@ def build_clusters(
     match_min_score: float = MATCH_MIN_SCORE,
     doubtful_limit: int = DOUBTFUL_LIMIT,
     verifier=None,
+    logic_weight: float | None = None,
 ) -> tuple[list[Cluster], list[DoubtfulPair]]:
     """Подбирает пары пересорта: каждый излишек к своей недостаче.
 
     При `strict_brand_only=True` разрешены только пары одного бренда,
     а цена не влияет ни на допуск пары, ни на её оценку.
 
-    `verifier` — второй слой. Он судит только готовые кандидаты: может
-    снять пару, усилить её оценку или отправить в спорные. Решение
-    человека (decisions) всегда главнее модели.
+    `verifier` — второй слой (логистическая модель или LLM). Он судит
+    кандидатов: может снять пару, усилить её оценку или отправить в
+    спорные. Решение человека (decisions) всегда главнее модели.
+
+    `logic_weight` — доля влияния логики от 0 до 1. Если не передана,
+    берётся с объекта второго слоя. Без второго слоя вес не действует:
+    решать всё равно некому, кроме логики.
+
+    Работа идёт в два прохода: сначала собираются кандидаты с
+    детерминированной оценкой, потом (если второй слой умеет `prefetch`)
+    пары одним списком уходят к модели и только затем судятся.
 
     Список спорных пар ограничен `doubtful_limit`: самые схожие пары идут
     в отчёт первыми.
@@ -364,68 +430,115 @@ def build_clusters(
     minus = [index for index, item in enumerate(items) if item.diff < 0]
 
     choices = decisions or {}
-    doubtful: list[DoubtfulPair] = []
-    seen_doubtful: set[str] = set()
-    ranked: list[tuple[float, int, int]] = []
+    weight = clamp_weight(
+        logic_weight
+        if logic_weight is not None
+        else getattr(verifier, "logic_weight", DEFAULT_LOGIC_WEIGHT)
+    )
+    if verifier is None and weight < 1.0:
+        logger.info(
+            "Влияние логики %.0f%% не применяется: второй слой выключен.",
+            weight * 100,
+        )
+        weight = 1.0
+    soft_gates = verifier is not None and weight < 1.0
+
+    # Проход 1: кандидаты и детерминированная оценка.
+    candidates: list[_Candidate] = []
     for p in plus:
         for m in minus:
             key = pair_key(items[p].row, items[m].row)
             answer = choices.get(key)
             if answer is False:
                 continue
-            if answer is not True:
+            confirmed = answer is True
+            gate_ok = True
+            if not confirmed:
                 if strict_brand_only:
-                    if not same_brand(items[p], items[m], threshold):
-                        continue
-                elif not price_allowed(
-                    items[p], items[m], threshold, price_gate_low, price_gate_high
-                ):
+                    gate_ok = same_brand(items[p], items[m], threshold)
+                else:
+                    gate_ok = price_allowed(
+                        items[p], items[m], threshold, price_gate_low, price_gate_high
+                    )
+                if not gate_ok and not soft_gates:
                     continue
             if strict_brand_only:
                 score = brand_score(items[p], items[m])
             else:
                 score = pair_score(items[p], items[m])
+            candidates.append(_Candidate(score, p, m, key, confirmed, gate_ok))
 
-            # Второй слой: только для пар, по которым человек ещё не ответил.
-            model_prob: float | None = None
-            if verifier is not None and answer is not True:
-                verdict = verifier.check(items[p], items[m])
-                model_prob = verdict.prob
+    # Лучшие кандидаты идут к модели первыми: пределы запросов конечны.
+    candidates.sort(key=lambda pair: (-pair.score, pair.plus, pair.minus))
+
+    if verifier is not None and hasattr(verifier, "prefetch"):
+        wanted = [
+            (items[pair.plus], items[pair.minus])
+            for pair in candidates
+            if not pair.confirmed
+        ]
+        if wanted:
+            logger.info("Второй слой: пар на проверку %s", len(wanted))
+            verifier.prefetch(wanted)
+
+    # Проход 2: суд второго слоя и итоговая оценка.
+    doubtful: list[DoubtfulPair] = []
+    seen_doubtful: set[str] = set()
+    ranked: list[tuple[float, int, int]] = []
+    for pair in candidates:
+        p, m, key = pair.plus, pair.minus, pair.key
+        score = pair.score
+        model_prob: float | None = None
+
+        if pair.confirmed:
+            score += 10.0
+        elif verifier is not None:
+            verdict = verifier.check(items[p], items[m])
+            model_prob = verdict.prob
+            if not getattr(verdict, "known", True):
+                # Модель промолчала: пара держится только на логике.
+                if not pair.gate_ok:
+                    continue
+            elif weight >= 1.0:
                 if not verdict.accept:
                     continue
                 score += verdict.bonus
-                if verdict.gray and key not in seen_doubtful:
-                    seen_doubtful.add(key)
-                    doubtful.append(
-                        _doubtful(
-                            items[p],
-                            items[m],
-                            similarity(items[p].key, items[m].key),
-                            key,
-                            key in choices,
-                            model_prob,
-                            SOURCE_MODEL,
-                        )
-                    )
-
-            if answer is True:
-                score += 10.0
-            ranked.append((score, p, m))
-            # Полная схожесть считается только для прошедших отбор пар.
-            ratio = similarity(items[p].key, items[m].key)
-            if doubtful_min <= ratio <= doubtful_max and key not in seen_doubtful:
+            else:
+                score = mixed_score(score, verdict.prob, weight, match_min_score)
+            if verdict.gray and key not in seen_doubtful:
                 seen_doubtful.add(key)
                 doubtful.append(
                     _doubtful(
                         items[p],
                         items[m],
-                        ratio,
+                        similarity(items[p].key, items[m].key),
                         key,
                         key in choices,
                         model_prob,
-                        SOURCE_SIMILARITY,
+                        SOURCE_MODEL,
                     )
                 )
+        elif not pair.gate_ok:
+            continue
+
+        ranked.append((score, p, m))
+        # Полная схожесть считается только для пар, прошедших ворота.
+        if not pair.gate_ok:
+            continue
+        ratio = similarity(items[p].key, items[m].key)
+        if doubtful_min <= ratio <= doubtful_max and key not in seen_doubtful:
+            seen_doubtful.add(key)
+            doubtful.append(
+                _doubtful(
+                    items[p],
+                    items[m],
+                    ratio,
+                    key,
+                    key in choices,
+                    model_prob,
+                    SOURCE_SIMILARITY,
+                )
+            )
 
     ranked.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
 
