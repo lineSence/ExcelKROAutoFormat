@@ -1,8 +1,8 @@
 """Второй слой проверки пересортов: лёгкая локальная модель.
 
-Слой 1 (`resort.py`) остаётся единственным источником пар-кандидатов.
-Слой 2 отвечает на один вопрос по каждой предложенной паре: «это правда
-один товар?» — и может пару отклонить, усилить или отправить в спорные.
+Слой 1 (`resort.py`) остаётся источником пар-кандидатов. Слой 2
+отвечает на один вопрос по каждой предложенной паре: «это правда один
+товар?» — и может пару отклонить, усилить или отправить в спорные.
 Модель не умеет придумывать пары, которых нет в кандидатах.
 
 Модель — логистическая регрессия на признаках пары. Чистый Python, вес
@@ -10,6 +10,18 @@
 1 ядром и 1 ГБ памяти. Эмбеддинги имён (`embed.py`) подключаются как ещё
 один признак и по умолчанию выключены; провайдер векторов (файл ONNX на
 сервере или OpenRouter по сети) выбирается в интерфейсе.
+
+Здесь же живёт общий ответ второго слоя — `Verdict`. Его возвращает и
+логистическая модель, и LLM-судья из `judge.py`. Поле `known=False`
+означает «ответа нет» (сеть, ключ, предел запросов): такую пару
+слой 1 решает сам, по своим воротам.
+
+Режимы второго слоя (`verify_mode`):
+
+- `off` — только логика;
+- `model` — локальная логистическая модель из этого файла;
+- `llm` — языковая модель через OpenRouter (`judge.py`), при включённых
+  эмбеддингах — в связке с ними.
 """
 
 from __future__ import annotations
@@ -20,7 +32,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .resort import Item, covers, price_ratio, same_brand, similarity
+from .resort import DEFAULT_LOGIC_WEIGHT, Item, clamp_weight, covers, price_ratio, similarity
 
 DIGITS = re.compile(r"\d+")
 
@@ -228,13 +240,18 @@ def train_logistic(
 
 @dataclass
 class Verdict:
-    """Ответ второго слоя по одной паре."""
+    """Ответ второго слоя по одной паре.
+
+    `known=False` — ответа нет (модель недоступна или исчерпан предел
+    запросов). Такую пару решает логика первого слоя.
+    """
 
     prob: float
     accept: bool
     gray: bool
     bonus: float
     reason: str
+    known: bool = True
 
 
 class Verifier:
@@ -248,6 +265,7 @@ class Verifier:
         gray_low: float = 0.35,
         gray_high: float = 0.65,
         weight: float = 1.0,
+        logic_weight: float = DEFAULT_LOGIC_WEIGHT,
     ) -> None:
         self.model = model
         self.embedder = embedder
@@ -255,6 +273,8 @@ class Verifier:
         self.gray_low = gray_low
         self.gray_high = gray_high
         self.weight = weight
+        # Доля влияния логики: читается в build_clusters.
+        self.logic_weight = clamp_weight(logic_weight)
 
     def _embed_cos(self, plus: Item, minus: Item) -> float | None:
         if self.embedder is None:
@@ -298,16 +318,43 @@ def model_status(settings) -> dict:
     }
 
 
-def load_verifier(settings) -> Verifier | None:
-    """Собирает второй слой по настройкам. None означает «только слой 1»."""
-    if str(getattr(settings, "verify_mode", "off")).lower() != "model":
+def _embedder_for(settings):
+    """Эмбеддинги имён, если они включены в интерфейсе."""
+    if not bool(getattr(settings, "embed_enabled", False)):
         return None
+    from .embed import load_embedder
+
+    return load_embedder(settings)
+
+
+def load_verifier(settings, logic_weight: float | None = None):
+    """Собирает второй слой по настройкам. None означает «только слой 1».
+
+    Режим берётся из `verify_mode`, вес логики — из аргумента или из
+    `logic_weight` в настройках (поле 0…100% на странице загрузки).
+    """
+    mode = str(getattr(settings, "verify_mode", "off")).lower()
+    weight = clamp_weight(
+        logic_weight
+        if logic_weight is not None
+        else getattr(settings, "logic_weight", DEFAULT_LOGIC_WEIGHT)
+    )
+
+    if mode == "llm":
+        from .judge import load_judge
+
+        return load_judge(settings, weight, _embedder_for(settings))
+
+    if mode != "model":
+        return None
+
     path = Path(getattr(settings, "model_path", ""))
     if not path or not path.is_file():
         return None
     embed_enabled = bool(getattr(settings, "embed_enabled", False))
     # В ключе кэша есть и настройки эмбеддингов: смена провайдера,
     # модели или ключа в интерфейсе должна давать новый второй слой.
+    # Вес логики в ключ не входит: он меняется на готовом объекте.
     key = (
         str(path),
         path.stat().st_mtime_ns,
@@ -318,26 +365,24 @@ def load_verifier(settings) -> Verifier | None:
         bool(str(getattr(settings, "embed_api_key", "") or "").strip()),
     )
     if key in _CACHE:
-        return _CACHE[key]
+        cached = _CACHE[key]
+        if cached is not None:
+            cached.logic_weight = weight
+        return cached
 
     model = LogisticModel.load(path)
     if model is None:
         _CACHE[key] = None
         return None
 
-    embedder = None
-    if embed_enabled:
-        from .embed import load_embedder
-
-        embedder = load_embedder(settings)
-
     verifier = Verifier(
         model=model,
-        embedder=embedder,
+        embedder=_embedder_for(settings),
         reject=float(getattr(settings, "verify_reject", 0.35)),
         gray_low=float(getattr(settings, "verify_gray_low", 0.35)),
         gray_high=float(getattr(settings, "verify_gray_high", 0.65)),
         weight=float(getattr(settings, "verify_weight", 1.0)),
+        logic_weight=weight,
     )
     _CACHE.clear()  # На VPS держим в памяти только одну модель.
     _CACHE[key] = verifier
