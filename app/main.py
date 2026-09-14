@@ -27,6 +27,7 @@ from starlette.concurrency import run_in_threadpool
 from . import __version__
 from .config import Settings
 from .core import claims as claims_book
+from .core import embed as embed_core
 from .core import learning, photo_mark, refs_sync, runtime
 from .core import update as ota
 from .core import vision as vision_core
@@ -1170,10 +1171,74 @@ def training_train(request: Request):
 
 
 @app.post("/training/embed")
-def training_embed(embed: str | None = Form(default=None)):
-    """Включает или выключает эмбеддинги имён без перезапуска службы."""
-    runtime.set_embed(settings, _is_on(embed))
+def training_embed(
+    request: Request,
+    embed: str | None = Form(default=None),
+    provider: str | None = Form(default=None),
+    api_key: str | None = Form(default=None),
+    model: str | None = Form(default=None),
+    timeout: str | None = Form(default=None),
+    max_requests: str | None = Form(default=None),
+):
+    """Сохраняет настройки эмбеддингов имён без перезапуска службы.
+
+    Провайдер выбирается здесь же: файл ONNX на сервере или OpenRouter по
+    сети. Ключ задаётся только в интерфейсе, пустое поле означает
+    «оставить как было».
+    """
+    values: dict[str, object] = {
+        "embed_enabled": _is_on(embed),
+        "embed_api_key": api_key,
+        "embed_timeout": timeout,
+        "embed_max_requests": max_requests,
+    }
+    if str(provider or "").strip():
+        values["embed_provider"] = provider
+    if str(model or "").strip():
+        values["embed_model"] = model
+    try:
+        runtime.save_embed(settings, values)
+    except OSError as error:
+        logger.exception("Настройки эмбеддингов не сохранены")
+        return _training_page(
+            request,
+            error=(
+                f"Настройки не сохранены: {error}. Файл настроек — "
+                f"{runtime.runtime_path(settings)}. Дайте службе право писать в эту папку."
+            ),
+            status_code=500,
+        )
     return RedirectResponse(url="/training", status_code=303)
+
+
+@app.post("/training/embed/check", response_class=HTMLResponse)
+def training_embed_check(request: Request):
+    """Проверяет ключ и модель эмбеддингов одним коротким запросом.
+
+    Обработчик синхронный: FastAPI сам уносит его в отдельный поток.
+    """
+    ok, note = embed_core.check_remote(_base())
+    if not ok:
+        return _training_page(request, error=note, status_code=400)
+    return _training_page(request, message=note)
+
+
+@app.post("/training/embed/key/clear", response_class=HTMLResponse)
+def training_embed_key_clear(request: Request):
+    """Удаляет ключ сервиса эмбеддингов из настроек."""
+    try:
+        runtime.forget_embed_key(settings)
+    except OSError as error:
+        logger.exception("Ключ эмбеддингов не удалён")
+        return _training_page(
+            request,
+            error=(
+                f"Ключ не удалён: {error}. Файл настроек — "
+                f"{runtime.runtime_path(settings)}."
+            ),
+            status_code=500,
+        )
+    return _training_page(request, message="Ключ сервиса эмбеддингов удалён из настроек.")
 
 
 @app.post("/training/clear")
