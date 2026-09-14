@@ -2,9 +2,10 @@
 
 Ревизоры присылают снимки плюсующего товара письмом. Модуль забирает такие
 письма по IMAP, складывает вложения на диск и достаёт из текста то, что
-можно найти без всякой модели: коды товара, количества и слова вроде
-«излишек» или «пересорт». Дальше снимки разбирает `vision.py`, а решение
-принимает человек.
+можно найти без всякой модели: коды товара, количества, слова вроде
+«излишек» или «пересорт», упоминание списка несосчитанного товара и ФИО
+ночного продавца. Дальше снимки разбирает `vision.py`, а решение принимает
+человек.
 
 Почему именно IMAP и стандартная библиотека:
 
@@ -28,6 +29,10 @@
 (modified UTF-7). Поэтому папка «Отчёты» уезжает на сервер как
 `&BB4EQgRHBRE-...`, а не как есть: иначе `imaplib` спотыкается на
 кириллице ещё до отправки команды.
+
+По каждому письму собирается архив (`build_archive`): все вложения плюс
+текстовый файл с самим письмом. Снимки в архиве переименованы по тому,
+что узнала нейросеть, — так по имени файла видно товар, не открывая фото.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ import imaplib
 import json
 import logging
 import re
+import zipfile
 from dataclasses import dataclass, field
 from email.header import decode_header, make_header
 from email.message import Message
@@ -107,7 +113,10 @@ TEXT_LIMIT = 1200
 # Сколько имён папок показываем в подсказке об ошибке.
 FOLDER_HINT_LIMIT = 30
 
-UNSAFE_NAME = re.compile(r"[\\/\x00]+")
+# Имя текстового файла с письмом внутри архива.
+LETTER_FILE = "письмо.txt"
+
+UNSAFE_NAME = re.compile(r"[\\/]+")
 
 # Хвост строки ответа LIST: имя папки в кавычках либо последнее слово.
 FOLDER_LINE = re.compile(rb'"([^"]*)"\s*$')
@@ -134,6 +143,55 @@ KEYWORDS = (
     "возврат",
     "бой",
     "фото",
+    "список",
+    "в списке",
+    "несосчитан",
+    "продавец",
+    "ночной продавец",
+)
+
+# Товар лежит в списке несосчитанного: об этом надо предупредить человека.
+# Буква «ё» в тексте заранее заменяется на «е», поэтому пишем без неё.
+LIST_WORDS = (
+    "список",
+    "в списке",
+    "списке",
+    "несосчитан",
+    "не сосчитан",
+    "не посчитан",
+    "непосчитан",
+)
+
+# Слова, после которых в письме обычно стоит ФИО продавца.
+SELLER_WORDS = ("ночной продавец", "продавец", "продавца", "продавцом")
+
+# Слова ревизора: его ФИО в поле «ночной продавец» попадать не должно.
+AUDITOR_WORDS = ("ревизор", "проверяющ", "с уважением")
+
+# «Иванов Иван Иванович» и «Иванов И. И.» — два обычных вида ФИО в письме.
+FULL_NAME = re.compile(
+    r"\b([А-ЯЁ][а-яё]{1,20})\s+([А-ЯЁ][а-яё]{1,20})(?:\s+([А-ЯЁ][а-яё]{1,20}))?\b"
+)
+SHORT_NAME = re.compile(r"\b([А-ЯЁ][а-яё]{1,20})\s+([А-ЯЁ])\.\s*([А-ЯЁ])?\.?")
+
+# Слова, похожие на фамилию по написанию, но фамилией не являющиеся.
+NOT_NAME = (
+    "ночной",
+    "ночная",
+    "продавец",
+    "продавца",
+    "ревизор",
+    "ревизора",
+    "магазин",
+    "список",
+    "товар",
+    "добрый",
+    "здравствуйте",
+    "привет",
+    "спасибо",
+    "уважением",
+    "смена",
+    "фото",
 )
 
 
@@ -150,7 +208,7 @@ def mask_secret(value: str) -> str:
 def safe_name(name: object) -> str:
     """Имя вложения без пути: письмо может принести «../../passwd»."""
     base = Path(str(name or "")).name
-    base = UNSAFE_NAME.sub("", base).strip().strip(".")
+    base = UNSAFE_NAME.sub("", base).replace(chr(0), "").strip().strip(".")
     return base or "photo.jpg"
 
 
@@ -385,12 +443,14 @@ def _folders_hint(client) -> str:
 
 @dataclass
 class Photo:
-    """Снимок из письма."""
+    """Вложение письма: снимок или обычный файл."""
 
     name: str
     data: bytes = b""
     path: str = ""
     size: int = 0
+    # Имя, которое дала нейросеть: под ним снимок кладётся в архив письма.
+    title: str = ""
 
 
 @dataclass
@@ -403,6 +463,8 @@ class Letter:
     day: dt.date | None = None
     text: str = ""
     photos: list[Photo] = field(default_factory=list)
+    # Вложения, которые снимками не являются: акты, таблицы, документы.
+    files: list[Photo] = field(default_factory=list)
     hints: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
@@ -443,24 +505,31 @@ def _body(message: Message) -> str:
     return re.sub(r"[ \t\r\f\v]+", " ", body).strip()
 
 
-def _photos(message: Message, limit_mb: int) -> tuple[list[Photo], list[str]]:
-    """Снимки письма и заметки о пропущенных вложениях.
+def attachments(message: Message, limit_mb: int) -> tuple[list[Photo], list[Photo], list[str]]:
+    """Вложения письма: снимки, прочие файлы и заметки о пропущенных.
 
+    Прочие файлы тоже нужны: они уходят в архив письма целиком.
     `walk()` заходит и внутрь пересланных писем (`message/rfc822`), поэтому
     фото из пересылки тоже находятся.
     """
-    found: list[Photo] = []
+    photos: list[Photo] = []
+    files: list[Photo] = []
     notes: list[str] = []
     limit = max(1, int(limit_mb or 1)) * 1024 * 1024
     for part in message.walk():
         if part.is_multipart():
             continue
         kind = (part.get_content_type() or "").lower()
-        name = safe_name(_decoded(part.get_filename()))
-        looks_photo = kind.startswith("image/") or is_photo(name)
-        if not looks_photo:
+        raw_name = _decoded(part.get_filename())
+        disposition = (part.get_content_disposition() or "").lower()
+        looks_photo = kind.startswith("image/") or is_photo(safe_name(raw_name))
+        # Тело письма вложением не считаем: оно уходит в текст.
+        if not str(raw_name).strip() and not looks_photo:
             continue
-        if not is_photo(name):
+        if kind in ("text/plain", "text/html") and disposition != "attachment":
+            continue
+        name = safe_name(raw_name)
+        if looks_photo and not is_photo(name):
             # Встроенная картинка без имени: достраиваем по типу.
             tail = kind.split("/")[-1].split(";")[0] or "jpg"
             name = f"{name}.{tail}"
@@ -471,15 +540,75 @@ def _photos(message: Message, limit_mb: int) -> tuple[list[Photo], list[str]]:
         if len(data) > limit:
             notes.append(f"вложение {name} больше {limit_mb} МБ")
             continue
-        found.append(Photo(name=name, data=data, size=len(data)))
-    return found, notes
+        item = Photo(name=name, data=data, size=len(data))
+        if looks_photo:
+            photos.append(item)
+        else:
+            files.append(item)
+    return photos, files, notes
+
+
+def _clean_name(parts) -> bool:
+    """Похоже ли найденное на ФИО, а не на обычные слова с большой буквы."""
+    for part in parts:
+        if not part:
+            continue
+        if part.lower().replace("ё", "е") in NOT_NAME:
+            return False
+    return True
+
+
+def _name_in(line: str) -> str:
+    """ФИО из одной строки письма. Пусто, если ничего похожего нет."""
+    short = SHORT_NAME.search(line)
+    if short is not None and _clean_name((short.group(1),)):
+        tail = " ".join(part + "." for part in short.groups()[1:] if part)
+        return f"{short.group(1)} {tail}".strip()
+    full = FULL_NAME.search(line)
+    if full is not None and _clean_name(full.groups()):
+        return " ".join(part for part in full.groups() if part)
+    return ""
+
+
+def find_seller(text: str, subject: str = "") -> str:
+    """ФИО продавца из письма. Ревизора сюда не берём.
+
+    Ищем в строках, где есть слово «продавец»: сначала в самой строке,
+    затем в следующей — ревизоры часто пишут «Ночной продавец:» и ФИО
+    на новой строке. Строки про ревизоров и подпись письма пропускаем.
+    """
+    lines = [line.strip() for line in f"{subject}\n{text}".splitlines()]
+    for index, line in enumerate(lines):
+        low = line.lower().replace("ё", "е")
+        if not any(word in low for word in SELLER_WORDS):
+            continue
+        if any(word in low for word in AUDITOR_WORDS):
+            continue
+        tail = line
+        for mark in (":", "—", "-"):
+            if mark in tail:
+                tail = tail.split(mark, 1)[1]
+                break
+        name = _name_in(tail) or _name_in(line)
+        if name:
+            return name
+        if index + 1 < len(lines):
+            following = lines[index + 1]
+            low_next = following.lower().replace("ё", "е")
+            if any(word in low_next for word in AUDITOR_WORDS):
+                continue
+            name = _name_in(following)
+            if name:
+                return name
+    return ""
 
 
 def read_hints(text: str, subject: str = "") -> dict:
     """Что видно в письме без всякой модели: коды, количество, слова.
 
     Это сознательно простой разбор. Он не пытается понять письмо целиком,
-    а только подсказывает человеку, к чему снимок относится.
+    а только подсказывает человеку, к чему снимок относится и что стоит
+    проверить: товар в списке несосчитанного и ФИО ночного продавца.
     """
     whole = f"{subject}\n{text}".strip()
     low = whole.lower().replace("ё", "е")
@@ -489,12 +618,19 @@ def read_hints(text: str, subject: str = "") -> dict:
             codes.append(item)
     quantity = QUANTITY.search(whole)
     store = STORE.search(whole)
-    words = [word for word in KEYWORDS if word in low]
+    words = [word for word in KEYWORDS if word.replace("ё", "е") in low]
+    in_list = [word for word in LIST_WORDS if word in low]
+    seller_said = any(word in low for word in SELLER_WORDS)
     return {
         "codes": codes[:20],
         "quantity": quantity.group(1).replace(",", ".") if quantity else "",
         "store": store.group(1) if store else "",
         "words": words,
+        # Товар лежит в списке несосчитанного — об этом предупреждаем.
+        "in_list": bool(in_list),
+        "list_words": in_list,
+        "seller_said": seller_said,
+        "seller": find_seller(text, subject) if seller_said else "",
     }
 
 
@@ -510,7 +646,7 @@ def parse_letter(uid: str, raw: bytes, limit_mb: int) -> Letter:
     except (TypeError, ValueError):
         day = None
     text = _body(message)
-    photos, notes = _photos(message, limit_mb)
+    photos, files, notes = attachments(message, limit_mb)
     return Letter(
         uid=str(uid),
         sender=sender,
@@ -518,6 +654,7 @@ def parse_letter(uid: str, raw: bytes, limit_mb: int) -> Letter:
         day=day,
         text=text[:TEXT_LIMIT],
         photos=photos,
+        files=files,
         hints=read_hints(text, subject),
         notes=notes,
     )
@@ -536,6 +673,98 @@ def allowed_sender(sender: str, senders: str) -> bool:
         elif address == item:
             return True
     return False
+
+
+# --- Архив письма ----------------------------------------------------------
+
+
+def letter_text(letter: Letter) -> str:
+    """Текстовый файл письма для архива: шапка, подсказки и сам текст."""
+    hints = letter.hints or {}
+    lines = [
+        f"Письмо: {letter.subject or 'без темы'}",
+        f"От кого: {letter.sender or 'неизвестно'}",
+        f"Дата: {letter.day or 'не указана'}",
+        f"Номер письма в ящике: {letter.uid}",
+        "",
+    ]
+    if hints.get("codes"):
+        lines.append("Коды товара: " + ", ".join(hints["codes"]))
+    if hints.get("quantity"):
+        lines.append(f"Количество: {hints['quantity']}")
+    if hints.get("store"):
+        lines.append(f"Магазин: {hints['store']}")
+    if hints.get("in_list"):
+        lines.append("В письме сказано, что товар есть в списке несосчитанного.")
+    if hints.get("seller"):
+        lines.append(f"Ночной продавец из письма: {hints['seller']}")
+    if letter.photos:
+        lines.append("")
+        lines.append("Снимки в архиве:")
+        for photo in letter.photos:
+            title = f" — {photo.title}" if photo.title else ""
+            lines.append(f"  {photo.name}{title}")
+    if letter.files:
+        lines.append("")
+        lines.append("Прочие вложения: " + ", ".join(item.name for item in letter.files))
+    lines.append("")
+    lines.append("Текст письма:")
+    lines.append(letter.text or "(письмо без текста)")
+    return "\n".join(lines)
+
+
+def archive_name(letter: Letter) -> str:
+    """Имя файла архива: по нему видно, о каком письме речь."""
+    parts = ["письмо", str(letter.uid)]
+    store = str((letter.hints or {}).get("store") or "").strip()
+    if store:
+        parts.append(f"магазин-{store}")
+    if letter.day:
+        parts.append(str(letter.day))
+    return safe_name("-".join(parts) + ".zip")
+
+
+def entry_name(item: Photo, number: int, used: set) -> str:
+    """Имя файла внутри архива.
+
+    У снимка берётся имя от нейросети (`title`), у остального — своё.
+    Номер впереди сохраняет порядок вложений и разводит одинаковые имена.
+    """
+    suffix = Path(item.name).suffix or ".jpg"
+    base = Path(safe_name(item.title)).stem if str(item.title).strip() else Path(item.name).stem
+    name = f"{number:02d}-{base}{suffix}"
+    while name in used:
+        number += 1
+        name = f"{number:02d}-{base}{suffix}"
+    used.add(name)
+    return name
+
+
+def build_archive(settings, letter: Letter, target: Path | None = None) -> Path:
+    """Складывает архив письма: все вложения плюс текст письма.
+
+    Файлы берутся с диска: в памяти после захода в ящик их уже нет.
+    Снимки попадают в архив под именем, которое дала нейросеть.
+    """
+    folder = photos_dir(settings) / safe_name(letter.uid)
+    file = Path(target) if target is not None else folder / archive_name(letter)
+    file.parent.mkdir(parents=True, exist_ok=True)
+
+    used: set = set()
+    with zipfile.ZipFile(file, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(LETTER_FILE, letter_text(letter))
+        for number, item in enumerate(list(letter.photos) + list(letter.files), start=1):
+            data = item.data
+            if not data and item.path:
+                try:
+                    data = Path(item.path).read_bytes()
+                except OSError:
+                    logger.warning("Вложение %s не прочитано с диска", item.path)
+                    continue
+            if not data:
+                continue
+            archive.writestr(entry_name(item, number, used), data)
+    return file
 
 
 # --- Работа с ящиком -------------------------------------------------------
@@ -680,8 +909,21 @@ def check(settings, opener=None) -> tuple[bool, str]:
     )
 
 
+def _store_file(folder: Path, number: int, item: Photo, prefix: str = "") -> str:
+    """Кладёт вложение на диск. Возвращает текст ошибки или пустую строку."""
+    target = folder / f"{prefix}{number:02d}-{item.name}"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(item.data)
+    except OSError as error:
+        return f"вложение {item.name} не сохранено: {error}"
+    item.path = str(target)
+    item.data = b""
+    return ""
+
+
 def collect(settings, opener=None) -> dict:
-    """Забирает письма и складывает снимки на диск.
+    """Забирает письма и складывает вложения на диск.
 
     Возвращает отчёт для страницы: разобранные письма, число снимков и
     список пропущенных писем с причинами.
@@ -698,6 +940,7 @@ def collect(settings, opener=None) -> dict:
     letters: list[Letter] = []
     skipped: list[str] = []
     photos_total = 0
+    files_total = 0
     max_letters = max(1, int(config.get("mail_max_letters") or 1))
     max_photos = max(1, int(config.get("mail_max_photos") or 1))
     limit_mb = int(config.get("mail_max_photo_mb") or 15)
@@ -722,23 +965,31 @@ def collect(settings, opener=None) -> dict:
                 known.add(uid)
                 continue
 
+            box = folder / safe_name(uid)
             kept: list[Photo] = []
             for number, photo in enumerate(letter.photos, start=1):
                 if photos_total >= max_photos:
                     letter.notes.append("часть снимков не забрана: предел за один заход")
                     break
-                target = folder / uid / f"{number:02d}-{photo.name}"
-                try:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(photo.data)
-                except OSError as error:
-                    letter.notes.append(f"снимок {photo.name} не сохранён: {error}")
+                trouble = _store_file(box, number, photo)
+                if trouble:
+                    letter.notes.append(trouble)
                     continue
-                photo.path = str(target)
-                photo.data = b""
                 kept.append(photo)
                 photos_total += 1
             letter.photos = kept
+
+            # Прочие вложения тоже сохраняем: они уходят в архив письма.
+            saved: list[Photo] = []
+            for number, item in enumerate(letter.files, start=1):
+                trouble = _store_file(box, number, item, prefix="doc-")
+                if trouble:
+                    letter.notes.append(trouble)
+                    continue
+                saved.append(item)
+                files_total += 1
+            letter.files = saved
+
             letters.append(letter)
             seen.append(uid)
             known.add(uid)
@@ -758,6 +1009,7 @@ def collect(settings, opener=None) -> dict:
     return {
         "letters": letters,
         "photos": photos_total,
+        "files": files_total,
         "skipped": skipped,
         "cleaned": cleaned,
     }
