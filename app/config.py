@@ -88,6 +88,18 @@ class Settings:
     # Эмбеддинги имён: выключены по умолчанию (VPS 1 ГБ) и переключаются в интерфейсе.
     # Если пакетов или файлов модели нет, программа тихо работает без них.
     embed_enabled: bool = False
+    # Откуда берутся векторы: local — файл ONNX на сервере,
+    # openrouter — эмбеддинг-модель по сети (ключ задаётся в интерфейсе).
+    embed_provider: str = "local"
+    # Ключ OpenRouter в .env намеренно не читается: только интерфейс и runtime.json.
+    embed_api_key: str = ""
+    embed_model: str = "qwen/qwen3-embedding-0.6b"
+    embed_api_url: str = "https://openrouter.ai/api/v1/embeddings"
+    embed_timeout: float = 20.0
+    embed_retries: int = 2
+    # Предел сетевых запросов на процесс: дальше сверка идёт без эмбеддингов,
+    # чтобы медленная сеть и платный тариф не тормозили разбор файла.
+    embed_max_requests: int = 400
     embed_model_path: str = "models/rubert-tiny2-int8.onnx"
     embed_tokenizer_path: str = "models/rubert-tiny2-tokenizer.json"
     embed_cache_path: str = "data/embed-cache.json"
@@ -170,6 +182,12 @@ class Settings:
             verify_gray_high=_number("VERIFY_GRAY_HIGH", 0.55),
             verify_weight=_number("VERIFY_WEIGHT", 0.30),
             embed_enabled=_flag("EMBED_ENABLED", False),
+            embed_provider=_text("EMBED_PROVIDER", "local").lower(),
+            embed_model=_text("EMBED_MODEL", "qwen/qwen3-embedding-0.6b"),
+            embed_api_url=_text("EMBED_API_URL", "https://openrouter.ai/api/v1/embeddings"),
+            embed_timeout=_number("EMBED_TIMEOUT", 20.0),
+            embed_retries=int(_number("EMBED_RETRIES", 2)),
+            embed_max_requests=int(_number("EMBED_MAX_REQUESTS", 400)),
             embed_model_path=_text("EMBED_MODEL_PATH", "models/rubert-tiny2-int8.onnx"),
             embed_tokenizer_path=_text("EMBED_TOKENIZER_PATH", "models/rubert-tiny2-tokenizer.json"),
             embed_cache_path=_text("EMBED_CACHE_PATH", "data/embed-cache.json"),
