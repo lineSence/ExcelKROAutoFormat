@@ -54,10 +54,16 @@
 	{% for letter in letters %}
 	<article class="card card-inner">
 		<h3>{{ letter.subject or "Без темы" }}</h3>
+		{% if letter.hints.in_list %}
+		<p class="alert alert-warn">В письме есть товар в списке несосчитанного: слова «{{ letter.hints.list_words | join("», «") }}».</p>
+		{% endif %}
 		<ul class="facts">
 			<li><span>От кого</span><span>{{ letter.sender or "неизвестно" }}</span></li>
 			<li><span>Дата письма</span><span>{{ letter.day or "нет" }}</span></li>
 			<li><span>Снимков</span><span>{{ letter.photos | length }}</span></li>
+			{% if letter.files %}
+			<li><span>Прочие вложения</span><span>{{ letter.files | length }}</span></li>
+			{% endif %}
 			{% if letter.hints.codes %}
 			<li><span>Коды товара</span><span>{{ letter.hints.codes | join(", ") }}</span></li>
 			{% endif %}
@@ -66,6 +72,11 @@
 			{% endif %}
 			{% if letter.hints.store %}
 			<li><span>Магазин из текста</span><span>{{ letter.hints.store }}</span></li>
+			{% endif %}
+			{% if letter.hints.seller %}
+			<li><span>Ночной продавец из письма</span><span>{{ letter.hints.seller }}</span></li>
+			{% elif letter.hints.seller_said %}
+			<li><span>Продавец упомянут</span><span>ФИО не разобрано</span></li>
 			{% endif %}
 			{% if letter.hints.words %}
 			<li><span>Слова письма</span><span>{{ letter.hints.words | join(", ") }}</span></li>
@@ -84,12 +95,15 @@
 			{% endfor %}
 		</ul>
 		{% endif %}
+		<div class="actions">
+			<a class="button button-secondary" href="/mail/archive/{{ letter.uid }}">Скачать архив письма</a>
+		</div>
 		{% if letter.notes %}
 		<p class="alert alert-warn">{{ letter.notes | join("; ") }}</p>
 		{% endif %}
 	</article>
 	{% endfor %}
-	<p class="hint">Снимки скачаны на сервер. Чтобы подобрать к ним строки сверки, пока скачайте их и загрузите на странице «Фото товара».</p>
+	<p class="hint">В архив попадают все вложения письма и файл «письмо.txt» с его текстом. Если распознавание фото включено, снимки в архиве названы тем товаром, который узнала нейросеть.</p>
 </section>
 {% endif %}
 
@@ -131,7 +145,7 @@
 		<div class="field">
 			<label for="mail-folder">Папка ящика</label>
 			<input id="mail-folder" type="text" name="folder" value="{{ mail.folder }}" />
-			<p class="hint">INBOX — входящие. Папки с русскими именами часто не открываются: надёжнее разбирать входящие.</p>
+			<p class="hint">INBOX — входящие. Русские имена папок работают: пишите их так же, как видно в ящике, например «Отчёты». При ошибке кнопка «Проверить ящик» покажет список настоящих имён.</p>
 		</div>
 		<div class="field">
 			<label for="mail-senders">Адреса ревизоров</label>
