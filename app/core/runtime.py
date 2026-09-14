@@ -1,10 +1,12 @@
 """Переключатели, доступные прямо в интерфейсе.
 
 Некоторые настройки удобно менять без правки файлов и перезапуска службы:
-это эмбеддинги имён (вместе с провайдером, ключом и моделью) и все
-настройки распознавания фото. Значения хранятся в маленьком JSON-файле
-`runtime.json` рядом с базой примеров и накладываются поверх `Settings` на
-каждый запрос. Если файла нет, действует значение из окружения.
+это эмбеддинги имён, LLM-судья (вместе с провайдером, ключом и
+моделью) и все настройки распознавания фото. Значения хранятся в
+маленьком JSON-файле `runtime.json` рядом с базой примеров и накладываются
+поверх `Settings` на каждый запрос. Если файла нет, действует значение
+из окружения. Ключи сервисов из окружения не читаются вовсе: их задают
+только в интерфейсе.
 
 Папка для записи выбирается сама. Служба запущена с `ProtectSystem=strict`, и
 папка с кодом (`/opt/excelkro`) доступна только для чтения: попытка записать
@@ -41,6 +43,23 @@ EMBED_FIELDS: dict[str, type] = {
     "embed_retries": int,
     "embed_max_requests": int,
 }
+
+# Настройки LLM-судьи (OpenRouter). Вес логики здесь — значение по
+# умолчанию; на странице загрузки его можно задать на один файл.
+JUDGE_FIELDS: dict[str, type] = {
+    "logic_weight": float,
+    "judge_api_key": str,
+    "judge_model": str,
+    "judge_api_url": str,
+    "judge_timeout": float,
+    "judge_retries": int,
+    "judge_max_requests": int,
+    "judge_batch": int,
+    "judge_max_pairs": int,
+}
+
+# Всё, что можно хранить в runtime.json.
+FIELDS: dict[str, type] = {**EMBED_FIELDS, **JUDGE_FIELDS}
 
 # Выбранная папка на время жизни процесса: проверять запись на каждый
 # запрос незачем.
@@ -135,7 +154,7 @@ def _as_bool(value) -> bool:
 
 def _typed(name: str, value):
     """Значение из runtime.json в том типе, который ждёт Settings."""
-    kind = EMBED_FIELDS[name]
+    kind = FIELDS[name]
     if kind is bool:
         return _as_bool(value)
     text = str(value).strip().replace(",", ".")
@@ -150,7 +169,7 @@ def apply(settings):
     """Накладывает переключатели интерфейса на настройки запроса."""
     values = load(runtime_path(settings))
     changes: dict[str, object] = {}
-    for name in EMBED_FIELDS:
+    for name in FIELDS:
         if name not in values:
             continue
         try:
@@ -167,8 +186,8 @@ def set_embed(settings, enabled: bool) -> None:
     embed_core.forget_embedder()
 
 
-def save_embed(settings, values: dict) -> dict:
-    """Сохраняет настройки эмбеддингов из формы.
+def _save_fields(settings, values: dict, allowed: dict[str, type]) -> dict:
+    """Общая запись полей формы.
 
     Пустое текстовое поле значит «оставить как было»: так ключ не нужно
     вводить заново при каждой правке модели.
@@ -176,9 +195,9 @@ def save_embed(settings, values: dict) -> dict:
     path = runtime_path(settings)
     stored = load(path)
     for name, value in values.items():
-        if name not in EMBED_FIELDS:
+        if name not in allowed:
             continue
-        if EMBED_FIELDS[name] is bool:
+        if allowed[name] is bool:
             stored[name] = _as_bool(value)
             continue
         if value is None or not str(value).strip():
@@ -187,9 +206,15 @@ def save_embed(settings, values: dict) -> dict:
             stored[name] = _typed(name, value)
         except (TypeError, ValueError):
             logger.warning("Значение %s не сохранено: не число", name)
+    return stored
+
+
+def save_embed(settings, values: dict) -> dict:
+    """Сохраняет настройки эмбеддингов из формы."""
+    stored = _save_fields(settings, values, EMBED_FIELDS)
     if stored.get("embed_provider") not in embed_core.PROVIDERS:
         stored["embed_provider"] = "local"
-    save(stored, path)
+    save(stored, runtime_path(settings))
     # Провайдер в памяти собран по старым настройкам — забываем его.
     embed_core.forget_embedder()
     return stored
@@ -202,6 +227,37 @@ def forget_embed_key(settings) -> None:
     stored["embed_api_key"] = ""
     save(stored, path)
     embed_core.forget_embedder()
+
+
+def save_judge(settings, values: dict) -> dict:
+    """Сохраняет настройки LLM-судьи из формы."""
+    from . import judge as judge_core
+
+    stored = _save_fields(settings, values, JUDGE_FIELDS)
+    if "logic_weight" in stored:
+        stored["logic_weight"] = judge_core.clamp_weight(stored["logic_weight"])
+    save(stored, runtime_path(settings))
+    # Судья в памяти собран по старым настройкам — забываем его.
+    judge_core.forget_judge()
+    return stored
+
+
+def forget_judge_key(settings) -> None:
+    """Удаляет ключ OpenRouter для LLM из настроек."""
+    from . import judge as judge_core
+
+    path = runtime_path(settings)
+    stored = load(path)
+    stored["judge_api_key"] = ""
+    save(stored, path)
+    judge_core.forget_judge()
+
+
+def judge_status(settings) -> dict:
+    """Состояние LLM-судьи для интерфейса."""
+    from . import judge as judge_core
+
+    return judge_core.status(settings)
 
 
 def embed_status(settings) -> dict:
