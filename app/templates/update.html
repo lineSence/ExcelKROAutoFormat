@@ -10,7 +10,11 @@
 {% endblock %}
 
 {% block head %}
-{% if status.busy %}<meta http-equiv="refresh" content="5" />{% endif %}
+{# Адрес указан явно: после кнопки браузер стоит на /update/check или
+   /update/apply, а эти адреса принимают только отправку формы. Без адреса
+   автообновление запрашивает текущий адрес обычным способом и страница
+   падает в Method Not Allowed. #}
+{% if status.busy %}<meta http-equiv="refresh" content="5; url=/update" />{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -23,6 +27,13 @@
 		<li>Папка: <b>{{ status.app_dir }}</b></li>
 		<li>Служба обновления: <b>{% if status.parts.ready %}установлена{% else %}не установлена{% endif %}</b></li>
 	</ul>
+
+	{% if message %}
+	<p class="hint">{{ message }}</p>
+	{% endif %}
+	{% if error %}
+	<p class="hint error">{{ error }}</p>
+	{% endif %}
 
 	{% if not status.git %}
 	<p class="hint error">
