@@ -21,6 +21,7 @@
 		<li>Сборка: <b>{{ status.commit or "неизвестна" }}</b></li>
 		<li>Ветка обновлений: <b>{{ status.branch }}</b></li>
 		<li>Папка: <b>{{ status.app_dir }}</b></li>
+		<li>Служба обновления: <b>{% if status.parts.ready %}установлена{% else %}не установлена{% endif %}</b></li>
 	</ul>
 
 	{% if not status.git %}
@@ -30,8 +31,17 @@
 	</p>
 	{% endif %}
 
+	{% if not status.parts.ready %}
+	<p class="hint error">
+		Части обновления не установлены на сервере. Не хватает:
+		{{ status.parts.missing | join("; ") }}.
+		Выполните на сервере одну команду: <code>{{ status.parts.setup }}</code>
+		и обновите эту страницу.
+	</p>
+	{% endif %}
+
 	<form class="review-bar" method="post" action="/update/check">
-		<button type="submit" {% if status.busy or not status.git %}disabled{% endif %}>
+		<button type="submit" {% if status.busy or not status.git or not status.parts.ready %}disabled{% endif %}>
 			Проверить обновления
 		</button>
 	</form>
@@ -42,7 +52,7 @@
 		action="/update/apply"
 		onsubmit="return confirm('Обновить программу и перезапустить службу? Незаконченные сверки будут потеряны.')"
 	>
-		<button type="submit" {% if status.busy or not status.git %}disabled{% endif %}>
+		<button type="submit" {% if status.busy or not status.git or not status.parts.ready %}disabled{% endif %}>
 			Установить последнюю версию
 		</button>
 		{% if status.behind %}

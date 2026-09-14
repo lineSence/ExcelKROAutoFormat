@@ -1,8 +1,15 @@
 # Право служебного пользователя запустить разовую службу обновления.
-# Установка: sudo install -m 440 deploy/sudoers-excelkro /etc/sudoers.d/excelkro
+# Установка: sudo bash /opt/excelkro/deploy/install-ota.sh
+# Или вручную: sudo install -m 440 deploy/sudoers-excelkro /etc/sudoers.d/excelkro
 #
 # Разрешён только старт двух именованных служб: никаких других команд
-# под root веб-слой выполнить не может.
-excelkro ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block excelkro-update@check.service
-excelkro ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block excelkro-update@apply.service
+# под root веб-слой выполнить не может. Путь к systemctl различается по
+# дистрибутивам (/usr/bin или /bin), поэтому разрешены оба варианта.
+Cmnd_Alias EXCELKRO_OTA = \
+	/usr/bin/systemctl start --no-block excelkro-update@check.service, \
+	/usr/bin/systemctl start --no-block excelkro-update@apply.service, \
+	/bin/systemctl start --no-block excelkro-update@check.service, \
+	/bin/systemctl start --no-block excelkro-update@apply.service
+
+excelkro ALL=(root) NOPASSWD: EXCELKRO_OTA
 Defaults:excelkro !requiretty

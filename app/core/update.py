@@ -13,6 +13,10 @@
 посередине. Служба systemd живёт в своём окружении и дорабатывает до конца.
 
 Ход работы скрипт пишет в файл состояния и журнал, а интерфейс их читает.
+
+Если сервер обновляли вручную, частей OTA на нём может просто не быть.
+Поэтому модуль сам проверяет unit, правило sudo и скрипт обновления и
+говорит, чего именно не хватает и какой командой это исправить.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -36,14 +41,13 @@ LOG_NAME = "update.log"
 TIMEOUT = 20
 LOG_TAIL = 40
 
+# Где systemd ищет unit-ы и где лежит правило sudo.
+UNIT_FILE = Path("/etc/systemd/system/excelkro-update@.service")
+SUDOERS_FILE = Path("/etc/sudoers.d/excelkro")
+
 NO_GIT = (
     "Папка программы не является копией Git, поэтому обновлять нечего. "
     "Разверните программу через git clone или обновляйте её вручную."
-)
-NO_UNIT = (
-    "Служба обновления не запускается. Проверьте, что установлены "
-    "deploy/excelkro-update@.service и правило sudo из deploy/sudoers-excelkro "
-    "(см. docs/09-ota-update.md)."
 )
 
 
@@ -73,6 +77,16 @@ def unit_name(mode: str) -> str:
     return f"{UNIT}@{mode}.service"
 
 
+def setup_command() -> str:
+    """Команда доустановки частей обновления на сервере."""
+    return f"sudo bash {app_dir() / 'deploy' / 'install-ota.sh'}"
+
+
+def _systemctl() -> str:
+    """Полный путь к systemctl: в правиле sudo он указан полностью."""
+    return shutil.which("systemctl") or "/usr/bin/systemctl"
+
+
 def _run(args: list[str]) -> tuple[int, str]:
     """Запуск короткой команды. Ошибка запуска не валит страницу."""
     try:
@@ -93,6 +107,34 @@ def is_git_repo() -> bool:
     return (app_dir() / ".git").exists()
 
 
+def parts() -> dict:
+    """Что из частей обновления уже установлено на сервере.
+
+    Проверка только читает файловую систему: ничего не запускается.
+    Правило sudo лежит в режиме 440 и служебному пользователю не читаемо,
+    поэтому смотрим лишь на сам факт его наличия.
+    """
+    script = app_dir() / "deploy" / "ota-update.sh"
+    unit = UNIT_FILE.is_file()
+    sudoers = SUDOERS_FILE.exists()
+    runnable = script.is_file() and os.access(script, os.X_OK)
+    missing: list[str] = []
+    if not unit:
+        missing.append("разовая служба excelkro-update@.service")
+    if not sudoers:
+        missing.append("правило sudo /etc/sudoers.d/excelkro")
+    if not runnable:
+        missing.append("право запуска у deploy/ota-update.sh")
+    return {
+        "unit": unit,
+        "sudoers": sudoers,
+        "script": runnable,
+        "ready": not missing,
+        "missing": missing,
+        "setup": setup_command(),
+    }
+
+
 def local_commit() -> str:
     """Текущая сборка кода коротким хешем. Чтение ничего не меняет."""
     if not is_git_repo():
@@ -102,7 +144,7 @@ def local_commit() -> str:
 
 
 def running(mode: str) -> bool:
-    code, output = _run(["systemctl", "is-active", unit_name(mode)])
+    code, output = _run([_systemctl(), "is-active", unit_name(mode)])
     return code == 0 or output.startswith("activating")
 
 
@@ -142,6 +184,7 @@ def status() -> dict:
         "behind": ahead,
         "state": state,
         "log": read_log(),
+        "parts": parts(),
     }
 
 
@@ -154,7 +197,22 @@ def start(mode: str) -> None:
     if running("apply"):
         raise UpdateError("Обновление уже идёт. Подождите его окончания.")
 
-    code, output = _run(["sudo", "-n", "systemctl", "start", "--no-block", unit_name(mode)])
+    # Сначала смотрим, всё ли установлено: так сообщение называет причину.
+    ready = parts()
+    if not ready["ready"]:
+        raise UpdateError(
+            "Служба обновления не установлена. Не хватает: "
+            + "; ".join(ready["missing"])
+            + f". Выполните на сервере одну команду: {ready['setup']}"
+        )
+
+    code, output = _run(
+        ["sudo", "-n", _systemctl(), "start", "--no-block", unit_name(mode)]
+    )
     if code != 0:
         logger.warning("Служба обновления не запущена: %s", output)
-        raise UpdateError(NO_UNIT)
+        tail = output.splitlines()[-1] if output else "без пояснений"
+        raise UpdateError(
+            f"Служба обновления не запустилась: {tail}. Повторите установку "
+            f"одной командой: {ready['setup']} — подробности в docs/09-ota-update.md."
+        )
