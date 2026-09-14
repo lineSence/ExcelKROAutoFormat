@@ -6,11 +6,20 @@
 
 {% block content %}
 {% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{% if mail_note and mail_note.in_list %}
+<div class="alert alert-warn">
+	В письме ревизора сказано, что товар есть в списке несосчитанного:
+	слова «{{ mail_note.list_words | join("», «") }}». Проверьте список перед сдачей сверки.
+</div>
+{% endif %}
 
 <section class="card">
 	<div class="card-row">
 		<div class="actions">
 			<a class="button" href="/download/{{ token }}">Скачать {{ output_name }}</a>
+			{% for item in mail_letters %}
+			<a class="button button-secondary" href="/mail/archive/{{ item.uid }}?token={{ token }}">Архив письма №{{ item.uid }}{% if item.store %} · магазин {{ item.store }}{% endif %}</a>
+			{% endfor %}
 			<a class="button button-secondary" href="/">Загрузить другой файл</a>
 		</div>
 		<div class="actions">
@@ -20,8 +29,12 @@
 			{% else %}<span class="badge">только логика</span>{% endif %}
 			{% if comparison %}<span class="badge badge-ok">сравнение с прошлой сверкой</span>{% endif %}
 			{% if claims and claims.applied %}<span class="badge badge-ok">реестр: внесено {{ claims.applied }}</span>{% endif %}
+			{% if mail_note and mail_note.in_list %}<span class="badge badge-warn">товар в списке</span>{% endif %}
 		</div>
 	</div>
+	{% if mail_letters %}
+	<p class="hint">В архиве письма — все вложения и файл «письмо.txt» с текстом. Снимки названы тем товаром, который узнала нейросеть.</p>
+	{% endif %}
 </section>
 
 {% if claims and (claims.rows or claims.skipped or claims.problems) %}
@@ -381,9 +394,9 @@
 		</div>
 
 		<div class="field">
-			<label class="field-label"><input type="checkbox" name="night" value="on" data-night-toggle {% if meta.night %}checked{% endif %} /> Ночной продавец</label>
-			<input type="text" name="night_name" value="{{ meta.night_name }}" placeholder="ФИО ночного продавца" data-night-name {% if not meta.night %}disabled{% endif %} />
-			<span class="hint">Без галочки в таблице будет написано «нет».</span>
+			<label class="field-label"><input type="checkbox" name="night" value="on" data-night-toggle {% if meta.night or (mail_note and mail_note.seller) %}checked{% endif %} /> Ночной продавец</label>
+			<input type="text" name="night_name" value="{{ meta.night_name or (mail_note.seller if mail_note else "") }}" placeholder="ФИО ночного продавца" data-night-name {% if not (meta.night or (mail_note and mail_note.seller)) %}disabled{% endif %} />
+			<span class="hint">Без галочки в таблице будет написано «нет».{% if mail_note and mail_note.seller %} ФИО подставлено из письма ревизора — проверьте его.{% endif %}</span>
 		</div>
 
 		<div class="review-bar">
