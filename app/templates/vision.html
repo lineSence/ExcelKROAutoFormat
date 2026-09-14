@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Фото товара — ExcelKROAutoFormat{% endblock %}
 {% block heading %}Фото товара{% endblock %}
-{% block subheading %}<p>Распознавание фото плюсующего товара и подбор строки сверки. Решение всегда за человеком: сама модель в файл ничего не пишет. После подтверждения в столбец 12 строки дописывается комментарий «есть фото».</p>{% endblock %}
+{% block subheading %}<p>Распознавание фото плюсующего товара и подбор строки сверки. Решение всегда за человеком: сама модель в файл ничего не пишет. После подтверждения в столбец 12 строки дописывается комментарий «есть фото». Работа со сверкой не теряется: вернуться к ней можно по ссылке ниже.</p>{% endblock %}
 
 {% block content %}
 <section class="card">
@@ -58,6 +58,11 @@
 		<p class="hint">Сначала включите распознавание и введите ключ авторизации GigaChat в настройках ниже.</p>
 		{% endif %}
 	</form>
+	<p class="hint">
+		Вернуться к работе со сверкой:
+		{% for job in jobs %}<a class="link" href="/result/{{ job.token }}">{{ job.warehouse }}{% if job.date %} · {{ job.date }}{% endif %}</a>{% if not loop.last %}, {% endif %}{% endfor %}.
+		Правки, решения по парам и ручные поля остаются на месте.
+	</p>
 	{% else %}
 	<p class="card-sub">Нет ни одной сверки в работе. Загрузите файл на странице «Сверка КРО», а затем вернитесь сюда: список строк с излишком берётся из разобранной сверки.</p>
 	{% endif %}
@@ -140,8 +145,9 @@
 
 <section class="card">
 	<h2>3. Настройки</h2>
-	<p class="card-sub">Всё задаётся здесь и сохраняется в файле настроек программы. Править <code>.env</code> и перезапускать службу не нужно.</p>
+	<p class="card-sub">Всё задаётся здесь и сохраняется в файле настроек программы. Править <code>.env</code> и перезапускать службу не нужно. Сохранение настроек не стирает разобранные снимки.</p>
 	<form action="/vision/settings" method="post">
+		<input type="hidden" name="token" value="{{ token }}" />
 		<div class="field">
 			<label><input type="checkbox" name="enabled" value="on"{% if vision.enabled %} checked{% endif %} /> Включить распознавание фото</label>
 		</div>
@@ -193,12 +199,15 @@
 	<h2>4. Обслуживание</h2>
 	<p class="card-sub">Проверка связи ничего не распознаёт: она только убеждается, что ключ, версия API и модель рабочие.</p>
 	<form action="/vision/check" method="post">
+		<input type="hidden" name="token" value="{{ token }}" />
 		<div class="actions"><button class="button-secondary" type="submit">Проверить связь</button></div>
 	</form>
 	<form action="/vision/cache/clear" method="post" onsubmit="return confirm('Забыть все разобранные снимки?');">
+		<input type="hidden" name="token" value="{{ token }}" />
 		<div class="actions"><button class="button-secondary" type="submit">Очистить кеш снимков</button></div>
 	</form>
 	<form action="/vision/key/clear" method="post" onsubmit="return confirm('Удалить ключ авторизации из настроек?');">
+		<input type="hidden" name="token" value="{{ token }}" />
 		<div class="actions"><button class="button-danger" type="submit">Удалить ключ авторизации</button></div>
 	</form>
 </section>

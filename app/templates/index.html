@@ -9,6 +9,29 @@
 <p class="error">{{ error }}</p>
 {% endif %}
 
+{% if jobs %}
+<section class="card">
+	<h2>Сверки в работе</h2>
+	<p class="card-sub">
+		Разобранная сверка не теряется при переходе на другие страницы: откройте её
+		и продолжайте с того же места. Работа хранится до истечения срока
+		хранения или до перезапуска службы.
+	</p>
+	<ul class="facts">
+		{% for job in jobs %}
+		<li>
+			<span><a class="link" href="/result/{{ job.token }}">{{ job.warehouse }}{% if job.date %} · {{ job.date }}{% endif %}</a></span>
+			<span>
+				{% if job.pending %}спорных пар: {{ job.pending }}{% else %}спорных пар нет{% endif %}{% if job.photos %} · снимков на подтверждении: {{ job.photos }}{% endif %}
+				· <a class="link" href="/vision?token={{ job.token }}">фото</a>
+				· <a class="link" href="/download/{{ job.token }}">скачать</a>
+			</span>
+		</li>
+		{% endfor %}
+	</ul>
+</section>
+{% endif %}
+
 <form class="card" action="/upload" method="post" enctype="multipart/form-data">
 	<div class="field">
 		<label class="field-label" for="file">Файл сверки</label>
