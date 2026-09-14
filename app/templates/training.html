@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Модель и обучение — ExcelKROAutoFormat{% endblock %}
 {% block heading %}Модель и обучение{% endblock %}
-{% block subheading %}<p>Второй слой проверки пересортов: примеры, переобучение и настройки нейросети.</p>{% endblock %}
+{% block subheading %}<p>Второй слой проверки пересортов: примеры, переобучение, настройки нейросети и LLM.</p>{% endblock %}
 
 {% block content %}
 <section class="card">
@@ -30,6 +30,14 @@
 		<div class="stat">
 			<span class="stat-label">Откуда векторы</span>
 			<span class="stat-value">{{ embed.provider_label if embed else "—" }}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">LLM (OpenRouter)</span>
+			<span class="stat-value">{% if judge and judge.has_key %}ключ задан{% else %}ключ не задан{% endif %}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Влияние логики по умолчанию</span>
+			<span class="stat-value">{{ judge.logic_percent if judge else 100 }}%</span>
 		</div>
 	</div>
 	{% if model.ready and model.trained_at %}
@@ -123,7 +131,69 @@
 </section>
 
 <section class="card">
-	<h2>4. Очистить базу примеров</h2>
+	<h2>4. LLM как второй слой (OpenRouter)</h2>
+	<p class="card-sub">{{ judge.reason if judge else "Состояние неизвестно." }}</p>
+	<p class="alert alert-warn">
+		Внешний сервис: имена товаров, цены и количества пар уходят в OpenRouter, каждый
+		запрос тратит баланс ключа. Режим выключен по умолчанию — он включается на
+		странице загрузки выбором «Логика + LLM». Если эмбеддинги имён включены, их
+		близость попадает в подсказку модели: так LLM работает в связке с ними.
+	</p>
+	<form action="/training/judge" method="post">
+		<div class="field">
+			<label for="judge-key">Ключ OpenRouter</label>
+			<input id="judge-key" type="password" name="judge_api_key" autocomplete="off" placeholder="{% if judge and judge.has_key %}сохранён, оканчивается на {{ judge.key_tail }}{% else %}ключ не задан{% endif %}" />
+			<p class="hint">Пустое поле — оставить ключ как было. Ключ хранится только в настройках службы и на странице не показывается. Он отдельный от ключа эмбеддингов, но можно ввести тот же.</p>
+		</div>
+		<div class="field">
+			<label for="judge-model">Модель</label>
+			<input id="judge-model" type="text" name="judge_model" value="{{ judge.model if judge else "" }}" />
+			<p class="hint">Имя модели OpenRouter, например openai/gpt-4o-mini. Дешёвые модели отвечают хуже — это и есть предмет проверки.</p>
+		</div>
+		<div class="field">
+			<label for="judge-url">Адрес запроса</label>
+			<input id="judge-url" type="text" name="judge_api_url" value="{{ judge.api_url if judge else "" }}" />
+			<p class="hint">По умолчанию https://openrouter.ai/api/v1/chat/completions. Менять нужно только для другого совместимого сервиса.</p>
+		</div>
+		<div class="field">
+			<label for="judge-timeout">Ожидание ответа, секунд</label>
+			<input id="judge-timeout" type="number" name="judge_timeout" min="5" max="300" step="5" value="{{ (judge.timeout | round | int) if judge else 60 }}" />
+		</div>
+		<div class="field">
+			<label for="judge-batch">Пар в одном запросе</label>
+			<input id="judge-batch" type="number" name="judge_batch" min="1" max="50" step="1" value="{{ judge.batch if judge else 20 }}" />
+			<p class="hint">Чем больше пачка, тем меньше запросов и трат, но тем хуже модель держит внимание.</p>
+		</div>
+		<div class="field">
+			<label for="judge-max-pairs">Предел пар на один файл</label>
+			<input id="judge-max-pairs" type="number" name="judge_max_pairs" min="0" max="100000" step="10" value="{{ judge.max_pairs if judge else 200 }}" />
+			<p class="hint">Когда предел исчерпан, остальные пары решает логика. 0 — без предела.</p>
+		</div>
+		<div class="field">
+			<label for="judge-max-requests">Предел запросов до перезапуска</label>
+			<input id="judge-max-requests" type="number" name="judge_max_requests" min="0" max="100000" step="10" value="{{ judge.max_requests if judge else 60 }}" />
+			<p class="hint">Защита от неожиданных трат на весь процесс службы. 0 — без предела.</p>
+		</div>
+		<div class="field">
+			<label for="judge-logic">Влияние логики по умолчанию, %</label>
+			<input id="judge-logic" type="number" name="logic_weight" min="0" max="100" step="1" value="{{ judge.logic_percent if judge else 100 }}" />
+			<p class="hint">Значение, которое подставляется на странице загрузки. 100% — прежнее поведение, 0% — решает только второй слой.</p>
+		</div>
+		<div class="actions"><button type="submit">Сохранить</button></div>
+	</form>
+	<form action="/training/judge/check" method="post">
+		<div class="actions"><button class="button-secondary" type="submit">Проверить ключ</button></div>
+	</form>
+	{% if judge and judge.has_key %}
+	<form action="/training/judge/key/clear" method="post" onsubmit="return confirm('Удалить ключ LLM из настроек?');">
+		<div class="actions"><button class="button-danger" type="submit">Удалить ключ</button></div>
+	</form>
+	{% endif %}
+	<p class="hint">Ответы модели кэшируются по именам пары, поэтому пересборка того же файла новых трат почти не даёт.</p>
+</section>
+
+<section class="card">
+	<h2>5. Очистить базу примеров</h2>
 	<p class="card-sub">Удаляет все накопленные примеры. Обученная модель при этом остаётся.</p>
 	<form action="/training/clear" method="post" onsubmit="return confirm('Удалить все накопленные примеры?');">
 		<div class="actions"><button class="button-danger" type="submit">Очистить</button></div>
