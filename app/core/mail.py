@@ -23,10 +23,16 @@
 было бы некуда складывать результат. Уже разобранные письма запоминаются
 в `mail-state.json`, чтобы повторный заход не тянул одно и то же: флаг
 «прочитано» для этого ненадёжен — ящик смотрит и человек.
+
+Имена папок в IMAP пишутся не в UTF-8, а в особой кодировке из RFC 3501
+(modified UTF-7). Поэтому папка «Отчёты» уезжает на сервер как
+`&BB4EQgRHBRE-...`, а не как есть: иначе `imaplib` спотыкается на
+кириллице ещё до отправки команды.
 """
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import email
 import imaplib
@@ -98,7 +104,13 @@ SEEN_LIMIT = 1000
 # Сколько знаков текста письма показываем в интерфейсе.
 TEXT_LIMIT = 1200
 
+# Сколько имён папок показываем в подсказке об ошибке.
+FOLDER_HINT_LIMIT = 30
+
 UNSAFE_NAME = re.compile(r"[\\/\x00]+")
+
+# Хвост строки ответа LIST: имя папки в кавычках либо последнее слово.
+FOLDER_LINE = re.compile(rb'"([^"]*)"\s*$')
 
 # --- Детерминированный разбор текста --------------------------------------
 
@@ -262,6 +274,110 @@ def clean_photos(settings, days: int = 0) -> int:
         except OSError:
             logger.warning("Старый снимок не удалён: %s", file)
     return gone
+
+
+# --- Имена папок в кодировке IMAP -----------------------------------------
+
+
+def encode_folder(name: str) -> bytes:
+    """Имя папки в modified UTF-7 (RFC 3501).
+
+    Обычные знаки идут как есть, всё остальное (кириллица, эмодзи) —
+    в base64 от UTF-16BE между «&» и «-». Символ «&» удваивается в «&-».
+    Без этого `imaplib` пытается перевести «Отчёты» в ASCII и падает
+    ещё до разговора с сервером.
+    """
+    out = bytearray()
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        raw = "".join(buffer).encode("utf-16-be")
+        chunk = base64.b64encode(raw).decode("ascii").rstrip("=").replace("/", ",")
+        out.extend(b"&" + chunk.encode("ascii") + b"-")
+        buffer.clear()
+
+    for letter_ in str(name or ""):
+        if letter_ == "&":
+            flush()
+            out.extend(b"&-")
+        elif " " <= letter_ <= "~":
+            flush()
+            out.extend(letter_.encode("ascii"))
+        else:
+            buffer.append(letter_)
+    flush()
+    return bytes(out)
+
+
+def decode_folder(raw: object) -> str:
+    """Имя папки из modified UTF-7 обратно в читаемый вид."""
+    text = raw.decode("ascii", errors="replace") if isinstance(raw, bytes) else str(raw or "")
+    out: list[str] = []
+    position = 0
+    while position < len(text):
+        sign = text[position]
+        if sign != "&":
+            out.append(sign)
+            position += 1
+            continue
+        end = text.find("-", position + 1)
+        if end < 0:
+            out.append(text[position:])
+            break
+        chunk = text[position + 1 : end]
+        if not chunk:
+            out.append("&")
+        else:
+            data = chunk.replace(",", "/")
+            data += "=" * (-len(data) % 4)
+            try:
+                out.append(base64.b64decode(data).decode("utf-16-be"))
+            except (ValueError, UnicodeDecodeError):
+                out.append(text[position : end + 1])
+        position = end + 1
+    return "".join(out)
+
+
+def quote_folder(name: str) -> bytes:
+    """Имя папки для команды SELECT: закодировано и в кавычках.
+
+    Кавычки нужны из-за пробелов в названиях вроде «Отчёты ревизоров»:
+    без них сервер прочитает только первое слово.
+    """
+    encoded = encode_folder(name).replace(b"\\", b"\\\\").replace(b'"', b'\\"')
+    return b'"' + encoded + b'"'
+
+
+def list_folders(client) -> list[str]:
+    """Имена папок ящика в читаемом виде. При беде — пустой список."""
+    try:
+        status, data = client.list()
+    except (imaplib.IMAP4.error, OSError, AttributeError):
+        logger.debug("Список папок не получен", exc_info=True)
+        return []
+    if status != "OK" or not data:
+        return []
+    names: list[str] = []
+    for line in data:
+        if line is None:
+            continue
+        raw = line if isinstance(line, bytes) else str(line).encode("utf-8", "replace")
+        found = FOLDER_LINE.search(raw)
+        piece = found.group(1) if found else raw.split()[-1]
+        name = decode_folder(piece).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _folders_hint(client) -> str:
+    names = list_folders(client)
+    if not names:
+        return ""
+    shown = ", ".join(names[:FOLDER_HINT_LIMIT])
+    return f" Папки ящика: {shown}."
 
 
 # --- Разбор письма ---------------------------------------------------------
@@ -462,13 +578,22 @@ def _logout(client) -> None:
 
 
 def _select(client, folder: str) -> None:
+    """Открывает папку ящика.
+
+    Имя кодируется в modified UTF-7: папка «Отчёты» иначе роняет `imaplib`
+    на попытке перевести кириллицу в ASCII, и страница отдавала 500.
+    Если папки нет, в ошибку кладём список настоящих имён — так видно,
+    что у Mail.ru папка зовётся, например, «Отчёты», а не «отчеты».
+    """
     name = str(folder or "INBOX").strip() or "INBOX"
     try:
-        status, _ = client.select(name)
-    except imaplib.IMAP4.error as error:
-        raise MailError(f"Папка {name} не открывается: {error}") from error
+        status, _ = client.select(quote_folder(name))
+    except (imaplib.IMAP4.error, UnicodeError, ValueError, OSError) as error:
+        raise MailError(
+            f"Папка «{name}» не открывается: {error}.{_folders_hint(client)}"
+        ) from error
     if status != "OK":
-        raise MailError(f"Папка {name} не найдена в ящике.")
+        raise MailError(f"Папка «{name}» не найдена в ящике.{_folders_hint(client)}")
 
 
 def _uids(client, config: dict) -> list[str]:
@@ -514,18 +639,39 @@ def _mark_seen(client, uid: str) -> None:
         logger.warning("Письмо %s не помечено прочитанным", uid)
 
 
+def folders(settings, opener=None) -> list[str]:
+    """Имена папок ящика. Нужны, чтобы подсказать человеку правильное."""
+    config = load_config(settings)
+    client = (opener or connect)(config)
+    try:
+        return list_folders(client)
+    finally:
+        _logout(client)
+
+
 def check(settings, opener=None) -> tuple[bool, str]:
-    """Проверка ящика по кнопке: вход, папка и число свежих писем."""
+    """Проверка ящика по кнопке: вход, папка и число свежих писем.
+
+    Наружу отдаётся только пара «получилось, что сказать человеку»:
+    любая неожиданная беда тоже превращается в текст, иначе страница
+    падала бы с Internal server error.
+    """
     config = load_config(settings)
     try:
         client = (opener or connect)(config)
     except MailError as error:
         return False, str(error)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Ящик не открылся", exc_info=True)
+        return False, f"Ящик не открылся: {error}"
     try:
         _select(client, str(config.get("mail_folder") or "INBOX"))
         uids = _uids(client, config)
     except MailError as error:
         return False, str(error)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Проверка ящика не удалась", exc_info=True)
+        return False, f"Проверка не удалась: {error}"
     finally:
         _logout(client)
     return True, (

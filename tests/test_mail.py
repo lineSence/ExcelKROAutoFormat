@@ -14,6 +14,9 @@ from app.core import mail
 
 JPEG = b"\xff\xd8\xff\xe0jpeg"
 
+# Как папка «Отчёты» выглядит в ответе сервера на команду LIST.
+REPORTS_RAW = mail.encode_folder("Отчёты")
+
 
 @dataclass
 class FakeSettings:
@@ -64,15 +67,23 @@ def letter(
 class FakeBox:
     """Ящик без сети: отдаёт заранее собранные письма."""
 
-    def __init__(self, letters: dict[str, bytes]) -> None:
+    def __init__(self, letters: dict[str, bytes], known: tuple[bytes, ...] | None = None) -> None:
         self.letters = dict(letters)
-        self.folder = ""
+        # Папки, которые «есть» в ящике, в кодировке IMAP.
+        self.known = known if known is not None else (b"INBOX", REPORTS_RAW)
+        self.folder = b""
         self.marked: list[str] = []
         self.closed = False
 
     def select(self, name):
         self.folder = name
+        plain = name.strip(b'"') if isinstance(name, bytes) else str(name).encode()
+        if plain not in self.known:
+            return "NO", [b"no such folder"]
         return "OK", [str(len(self.letters)).encode("ascii")]
+
+    def list(self, *args):
+        return "OK", [b'(\\HasNoChildren) "/" "' + item + b'"' for item in self.known]
 
     def uid(self, command, *args):
         name = str(command).lower()
@@ -154,6 +165,45 @@ def test_attachment_names_are_cleaned():
     assert not mail.is_photo("акт.pdf")
 
 
+def test_russian_folder_name_is_encoded_for_imap():
+    # Кириллица в имени папки уезжает на сервер в modified UTF-7,
+    # иначе imaplib падает на переводе в ASCII, а страница — в 500.
+    encoded = mail.encode_folder("Отчёты")
+    assert encoded.isascii()
+    assert mail.decode_folder(encoded) == "Отчёты"
+    assert mail.encode_folder("INBOX") == b"INBOX"
+    assert mail.decode_folder(b"INBOX") == "INBOX"
+    # Знак «&» в имени папки удваивается по правилам RFC 3501.
+    assert mail.decode_folder(mail.encode_folder("Акты & фото")) == "Акты & фото"
+    # Пробелы требуют кавычек, иначе сервер прочтёт только первое слово.
+    assert mail.quote_folder("Отчёты ревизоров").startswith(b'"')
+    assert mail.quote_folder("Отчёты ревизоров").endswith(b'"')
+
+
+def test_check_opens_russian_folder(tmp_path):
+    settings = make_settings(tmp_path)
+    turn_on(settings, mail_folder="Отчёты")
+    box = FakeBox({"31": letter()})
+
+    ok, message = mail.check(settings, opener=lambda config: box)
+    assert ok is True
+    assert "Отчёты" in message
+    assert mail.decode_folder(box.folder.strip(b'"')) == "Отчёты"
+
+
+def test_missing_folder_is_reported_with_folder_list(tmp_path):
+    settings = make_settings(tmp_path)
+    turn_on(settings, mail_folder="отчеты")
+    box = FakeBox({"41": letter()})
+
+    ok, message = mail.check(settings, opener=lambda config: box)
+    assert ok is False
+    # Человеку показываем настоящие имена папок, а не Internal server error.
+    assert "не найдена" in message
+    assert "Отчёты" in message
+    assert "INBOX" in message
+
+
 def test_letter_is_parsed_with_photo():
     parsed = mail.parse_letter("7", letter(), 15)
     assert parsed.sender == "reviz@firma.ru"
@@ -177,7 +227,7 @@ def test_collect_saves_photos_and_skips_known_letters(tmp_path):
     assert report["photos"] == 1
     assert [item.uid for item in report["letters"]] == ["11"]
     assert report["skipped"] and "не в списке" in report["skipped"][0]
-    assert box.folder == "INBOX"
+    assert mail.decode_folder(box.folder.strip(b'"')) == "INBOX"
     assert box.closed is True
     # Разобранное письмо помечается прочитанным в самом ящике.
     assert box.marked == ["11"]
