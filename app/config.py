@@ -72,7 +72,8 @@ class Settings:
 
     # --- Второй слой проверки пересортов (docs/07-ml-verifier.md) ---
     # off   — только детерминированная логика;
-    # model — пары дополнительно судит локальная модель.
+    # model — пары дополнительно судит локальная логистическая регрессия;
+    # llm   — пары судит языковая модель OpenRouter (app/core/judge.py).
     verify_mode: str = "off"
     model_path: str = "data/verifier.json"
     train_store_path: str = "data/train-samples.jsonl"
@@ -84,6 +85,28 @@ class Settings:
     verify_gray_high: float = 0.55
     # Сколько веса мнение модели добавляет к оценке пары.
     verify_weight: float = 0.30
+
+    # Влияние детерминированной логики на итог: доля от 0 до 1
+    # (на странице загрузки — поле 0…100%).
+    # 1.0 — как раньше: логика решает всё, второй слой лишь правит оценку.
+    # 0.0 — решает только второй слой: ворота по бренду и цене кандидатов
+    #       не отсеивают, оценка пары складывается из одного ответа модели.
+    # Значение работает только при включённом втором слое.
+    logic_weight: float = 1.0
+
+    # --- Слой 2 в виде полноценной LLM (OpenRouter) ---
+    # Ключ в .env намеренно не читается: только интерфейс и runtime.json.
+    judge_api_key: str = ""
+    judge_model: str = "openai/gpt-4o-mini"
+    judge_api_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    judge_timeout: float = 60.0
+    judge_retries: int = 1
+    # Предел запросов на процесс: защита от неожиданных трат.
+    judge_max_requests: int = 60
+    # Сколько пар уходит в один запрос: меньше запросов — меньше денег.
+    judge_batch: int = 20
+    # Предел пар, которые LLM судит на один файл. Остальные решает логика.
+    judge_max_pairs: int = 200
 
     # Эмбеддинги имён: выключены по умолчанию (VPS 1 ГБ) и переключаются в интерфейсе.
     # Если пакетов или файлов модели нет, программа тихо работает без них.
@@ -181,6 +204,16 @@ class Settings:
             verify_gray_low=_number("VERIFY_GRAY_LOW", 0.35),
             verify_gray_high=_number("VERIFY_GRAY_HIGH", 0.55),
             verify_weight=_number("VERIFY_WEIGHT", 0.30),
+            logic_weight=_number("LOGIC_WEIGHT", 1.0),
+            judge_model=_text("JUDGE_MODEL", "openai/gpt-4o-mini"),
+            judge_api_url=_text(
+                "JUDGE_API_URL", "https://openrouter.ai/api/v1/chat/completions"
+            ),
+            judge_timeout=_number("JUDGE_TIMEOUT", 60.0),
+            judge_retries=int(_number("JUDGE_RETRIES", 1)),
+            judge_max_requests=int(_number("JUDGE_MAX_REQUESTS", 60)),
+            judge_batch=int(_number("JUDGE_BATCH", 20)),
+            judge_max_pairs=int(_number("JUDGE_MAX_PAIRS", 200)),
             embed_enabled=_flag("EMBED_ENABLED", False),
             embed_provider=_text("EMBED_PROVIDER", "local").lower(),
             embed_model=_text("EMBED_MODEL", "qwen/qwen3-embedding-0.6b"),
