@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Фото товара — ExcelKROAutoFormat{% endblock %}
 {% block heading %}Фото товара{% endblock %}
-{% block subheading %}<p>Распознавание фото плюсующего товара и подбор строки сверки. Решение всегда за человеком: в файл ничего не пишется.</p>{% endblock %}
+{% block subheading %}<p>Распознавание фото плюсующего товара и подбор строки сверки. Решение всегда за человеком: сама модель в файл ничего не пишет. После подтверждения в столбец 12 строки дописывается комментарий «есть фото».</p>{% endblock %}
 
 {% block content %}
 <section class="card">
@@ -66,7 +66,7 @@
 {% if results %}
 <section class="card">
 	<h2>2. Что распознано</h2>
-	<p class="card-sub">Отметьте строку, которой соответствует товар на фото. Ответ сохраняется как пример: по нему видно, где модель ошибается.</p>
+	<p class="card-sub">Отметьте строку, которой соответствует товар на фото. Со страницы уйдёт только этот снимок, остальные останутся. Ответ сохраняется как пример, а в сверке появляется пометка «есть фото».</p>
 	{% for item in results %}
 	<div class="cluster">
 		<h3>{{ item.photo }}</h3>
@@ -95,6 +95,7 @@
 					<td>{{ candidate.source }}</td>
 					<td>
 						<form action="/vision/confirm" method="post">
+							<input type="hidden" name="token" value="{{ token }}" />
 							<input type="hidden" name="photo" value="{{ item.photo }}" />
 							<input type="hidden" name="digest" value="{{ item.digest }}" />
 							<input type="hidden" name="text" value="{{ item.text }}" />
@@ -109,6 +110,7 @@
 			</tbody>
 		</table>
 		<form action="/vision/confirm" method="post">
+			<input type="hidden" name="token" value="{{ token }}" />
 			<input type="hidden" name="photo" value="{{ item.photo }}" />
 			<input type="hidden" name="digest" value="{{ item.digest }}" />
 			<input type="hidden" name="text" value="{{ item.text }}" />
@@ -119,6 +121,16 @@
 		</form>
 		{% else %}
 		<p class="alert alert-warn">Подходящих строк среди излишков не нашлось.</p>
+		<form action="/vision/confirm" method="post">
+			<input type="hidden" name="token" value="{{ token }}" />
+			<input type="hidden" name="photo" value="{{ item.photo }}" />
+			<input type="hidden" name="digest" value="{{ item.digest }}" />
+			<input type="hidden" name="text" value="{{ item.text }}" />
+			<input type="hidden" name="row" value="0" />
+			<input type="hidden" name="name" value="" />
+			<input type="hidden" name="picked" value="off" />
+			<div class="actions"><button class="button-secondary" type="submit">Убрать этот снимок</button></div>
+		</form>
 		{% endif %}
 		{% endif %}
 	</div>
