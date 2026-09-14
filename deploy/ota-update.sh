@@ -14,6 +14,8 @@ BRANCH="${UPDATE_BRANCH:-main}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/health}"
 
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+OTA_UNIT_SRC="${APP_DIR}/deploy/excelkro-update@.service"
+OTA_UNIT_PATH="/etc/systemd/system/excelkro-update@.service"
 
 # Под каким пользователем работает служба сейчас. На серверах, где
 # установка делалась вручную, это root, а пользователя excelkro может не быть.
@@ -114,6 +116,12 @@ fi
 state "забираем код" run "Переходим с ${FROM} на ${TO}"
 git reset --hard FETCH_HEAD >>"${LOG}" 2>&1 || fail "Не удалось перейти на ${TO}"
 
+# git возвращает файлам права из репозитория, то есть снимает выставленный
+# вручную флаг +x. Само обновление запускается через bash и от этого не
+# зависит, но старые описания службы и ручные запуски право требуют.
+chmod +x "${APP_DIR}"/deploy/*.sh 2>/dev/null || true
+
+# Зависимости и описания служб могли измениться вместе с кодом.
 state "зависимости" run "Ставим пакеты из requirements.txt"
 "${APP_DIR}/venv/bin/pip" install --quiet -r "${APP_DIR}/requirements.txt" >>"${LOG}" 2>&1 ||
 	fail "Не установились зависимости. Код уже обновлён до ${TO}"
@@ -130,6 +138,23 @@ if ! cmp -s "${WANTED_UNIT}" "${UNIT_PATH}"; then
 	systemctl daemon-reload >>"${LOG}" 2>&1
 fi
 rm -f "${WANTED_UNIT}"
+
+# То же самое для службы обновления, иначе её правки доедут до сервера
+# только после ручного install-ota.sh. Трогаем только стандартные пути:
+# на нестандартных в установленном файле уже свои папки.
+if [ "${APP_DIR}" = "/opt/excelkro" ] &&
+	[ "${UPDATE_DIR}" = "/var/lib/excelkro/update" ] &&
+	[ -f "${OTA_UNIT_SRC}" ] && [ -f "${OTA_UNIT_PATH}" ]; then
+	WANTED_OTA="$(mktemp)"
+	sed -e "s/^Environment=SERVICE_USER=.*/Environment=SERVICE_USER=${SERVICE_USER}/" \
+		"${OTA_UNIT_SRC}" >"${WANTED_OTA}"
+	if ! cmp -s "${WANTED_OTA}" "${OTA_UNIT_PATH}"; then
+		log "Обновляем описание службы обновления"
+		cp "${WANTED_OTA}" "${OTA_UNIT_PATH}"
+		systemctl daemon-reload >>"${LOG}" 2>&1
+	fi
+	rm -f "${WANTED_OTA}"
+fi
 
 state "перезапуск" run "Перезапускаем службу ${SERVICE_NAME}"
 systemctl restart "${SERVICE_NAME}" >>"${LOG}" 2>&1 || fail "Служба не перезапустилась"
