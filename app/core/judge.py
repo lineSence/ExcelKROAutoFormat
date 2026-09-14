@@ -1,9 +1,16 @@
-"""Второй слой в виде полноценной LLM (OpenRouter).
+"""Второй слой в виде полноценной LLM (OpenRouter или GigaChat).
 
 Логистическая регрессия из `verify.py` считает признаки пары числами.
 Здесь по той же паре спрашивают языковую модель: «это один товар?».
 Модель не придумывает пары — она судит только тех кандидатов, которых
 предложил слой 1 (`resort.py`).
+
+Провайдеров два, выбор на странице «Модель и обучение»:
+
+* **OpenRouter** — разрешён владельцем как исключение для второго слоя;
+* **GigaChat (Сбер)** — тот же провайдер, что и для распознавания фото:
+  доступен из России, ключ авторизации Basic меняется на токен доступа.
+  Сеть и авторизацию берём из `vision.py`, чтобы не писать второй клиент.
 
 Зачем это нужно: проверить, насколько хорошо модель решает сама по себе.
 Поэтому влияние детерминированной логики регулируется отдельно
@@ -44,6 +51,16 @@ logger = logging.getLogger("excelkro.judge")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 
+# Провайдеры второго слоя и их значения по умолчанию.
+OPENROUTER = "openrouter"
+GIGACHAT = "gigachat"
+PROVIDERS = (OPENROUTER, GIGACHAT)
+PROVIDER_LABELS = {
+    OPENROUTER: "OpenRouter",
+    GIGACHAT: "GigaChat (Сбер)",
+}
+GIGACHAT_MODEL = "GigaChat-2"
+
 SYSTEM_PROMPT = (
     "Ты помогаешь сверять инвентаризацию табачного магазина. "
     "Тебе дают пары строк: излишек (нашли лишнее) и недостача (не хватает). "
@@ -63,6 +80,20 @@ JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 
 class JudgeError(RuntimeError):
     """Ответ не получен. Пара остаётся на усмотрение логики."""
+
+
+def provider_name(settings) -> str:
+    """Выбранный провайдер. Неизвестное значение — OpenRouter."""
+    name = str(getattr(settings, "judge_provider", "") or "").strip().lower()
+    return name if name in PROVIDERS else OPENROUTER
+
+
+def provider_label(name: str) -> str:
+    return PROVIDER_LABELS.get(str(name or "").strip().lower(), PROVIDER_LABELS[OPENROUTER])
+
+
+def default_model(provider: str) -> str:
+    return GIGACHAT_MODEL if provider == GIGACHAT else DEFAULT_MODEL
 
 
 def clamp_weight(value) -> float:
@@ -106,6 +137,27 @@ def _post(url: str, payload: dict, api_key: str, timeout: float, retries: int) -
         if attempt + 1 < attempts:
             time.sleep(1.0)
     raise JudgeError(last or "ответ модели не получен")
+
+
+def _post_gigachat(payload: dict, api_key: str, timeout: float, retries: int) -> dict:
+    """Тот же запрос, но через GigaChat.
+
+    Авторизация у Сбера двухшаговая и уже написана в `vision.py`,
+    поэтому берём тот же клиент. Ответ приводим к тому же виду,
+    что у OpenRouter, чтобы разбор был общий.
+    """
+    from . import vision as vision_core
+
+    client = vision_core.GigaChatVision(
+        auth_key=str(api_key or ""),
+        model=str(payload.get("model") or GIGACHAT_MODEL),
+        timeout=int(timeout or 60),
+        retries=int(retries or 0),
+    )
+    text, error = client._chat(payload)
+    if error:
+        raise JudgeError(error)
+    return {"choices": [{"message": {"content": text}}]}
 
 
 def _answers_from(answer: dict, count: int) -> dict[int, float]:
@@ -175,9 +227,11 @@ class LlmJudge:
         weight: float = 0.30,
         logic_weight: float = 1.0,
         sender=None,
+        provider: str = OPENROUTER,
     ) -> None:
+        self.provider = provider if provider in PROVIDERS else OPENROUTER
         self.api_key = str(api_key or "").strip()
-        self.model = str(model or "").strip() or DEFAULT_MODEL
+        self.model = str(model or "").strip() or default_model(self.provider)
         self.url = str(url or "").strip() or OPENROUTER_URL
         self.timeout = float(timeout or 60.0)
         self.retries = int(retries or 0)
@@ -224,12 +278,14 @@ class LlmJudge:
     def _send(self, payload: dict) -> dict:
         if self.sender is not None:
             return self.sender(payload)
+        if self.provider == GIGACHAT:
+            return _post_gigachat(payload, self.api_key, self.timeout, self.retries)
         return _post(self.url, payload, self.api_key, self.timeout, self.retries)
 
     def _ask(self, chunk: list[tuple[str, Item, Item]]) -> dict[str, float]:
         """Один запрос на пачку пар."""
         if not self.api_key:
-            raise JudgeError("не задан ключ OpenRouter")
+            raise JudgeError(f"не задан ключ {provider_label(self.provider)}")
         lines = [
             self._line(number, plus, minus)
             for number, (_, plus, minus) in enumerate(chunk, start=1)
@@ -242,6 +298,10 @@ class LlmJudge:
                 {"role": "user", "content": "\n".join(lines) + "\n\n" + ANSWER_RULE},
             ],
         }
+        if self.provider == GIGACHAT:
+            # У Сбера нулевая температура не принимается: берём минимальную.
+            payload["temperature"] = 0.1
+            payload["max_tokens"] = 800
         self.sent += 1
         numbers = _answers_from(self._send(payload), len(chunk))
         found: dict[str, float] = {}
@@ -315,9 +375,10 @@ class LlmJudge:
 
 def _judge_from(settings, logic_weight: float = 1.0, embedder=None) -> LlmJudge:
     """Судья по настройкам интерфейса."""
+    provider = provider_name(settings)
     return LlmJudge(
         api_key=str(getattr(settings, "judge_api_key", "") or ""),
-        model=str(getattr(settings, "judge_model", "") or DEFAULT_MODEL),
+        model=str(getattr(settings, "judge_model", "") or default_model(provider)),
         url=str(getattr(settings, "judge_api_url", "") or OPENROUTER_URL),
         timeout=float(getattr(settings, "judge_timeout", 60.0) or 60.0),
         retries=int(getattr(settings, "judge_retries", 1) or 0),
@@ -330,6 +391,7 @@ def _judge_from(settings, logic_weight: float = 1.0, embedder=None) -> LlmJudge:
         gray_high=float(getattr(settings, "verify_gray_high", 0.60) or 0.0),
         weight=float(getattr(settings, "verify_weight", 0.30) or 0.0),
         logic_weight=logic_weight,
+        provider=provider,
     )
 
 
@@ -342,6 +404,7 @@ def _marker(settings) -> str:
     key = str(getattr(settings, "judge_api_key", "") or "")
     return "|".join(
         (
+            provider_name(settings),
             str(getattr(settings, "judge_model", "")),
             str(getattr(settings, "judge_api_url", "")),
             mask_key(key),
@@ -362,7 +425,7 @@ def load_judge(settings, logic_weight: float = 1.0, embedder=None) -> LlmJudge |
     global _JUDGE, _MARKER
 
     if not str(getattr(settings, "judge_api_key", "") or "").strip():
-        logger.warning("Не задан ключ OpenRouter для LLM: работаем без второго слоя.")
+        logger.warning("Не задан ключ для LLM: работаем без второго слоя.")
         return None
 
     marker = _marker(settings)
@@ -387,8 +450,11 @@ def forget_judge() -> None:
 
 def check_key(settings) -> tuple[bool, str]:
     """Проверка ключа и модели одной короткой парой. Кэш не трогается."""
+    provider = provider_name(settings)
     if not str(getattr(settings, "judge_api_key", "") or "").strip():
-        return False, "Сначала введите ключ OpenRouter и сохраните настройки."
+        return False, (
+            f"Сначала введите ключ {provider_label(provider)} и сохраните настройки."
+        )
 
     judge = _judge_from(settings)
     judge.max_requests = 0
@@ -415,33 +481,46 @@ def check_key(settings) -> tuple[bool, str]:
     if prob is None:
         return False, f"Проверка не прошла: {judge.last_error or 'модель не ответила'}"
     return True, (
-        f"Ключ работает: модель {judge.model} ответила по пробной паре, "
-        f"шанс одного товара {prob:.2f}."
+        f"Ключ работает: {provider_label(provider)}, модель {judge.model} ответила "
+        f"по пробной паре, шанс одного товара {prob:.2f}."
     )
 
 
 def status(settings) -> dict:
     """Состояние LLM-судьи для интерфейса."""
     key = str(getattr(settings, "judge_api_key", "") or "").strip()
-    model = str(getattr(settings, "judge_model", "") or DEFAULT_MODEL)
+    provider = provider_name(settings)
+    model = str(getattr(settings, "judge_model", "") or default_model(provider))
     logic = clamp_weight(getattr(settings, "logic_weight", 1.0))
-    if key:
+    label = provider_label(provider)
+    if key and provider == GIGACHAT:
+        reason = (
+            f"Ключ задан, модель {model}. Пары уходят в GigaChat пачками "
+            "и тратят токены ключа."
+        )
+    elif key:
         reason = (
             f"Ключ задан, модель {model}. Пары уходят в OpenRouter пачками "
             "и тратят баланс ключа."
         )
     else:
         reason = (
-            "Ключ не задан: режим «Логика + LLM» работать не будет, "
+            f"Ключ {label} не задан: режим «Логика + LLM» работать не будет, "
             "сверка пойдёт на одной логике."
         )
     return {
         "ready": bool(key),
         "has_key": bool(key),
         "key_tail": mask_key(key),
+        "provider": provider,
+        "provider_label": label,
+        "providers": [
+            {"value": name, "label": provider_label(name)} for name in PROVIDERS
+        ],
         "model": model,
         "api_url": str(getattr(settings, "judge_api_url", "") or OPENROUTER_URL),
         "timeout": float(getattr(settings, "judge_timeout", 60.0) or 60.0),
+        "retries": int(getattr(settings, "judge_retries", 1) or 0),
         "max_requests": int(getattr(settings, "judge_max_requests", 60) or 0),
         "batch": int(getattr(settings, "judge_batch", 20) or 1),
         "max_pairs": int(getattr(settings, "judge_max_pairs", 200) or 0),

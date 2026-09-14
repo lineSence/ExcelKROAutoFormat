@@ -44,10 +44,11 @@ EMBED_FIELDS: dict[str, type] = {
     "embed_max_requests": int,
 }
 
-# Настройки LLM-судьи (OpenRouter). Вес логики здесь — значение по
-# умолчанию; на странице загрузки его можно задать на один файл.
+# Настройки LLM-судьи (OpenRouter или GigaChat). Вес логики здесь — значение
+# по умолчанию; на странице загрузки его можно задать на один файл.
 JUDGE_FIELDS: dict[str, type] = {
     "logic_weight": float,
+    "judge_provider": str,
     "judge_api_key": str,
     "judge_model": str,
     "judge_api_url": str,
@@ -236,6 +237,8 @@ def save_judge(settings, values: dict) -> dict:
     stored = _save_fields(settings, values, JUDGE_FIELDS)
     if "logic_weight" in stored:
         stored["logic_weight"] = judge_core.clamp_weight(stored["logic_weight"])
+    if stored.get("judge_provider") not in judge_core.PROVIDERS:
+        stored["judge_provider"] = judge_core.OPENROUTER
     save(stored, runtime_path(settings))
     # Судья в памяти собран по старым настройкам — забываем его.
     judge_core.forget_judge()
@@ -243,7 +246,7 @@ def save_judge(settings, values: dict) -> dict:
 
 
 def forget_judge_key(settings) -> None:
-    """Удаляет ключ OpenRouter для LLM из настроек."""
+    """Удаляет ключ LLM из настроек."""
     from . import judge as judge_core
 
     path = runtime_path(settings)
