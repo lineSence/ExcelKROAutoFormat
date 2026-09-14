@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}Почта ревизоров — ExcelKROAutoFormat{% endblock %}
+{% block heading %}Почта ревизоров{% endblock %}
+{% block subheading %}<p>Фото товара и сообщения из почтового ящика: письма забираются по кнопке.</p>{% endblock %}
+
+{% block content %}
+<section class="card">
+	<h2>Состояние</h2>
+	<div class="stats">
+		<div class="stat">
+			<span class="stat-label">Приём почты</span>
+			<span class="stat-value">
+				{% if mail.enabled and mail.ready %}готов
+				{% elif mail.enabled %}не настроен
+				{% else %}выключен{% endif %}
+			</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Ящик</span>
+			<span class="stat-value">{{ mail.login or "не указан" }}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Пароль приложения</span>
+			<span class="stat-value">{% if mail.has_password %}задан {{ mail.password_tail }}{% else %}не задан{% endif %}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Последний заход</span>
+			<span class="stat-value">{{ mail.last or "не было" }}</span>
+		</div>
+		<div class="stat">
+			<span class="stat-label">Разобрано писем всего</span>
+			<span class="stat-value">{{ mail.seen }}</span>
+		</div>
+	</div>
+	<p class="hint">{{ mail.reason }}</p>
+	<p class="hint">Скачанные снимки лежат в {{ mail.folder_path }} и удаляются через {{ mail.keep_days }} дн.</p>
+</section>
+
+<section class="card">
+	<h2>1. Забрать письма</h2>
+	<p class="card-sub">Программа подключается к ящику, скачивает вложения и показывает, что нашла в тексте. Решение по каждому снимку остаётся за человеком.</p>
+	<form action="/mail/fetch" method="post">
+		<div class="actions"><button type="submit" {% if not mail.enabled or not mail.ready %}disabled{% endif %}>Забрать почту</button></div>
+	</form>
+	<form action="/mail/check" method="post">
+		<div class="actions"><button class="button-secondary" type="submit">Проверить ящик</button></div>
+	</form>
+	<p class="hint">Повторный заход уже разобранные письма не тянет: их номера хранятся в mail-state.json.</p>
+</section>
+
+{% if letters %}
+<section class="card">
+	<h2>2. Письма последнего захода</h2>
+	{% for letter in letters %}
+	<article class="card card-inner">
+		<h3>{{ letter.subject or "Без темы" }}</h3>
+		<ul class="facts">
+			<li><span>От кого</span><span>{{ letter.sender or "неизвестно" }}</span></li>
+			<li><span>Дата письма</span><span>{{ letter.day or "нет" }}</span></li>
+			<li><span>Снимков</span><span>{{ letter.photos | length }}</span></li>
+			{% if letter.hints.codes %}
+			<li><span>Коды товара</span><span>{{ letter.hints.codes | join(", ") }}</span></li>
+			{% endif %}
+			{% if letter.hints.quantity %}
+			<li><span>Количество</span><span>{{ letter.hints.quantity }}</span></li>
+			{% endif %}
+			{% if letter.hints.store %}
+			<li><span>Магазин из текста</span><span>{{ letter.hints.store }}</span></li>
+			{% endif %}
+			{% if letter.hints.words %}
+			<li><span>Слова письма</span><span>{{ letter.hints.words | join(", ") }}</span></li>
+			{% endif %}
+		</ul>
+		{% if letter.text %}
+		<p class="hint">{{ letter.text }}</p>
+		{% endif %}
+		{% if letter.photos %}
+		<ul class="facts">
+			{% for photo in letter.photos %}
+			<li>
+				<span><a href="/mail/photo/{{ letter.uid }}/{{ photo.name }}">{{ photo.name }}</a></span>
+				<span>{{ (photo.size / 1024) | round | int }} КБ</span>
+			</li>
+			{% endfor %}
+		</ul>
+		{% endif %}
+		{% if letter.notes %}
+		<p class="alert alert-warn">{{ letter.notes | join("; ") }}</p>
+		{% endif %}
+	</article>
+	{% endfor %}
+	<p class="hint">Снимки скачаны на сервер. Чтобы подобрать к ним строки сверки, пока скачайте их и загрузите на странице «Фото товара».</p>
+</section>
+{% endif %}
+
+{% if skipped %}
+<section class="card">
+	<h2>Пропущенные письма</h2>
+	<ul class="facts">
+		{% for line in skipped %}
+		<li><span>{{ line }}</span><span></span></li>
+		{% endfor %}
+	</ul>
+</section>
+{% endif %}
+
+<section class="card">
+	<h2>3. Настройки ящика</h2>
+	<p class="card-sub">Нужен отдельный ящик для фото и <b>пароль приложения</b>, а не основной пароль от почты. В Mail.ru он создаётся в настройках безопасности ящика.</p>
+	<p class="alert alert-warn">Пароль хранится в настройках службы на сервере и на странице не показывается. Отдавайте ящику только ту почту, потеря которой не страшна.</p>
+	<form action="/mail/settings" method="post">
+		<div class="field">
+			<label for="mail-host">Сервер IMAP</label>
+			<input id="mail-host" type="text" name="host" value="{{ mail.host }}" />
+			<p class="hint">Для Mail.ru — imap.mail.ru, для Яндекса — imap.yandex.ru.</p>
+		</div>
+		<div class="field">
+			<label for="mail-port">Порт</label>
+			<input id="mail-port" type="number" name="port" min="1" max="65535" step="1" value="{{ mail.port }}" />
+			<p class="hint">993 — обычный порт IMAP через SSL.</p>
+		</div>
+		<div class="field">
+			<label for="mail-login">Почтовый ящик</label>
+			<input id="mail-login" type="text" name="login" value="{{ mail.login }}" autocomplete="off" />
+		</div>
+		<div class="field">
+			<label for="mail-password">Пароль приложения</label>
+			<input id="mail-password" type="password" name="password" autocomplete="off" placeholder="{% if mail.has_password %}сохранён, оканчивается на {{ mail.password_tail }}{% else %}пароль не задан{% endif %}" />
+			<p class="hint">Пустое поле — оставить пароль как было.</p>
+		</div>
+		<div class="field">
+			<label for="mail-folder">Папка ящика</label>
+			<input id="mail-folder" type="text" name="folder" value="{{ mail.folder }}" />
+			<p class="hint">INBOX — входящие. Папки с русскими именами часто не открываются: надёжнее разбирать входящие.</p>
+		</div>
+		<div class="field">
+			<label for="mail-senders">Адреса ревизоров</label>
+			<input id="mail-senders" type="text" name="senders" value="{{ mail.senders }}" />
+			<p class="hint">Через запятую. Можно целым доменом: @firma.ru. Пустое поле — принимать письма с любых адресов.</p>
+		</div>
+		<div class="field">
+			<label for="mail-since">Глубина поиска, дней</label>
+			<input id="mail-since" type="number" name="since_days" min="0" max="365" step="1" value="{{ mail.since_days }}" />
+			<p class="hint">0 — смотреть всю папку.</p>
+		</div>
+		<div class="field">
+			<label for="mail-max-letters">Предел писем за один заход</label>
+			<input id="mail-max-letters" type="number" name="max_letters" min="1" max="500" step="1" value="{{ mail.max_letters }}" />
+		</div>
+		<div class="field">
+			<label for="mail-max-photos">Предел снимков за один заход</label>
+			<input id="mail-max-photos" type="number" name="max_photos" min="1" max="1000" step="1" value="{{ mail.max_photos }}" />
+		</div>
+		<div class="field">
+			<label for="mail-max-mb">Предел размера снимка, МБ</label>
+			<input id="mail-max-mb" type="number" name="max_photo_mb" min="1" max="100" step="1" value="{{ mail.max_photo_mb }}" />
+		</div>
+		<div class="field">
+			<label for="mail-timeout">Ожидание сервера, секунд</label>
+			<input id="mail-timeout" type="number" name="timeout" min="5" max="300" step="5" value="{{ mail.timeout | round | int }}" />
+		</div>
+		<div class="field">
+			<label for="mail-keep">Хранить снимки, дней</label>
+			<input id="mail-keep" type="number" name="keep_days" min="0" max="365" step="1" value="{{ mail.keep_days }}" />
+			<p class="hint">Старые файлы удаляются при каждом заходе. 0 — не удалять.</p>
+		</div>
+		<div class="field field-check">
+			<label><input type="checkbox" name="only_unseen" value="on" {% if mail.only_unseen %}checked{% endif %} /> Брать только непрочитанные письма</label>
+		</div>
+		<div class="field field-check">
+			<label><input type="checkbox" name="mark_seen" value="on" {% if mail.mark_seen %}checked{% endif %} /> Помечать разобранные письма прочитанными</label>
+		</div>
+		<div class="field field-check">
+			<label><input type="checkbox" name="enabled" value="on" {% if mail.enabled %}checked{% endif %} /> Включить приём почты</label>
+		</div>
+		<div class="actions"><button type="submit">Сохранить</button></div>
+	</form>
+	{% if mail.has_password %}
+	<form action="/mail/password/clear" method="post" onsubmit="return confirm('Удалить пароль ящика из настроек?');">
+		<div class="actions"><button class="button-danger" type="submit">Удалить пароль</button></div>
+	</form>
+	{% endif %}
+</section>
+{% endblock %}
