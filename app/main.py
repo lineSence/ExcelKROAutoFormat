@@ -5,6 +5,17 @@
 `async def` обработчика нельзя вызывать блокирующий код напрямую: на время
 разбора встаёт весь сервер, и даже /health не отвечает.
 
+Загрузка файла больше не ждёт конца разбора. `POST /upload` только
+сохраняет файлы, заводит билет хода работы (`progress`) и уводит человека
+на страницу `/upload/progress/{билет}`, а сам разбор идёт фоновой задачей.
+Раньше ответ на загрузку приходил только после всех шагов, включая разбор
+снимков из писем: снимки уходят в нейросеть по одному, с паузой и
+повторами, а список писем хранится на диске и копится. На десятке писем
+страница висела так долго, что выглядела как бесконечная загрузка. Теперь
+виден каждый этап, его время и предупреждение, если этап идёт слишком
+долго; готовая сверка открывается сразу после сборки файла, не дожидаясь
+необязательных шагов.
+
 Разобранная сверка живёт в памяти по токену, поэтому у неё есть свой
 постоянный адрес `/result/{токен}`. Уход на другую страницу и возврат
 ничего не стирают: работа продолжается с того же места.
@@ -20,7 +31,9 @@
 архива письма рядом со скачиванием файла отдаёт уже обработанный архив со
 снимками по имени узнанного товара. Подсказки из текста (товар в списке
 несосчитанного, ФИО ночного продавца) по-прежнему попадают в форму данных
-сверки.
+сверки. Снимки, которым модель уже дала имя, второй раз не разбираются, и
+за один заход разбирается ограниченная пачка: остальное — кнопкой в
+разделе почты.
 
 Письмо можно отправить в нейросеть и вручную: в разделе «Почта ревизоров»
 у каждого загруженного письма есть кнопка «Отправить на разбор». Она
@@ -42,6 +55,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
@@ -59,7 +73,15 @@ from .config import Settings
 from .core import claims as claims_book
 from .core import embed as embed_core
 from .core import judge as judge_core
-from .core import learning, mail_store, mail_vision, photo_mark, refs_sync, runtime
+from .core import (
+    learning,
+    mail_store,
+    mail_vision,
+    photo_mark,
+    progress,
+    refs_sync,
+    runtime,
+)
 from .core import mail as mail_core
 from .core import update as ota
 from .core import vision as vision_core
@@ -91,6 +113,15 @@ DEFAULT_LOGIC = 100
 META_MULTI_FIELDS = ("sellers", "seller_hours", "auditors")
 # Префикс полей формы с заявками реестра расхождений.
 CLAIM_PREFIX = "claim-"
+
+# Этапы разбора в том порядке, в каком они идут. По ним считается полоса
+# хода работы, поэтому порядок здесь — не украшение.
+UPLOAD_STAGES = (
+    ("save", "Файл принят и записан на диск"),
+    ("parse", "Разбор сверки: ремонт файла, пересорты, справочники"),
+    ("photo", "Пометки «нет фото» в готовом файле"),
+    ("mail", "Снимки из писем ревизоров в нейросеть"),
+)
 
 RESULTS: dict[str, PipelineResult] = {}
 # Режим «только чёткие пересорты» по токену результата: нужен при пересборке.
@@ -125,6 +156,10 @@ EMPTY_UPLOAD = (
     "Закройте его в Excel и выберите заново."
 )
 EXPIRED = "Срок хранения истёк. Загрузите сверку заново."
+NO_TICKET = (
+    "Разбор не найден: возможно, служба перезапускалась или он закончился "
+    "давно. Загрузите файл заново."
+)
 NO_JOB_FOR_LETTER = (
     "Разбор не запускался: нет обработанной сверки. Сначала загрузите сверку "
     "на главной странице, затем отправляйте письмо на разбор — снимки "
@@ -310,6 +345,12 @@ async def upload(
     verify: str | None = Form(default=None),
     logic: str | None = Form(default=None),
 ):
+    """Принимает файлы и отдаёт страницу хода работы.
+
+    Сам разбор идёт фоновой задачей: ответ на загрузку больше не ждёт
+    конца работы, поэтому долгие шаги (строгая проверка пар, справочники,
+    снимки писем) видны по этапам, а не выглядят зависшей вкладкой.
+    """
     await run_in_threadpool(_drop_expired)
     strict_on = _is_on(strict)
     verify_mode = _mode(verify)
@@ -368,38 +409,164 @@ async def upload(
         if not prev_size:
             prev_path, prev_name = None, ""
 
-    try:
-        result = await _run_pipeline(
+    ticket = progress.start(UPLOAD_STAGES)
+    megabytes = size / 1024 / 1024
+    progress.done(ticket, "save", f"{name}, {megabytes:.1f} МБ")
+    # Задача живёт дольше запроса: ссылку держим у себя, иначе сборщик мусора
+    # может убрать её на полпути.
+    task = asyncio.create_task(
+        _upload_job(
+            ticket,
             source,
             name,
             strict_on,
             verify_mode,
+            logic_percent,
+            folder,
+            prev_path,
+            prev_name,
+        )
+    )
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
+    return RedirectResponse(url=f"/upload/progress/{ticket}", status_code=303)
+
+
+# Фоновые задачи разбора: держим ссылки, пока они работают.
+_TASKS: set = set()
+
+
+def _remember(
+    token: str,
+    result: PipelineResult,
+    strict: bool,
+    verify: str,
+    logic: int,
+) -> None:
+    """Кладёт готовую сверку в память, чтобы открылся `/result/{токен}`."""
+    RESULTS[token] = result
+    STRICT_FLAGS[token] = bool(strict)
+    VERIFY_FLAGS[token] = _mode(verify)
+    LOGIC_FLAGS[token] = _percent(logic)
+    _note_refs(result)
+
+
+async def _upload_job(
+    ticket: str,
+    source: Path,
+    name: str,
+    strict: bool,
+    verify: str,
+    logic: int,
+    folder: Path,
+    prev_path: Path | None,
+    prev_name: str,
+) -> None:
+    """Разбирает сверку в фоне и отмечает каждый этап в журнале хода работы.
+
+    Порядок важен: как только файл собран, сверка кладётся в память и
+    страница хода работы даёт ссылку на неё. Пометки о фото и снимки писем
+    идут после этого — они полезные, но ждать их необязательно. Ошибка
+    любого шага не роняет службу: она становится текстом на странице.
+    """
+    progress.begin(ticket, "parse")
+    try:
+        result = await _run_pipeline(
+            source,
+            name,
+            strict,
+            verify,
             folder,
             None,
             None,
             prev_path,
             prev_name,
             None,
-            logic_percent,
+            logic,
         )
     except (ParseError, RepairError) as error:
         logger.warning("Ошибка обработки: %s", error)
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(request, str(error), strict_on, verify_mode, logic_percent)
+        progress.fail(ticket, str(error))
+        return
     except Exception:  # noqa: BLE001
         logger.exception("Неизвестная ошибка")
         shutil.rmtree(folder, ignore_errors=True)
-        return _error(
-            request, GENERIC_ERROR, strict_on, verify_mode, logic_percent, status=500
-        )
+        progress.fail(ticket, GENERIC_ERROR)
+        return
 
     token = result.output_path.parent.name
+    rows = len(result.doubtful or [])
+    progress.done(ticket, "parse", f"файл собран, спорных пар: {rows}")
+    try:
+        _remember(token, result, strict, verify, logic)
+    except Exception:  # noqa: BLE001
+        logger.exception("Готовая сверка не записана в память")
+        progress.fail(ticket, GENERIC_ERROR)
+        return
+    progress.ready(ticket, token)
+
     # Плюсующие строки сразу получают пометку «нет фото»: фото по ним ещё нет.
-    await run_in_threadpool(_photo_notes, token, result)
-    # Снимки из писем разбираются здесь же: сверка готова, излишки известны,
-    # и архив письма после этого скачивается уже обработанным.
-    await run_in_threadpool(_mail_vision, token, result)
-    return _result_page(request, result, strict_on, verify_mode, logic=logic_percent)
+    progress.begin(ticket, "photo")
+    try:
+        ok, detail = await run_in_threadpool(_photo_notes, token, result)
+        if ok:
+            progress.done(ticket, "photo", detail)
+        else:
+            progress.stage_failed(ticket, "photo", detail)
+    except Exception:  # noqa: BLE001
+        logger.exception("Пометки о фото не записаны")
+        progress.stage_failed(ticket, "photo", "пометки не записаны")
+
+    # Снимки из писем разбираются последними: сверка уже готова, а разбор
+    # идёт по сети и может быть долгим.
+    progress.begin(ticket, "mail")
+    try:
+        report = await run_in_threadpool(_mail_vision, token, result)
+        note = mail_vision.summary(report) or "писем для разбора нет"
+        if report.get("photos"):
+            progress.done(ticket, "mail", note)
+        else:
+            progress.skip(ticket, "mail", note)
+    except Exception:  # noqa: BLE001
+        logger.exception("Снимки писем не разобраны")
+        progress.stage_failed(
+            ticket, "mail", "разбор снимков не удался, сверка при этом готова"
+        )
+
+    progress.finish(ticket, token)
+
+
+@app.get("/upload/progress/{ticket}", response_class=HTMLResponse)
+def upload_progress(request: Request, ticket: str):
+    """Показывает ход разбора: этапы, проценты и время каждого шага.
+
+    Страница обновляется сама. Когда разбор закончен, она уводит на готовую
+    сверку; при ошибке показывает её текстом на главной странице.
+    """
+    job = progress.view(ticket)
+    if job is None:
+        return _error(request, NO_TICKET, status=404)
+    if job["error"]:
+        return _error(request, job["error"])
+    if job["finished"] and job["token"] and job["token"] in RESULTS:
+        return RedirectResponse(url=f"/result/{job['token']}", status_code=303)
+    if job["finished"] and not job["token"]:
+        return _error(request, GENERIC_ERROR)
+    return templates.TemplateResponse(
+        request=request,
+        name="progress.html",
+        context={"job": job},
+    )
+
+
+@app.get("/upload/state/{ticket}")
+def upload_state(ticket: str) -> dict:
+    """Ход разбора в виде JSON: удобно для проверок извне."""
+    job = progress.view(ticket)
+    if job is None:
+        return {"found": False, "note": NO_TICKET}
+    return {"found": True, **job}
 
 
 async def _rebuild(
@@ -771,6 +938,10 @@ def _mail_vision(token: str, result: PipelineResult) -> dict:
     обработанным), а ответы модели попадают на страницу «Фото товара» по
     этому же токену: человек подтверждает строки руками, программа ничего
     за него не решает.
+
+    Разбираются только новые снимки и не больше одной пачки за раз: список
+    писем копится на диске, и без предела каждая сверка гоняла бы в модель
+    весь архив заново. Остальное — кнопкой «Отправить на разбор».
     """
     report = mail_vision.recognize_letters(
         MAIL_LETTERS, _vision_items(result), _base()
@@ -791,11 +962,20 @@ def _letter_vision(token: str, letter) -> dict:
     обработке тогда не видел этих снимков. Ответы модели ложатся на
     страницу «Фото товара» по выбранной сверке, снимки получают имя
     узнанного товара, и архив письма скачивается обработанным.
+
+    Здесь письмо выбрал человек, поэтому предел пачки снимается и уже
+    названные снимки разбираются заново: он мог быть недоволен ответом.
     """
     result = RESULTS.get(token)
     if result is None or not result.output_path.is_file():
         return {"note": NO_JOB_FOR_LETTER, "photos": 0, "named": 0, "results": []}
-    report = mail_vision.recognize_letters([letter], _vision_items(result), _base())
+    report = mail_vision.recognize_letters(
+        [letter],
+        _vision_items(result),
+        _base(),
+        only_new=False,
+        limit=0,
+    )
     report["added"] = _keep_answers(token, report)
     # Отчёт сверки не затираем: он про все письма, а здесь письмо одно.
     if not MAIL_VISION.get(token):
