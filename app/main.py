@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .deps import jobs, letters, logger
+from .deps import jobs, letters, logger, settings
 from .web.forms import safe_name
 from .web.routers import ROUTERS
 
@@ -38,4 +38,4 @@ def create_app() -> FastAPI:
 app = create_app()
 _safe_name = safe_name
 RESULTS = jobs.results_view()
-__all__ = ["RESULTS", "app", "create_app"]
+__all__ = ["RESULTS", "app", "create_app", "settings"]
