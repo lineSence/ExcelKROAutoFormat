@@ -83,11 +83,18 @@ def is_git_repo() -> bool:
     return (app_dir() / ".git").exists()
 
 
+def _has_sudoers() -> bool:
+    try:
+        return SUDOERS_FILE.is_file()
+    except OSError:
+        return False
+
+
 def parts() -> dict:
     script = app_dir() / "deploy" / "ota-update.sh"
     root = as_root()
     unit = UNIT_FILE.is_file()
-    sudoers = root or SUDOERS_FILE.exists()
+    sudoers = root or _has_sudoers()
     runnable = script.is_file()
     missing: list[str] = []
     if not unit:
@@ -161,13 +168,12 @@ def status() -> dict:
 def start(mode: str) -> None:
     if mode not in MODES:
         raise UpdateError("Неизвестный режим обновления.")
-    if branch() != "main":
-        raise UpdateError("OTA разрешён только из ветки main.")
     if not is_git_repo():
         raise UpdateError(NO_GIT)
+    if branch() != "main":
+        raise UpdateError("OTA разрешён только для ветки main.")
     if running("apply"):
         raise UpdateError("Обновление уже идёт. Подождите его окончания.")
-
     ready = parts()
     if not ready["ready"]:
         raise UpdateError(
@@ -179,7 +185,6 @@ def start(mode: str) -> None:
     command = [_systemctl(), "start", "--no-block", unit_name(mode)]
     if not ready["root"]:
         command = ["sudo", "-n", *command]
-
     code, output = _run(command)
     if code != 0:
         logger.warning("Служба обновления не запущена: %s", output)
