@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Разбор сверки — ExcelKROAutoFormat{% endblock %}
+{% block page_class %} page-narrow{% endblock %}
+{% block heading %}Разбор сверки{% endblock %}
+{% block subheading %}
+<p class="hint">Страница обновляется сама каждые две секунды. Когда файл будет готов, откроется сверка. Закрывать вкладку не нужно.</p>
+{% endblock %}
+
+{% block head %}
+<meta http-equiv="refresh" content="2" />
+<style>
+  .bar { height: 14px; border-radius: 7px; background: #e6e8eb; overflow: hidden; }
+  .bar-fill { height: 100%; background: #2f6f4f; }
+  .bar-line { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .steps { list-style: none; margin: 16px 0 0; padding: 0; }
+  .steps li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #ececec; }
+  .steps li:last-child { border-bottom: 0; }
+  .step-note { color: #666; display: block; }
+  .step-state { white-space: nowrap; color: #444; }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="bar-line">
+    <strong>{{ job.stage or "Готовим разбор" }}</strong>
+    <span>{{ job.percent }}%</span>
+  </div>
+  <div class="bar"><div class="bar-fill" style="width: {{ job.percent }}%"></div></div>
+  <p class="hint">Прошло с начала: {{ job.seconds }} с.{% if job.stage %} Текущий этап идёт {{ job.stage_seconds }} с.{% endif %}</p>
+
+  {% if job.slow %}
+  <div class="alert alert-warn">
+    Этап «{{ job.stage }}» идёт дольше обычного. Так бывает на больших файлах, при строгой проверке пар и при разборе снимков из писем. Оставьте страницу открытой.
+  </div>
+  {% endif %}
+
+  <ul class="steps">
+    {% for step in job.stages %}
+    <li>
+      <span>
+        {{ step.title }}
+        {% if step.note %}<span class="step-note">{{ step.note }}</span>{% endif %}
+      </span>
+      <span class="step-state">{{ step.status }}{% if step.seconds %} · {{ step.seconds }} с{% endif %}</span>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <div class="actions">
+    {% if job.token %}
+    <a class="button" href="/result/{{ job.token }}">Открыть готовую сверку</a>
+    {% endif %}
+    <a class="button button-secondary" href="/">К загрузке файла</a>
+  </div>
+
+  {% if job.token %}
+  <p class="hint">Файл сверки уже собран: остались необязательные шаги, их можно не ждать.</p>
+  {% endif %}
+</section>
+{% endblock %}
