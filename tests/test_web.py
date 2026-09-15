@@ -158,7 +158,9 @@ def test_unknown_ticket_is_explained(client: TestClient) -> None:
     assert state["found"] is False
 
 
-def test_unsafe_filename_is_cleaned(client: TestClient, source_bytes: bytes) -> None:
+def test_unsafe_filename_is_cleaned(
+    client: TestClient, source_bytes: bytes, tmp_path: Path
+) -> None:
     """Имя с путём не выводит запись из рабочей папки."""
     import app.main as web
 
@@ -170,7 +172,7 @@ def test_unsafe_filename_is_cleaned(client: TestClient, source_bytes: bytes) -> 
     assert not state["error"]
 
     result = web.RESULTS[state["token"]]
-    assert result.output_path.parent.parent == work
+    assert result.output_path.parent.parent == tmp_path / "work"
 
 
 def test_too_big_file_is_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
