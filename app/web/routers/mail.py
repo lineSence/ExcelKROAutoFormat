@@ -113,9 +113,9 @@ async def mail_fetch(request: Request, token: str = Form(default="")):
     fresh = list(report.get("letters") or [])
     kept = await run_in_threadpool(mail_store.remember, settings, fresh)
     letters.items[:] = kept
-    letters.note_skipped()
-    cleaned = int(report.get("cleaned") or 0)
     skipped = list(report.get("skipped") or [])
+    letters.note_skipped(skipped)
+    cleaned = int(report.get("cleaned") or 0)
     message = (
         f"Разобрано писем: {len(fresh)}, снимков скачано: {int(report.get('photos') or 0)}."
         if fresh
