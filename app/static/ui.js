@@ -1,4 +1,14 @@
+/*
+ * Общий небольшой UI-слой без сборщика и внешних библиотек.
+ * Он специально отделён от функционального JavaScript: сервер рендерит обычный
+ * HTML, а этот файл только улучшает обратную связь и читаемость.
+ * Важно: DOM-изменения ниже не меняют данные формы и не влияют на API.
+ */
 document.addEventListener("DOMContentLoaded", () => {
+  // Любая POST-форма получает мгновенную обратную связь: кнопка блокируется,
+  // чтобы двойной клик не отправил одну операцию дважды, и появляется полоса
+  // ожидания. Отдельная форма может отключить это поведение через
+  // data-no-loading="true", когда повторная отправка нужна намеренно.
   const forms = document.querySelectorAll("form[method='post'], form[method='POST']");
   forms.forEach((form) => {
     if (form.dataset.noLoading === "true") return;
@@ -20,6 +30,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  // Переносит уже существующие DOM-узлы внутрь <details>. Это лучше, чем
+  // собирать копию текста: ссылки, формы и другие элементы продолжают работать.
+  // Защита data-compacted не даёт повторно завернуть один и тот же контейнер.
   const wrap = (nodes, summary) => {
     if (!nodes.length) return;
     const parent = nodes[0].parentElement;
@@ -38,6 +51,9 @@ document.addEventListener("DOMContentLoaded", () => {
     parent.dataset.compacted = "true";
   };
 
+  // Списки «facts» встречаются на страницах состояния, писем и обновления.
+  // После восьми строк они начинают занимать больше экрана, чем полезно для
+  // первого взгляда, поэтому длинные списки свернуты по умолчанию.
   document.querySelectorAll(".facts").forEach((list) => {
     const items = Array.from(list.children).filter((node) => node.matches("li"));
     if (items.length > 8) {
@@ -50,16 +66,23 @@ document.addEventListener("DOMContentLoaded", () => {
       list.replaceWith(details);
       details.append(summary, content);
       items.forEach((item) => content.appendChild(item));
+      // Ссылка на исходный список больше не нужна после переноса его <li>.
+      // Скрываем контейнер, чтобы он не оставлял пустого места в DOM.
       content.appendChild(list);
       list.style.display = "none";
     }
   });
 
+  // Страницы справочников и писем могут содержать много вложенных карточек.
+  // Свернутой становится только группа из более чем пяти карточек, сами карточки
+  // остаются полностью доступными внутри раскрываемого блока.
   document.querySelectorAll("section.card").forEach((section) => {
     const children = Array.from(section.children).filter((node) => node.matches("article.card, div.card"));
     if (children.length > 5) wrap(children, `Показать записи (${children.length})`);
   });
 
+  // Таблицы с небольшим числом строк читаются напрямую. Для больших таблиц
+  // показываем только заголовок и количество строк; содержимое не удаляется.
   document.querySelectorAll("table").forEach((table) => {
     const rows = table.querySelectorAll("tbody tr");
     if (rows.length > 15 && table.parentElement) {
