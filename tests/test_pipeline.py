@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import zipfile
+from datetime import date, timedelta
 from pathlib import Path
 
 import openpyxl
@@ -15,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings
-from app.core.format import accept_date, output_filename
+from app.core.format import NOTICE_DAYS, accept_date, output_filename
 from app.core.parse import parse, warehouse_from_filename
 from app.core.pipeline import process, sweep
 from app.core.repair import describe, needs_repair, repair_by_inject
@@ -33,6 +34,11 @@ GROUPS = {
         ("Стики HEETS Amber Selection", 1, 120.0),
     ],
 }
+
+
+def _accept_text(days: int = NOTICE_DAYS) -> str:
+    """Срок приёма товара на сегодняшний день обработки."""
+    return (date.today() + timedelta(days=days)).strftime("%d.%m.%Y")
 
 
 def _build_source(path: Path) -> None:
@@ -131,13 +137,15 @@ def test_output_filename() -> None:
     assert output_filename("ОхтаМоллСМА", "09.09.2026") == "ОхтаМоллСМА 09.09.2026.xlsx"
 
 
-def test_accept_date_adds_three_days() -> None:
-    """Срок приёма товара: три дня без текущего."""
-    assert accept_date("09.09.2026") == "12.09.2026"
-    # Переход через конец месяца считается календарно.
+def test_accept_date_counts_from_processing_day() -> None:
+    """Срок приёма товара: три дня со дня обработки сверки."""
+    # Без аргумента день обработки — сегодняшний.
+    assert accept_date() == _accept_text()
+    # Дата инвентаризации на срок больше не влияет.
+    assert accept_date("") == _accept_text()
+    # День обработки можно задать явно: переход через конец месяца календарный.
     assert accept_date("30.09.2026") == "03.10.2026"
-    # Без даты остаётся заглушка для ручного ввода.
-    assert accept_date("") == "ДД.ММ.ГГГГ"
+    assert accept_date(date(2026, 9, 9)) == "12.09.2026"
 
 
 def test_normalize_folds_names() -> None:
@@ -202,8 +210,8 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert sheet["B2"].value == "Неподтверждённая неучтёнка"
     # Неподтверждённая неучтёнка всегда пустая: её вписывают руками.
     assert sheet["C2"].value is None
-    # Плашка срока приёма: дата инвентаризации плюс три дня.
-    assert sheet["E1"].value == "Найденный товар принимается до:12.09.2026"
+    # Плашка срока приёма: день обработки сверки плюс три дня.
+    assert sheet["E1"].value == f"Найденный товар принимается до:{_accept_text()}"
     assert str(sheet["I5"].value).startswith("=SUM(")
     assert str(sheet["I6"].value).startswith("=I5")
     # Подписи итогов стоят в G:H.
