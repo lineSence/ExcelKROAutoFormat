@@ -10,6 +10,7 @@ DEFAULT_TYPE_WORDS = (
     "сигареты,стики,сигариллы,табак,жидкость,"
     "картриджи,устройство,зажигалки,спички"
 )
+STATE_DATA_DIR = "/var/lib/excelkro/data"
 
 
 def load_dotenv(path: str | os.PathLike[str]) -> None:
@@ -41,15 +42,22 @@ def _flag(name: str, default: bool) -> bool:
     return _text(name, "true" if default else "false").lower() in ("1", "true", "yes", "on")
 
 
+def _state_path(name: str, default: str) -> str:
+    """Постоянные данные не должны попадать в каталог с кодом приложения."""
+    value = _text(name, default)
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(STATE_DATA_DIR) / path.name
+    return str(path)
+
+
 @dataclass
 class Settings:
     app_host: str = "127.0.0.1"
     app_port: int = 8000
     max_upload_mb: int = 20
-    # Предел суммы распакованных частей архива: защита от zip-бомбы.
     max_unpacked_mb: int = 200
     tmp_dir: str = "/tmp/excelkro"
-    # Срок хранения рабочих папок и результатов, минуты.
     result_ttl_minutes: int = 60
     sheet_name: str = "TDSheet"
     repair_mode: str = "inject"
@@ -57,110 +65,67 @@ class Settings:
     similarity_threshold: float = 0.80
     doubtful_min: float = 0.70
     doubtful_max: float = 0.90
-    # Предел числа спорных пар в отчёте на странице.
     doubtful_limit: int = 200
-    # Границы отношения цен для пары разных брендов.
     price_gate_low: float = 0.95
     price_gate_high: float = 1.50
-    # Ниже этой оценки пара не считается пересортом.
     match_min_score: float = 1.10
     type_words: tuple[str, ...] = field(default_factory=tuple)
     report_cluster_members: bool = True
-    # Разрешить только чёткие пересорты: бренд с брендом, цена не важна.
     strict_resort: bool = False
     log_level: str = "INFO"
 
-    # --- Второй слой проверки пересортов (docs/07-ml-verifier.md) ---
-    # off   — только детерминированная логика;
-    # model — пары дополнительно судит локальная логистическая регрессия;
-    # llm   — пары судит языковая модель OpenRouter (app/core/judge.py).
     verify_mode: str = "off"
-    model_path: str = "data/verifier.json"
-    train_store_path: str = "data/train-samples.jsonl"
-    # Ниже этого шанса пара снимается. Значение маленькое намеренно:
-    # модель вмешивается только там, где она уверена.
+    model_path: str = f"{STATE_DATA_DIR}/verifier.json"
+    train_store_path: str = f"{STATE_DATA_DIR}/train-samples.jsonl"
     verify_reject: float = 0.05
-    # Полоса сомнения: такие пары уходят в «Спорные пересорты».
     verify_gray_low: float = 0.35
     verify_gray_high: float = 0.55
-    # Сколько веса мнение модели добавляет к оценке пары.
     verify_weight: float = 0.30
-
-    # Влияние детерминированной логики на итог: доля от 0 до 1
-    # (на странице загрузки — поле 0…100%).
-    # 1.0 — как раньше: логика решает всё, второй слой лишь правит оценку.
-    # 0.0 — решает только второй слой: ворота по бренду и цене кандидатов
-    #       не отсеивают, оценка пары складывается из одного ответа модели.
-    # Значение работает только при включённом втором слое.
     logic_weight: float = 1.0
 
-    # --- Слой 2 в виде полноценной LLM (OpenRouter/GigaChat) ---
-    # Ключ и провайдер задаются только в интерфейсе и runtime.json.
     judge_provider: str = "openrouter"
     judge_api_key: str = ""
     judge_model: str = "openai/gpt-4o-mini"
     judge_api_url: str = "https://openrouter.ai/api/v1/chat/completions"
     judge_timeout: float = 60.0
     judge_retries: int = 1
-    # Предел запросов на процесс: защита от неожиданных трат.
     judge_max_requests: int = 60
-    # Сколько пар уходит в один запрос: меньше запросов — меньше денег.
     judge_batch: int = 20
-    # Предел пар, которые LLM судит на один файл. Остальные решает логика.
     judge_max_pairs: int = 200
 
-    # Эмбеддинги имён: выключены по умолчанию (VPS 1 ГБ) и переключаются в интерфейсе.
-    # Если пакетов или файлов модели нет, программа тихо работает без них.
     embed_enabled: bool = False
-    # Откуда берутся векторы: local — файл ONNX на сервере,
-    # openrouter — эмбеддинг-модель по сети (ключ задаётся в интерфейсе).
     embed_provider: str = "local"
-    # Ключ OpenRouter в .env намеренно не читается: только интерфейс и runtime.json.
     embed_api_key: str = ""
     embed_model: str = "qwen/qwen3-embedding-0.6b"
     embed_api_url: str = "https://openrouter.ai/api/v1/embeddings"
     embed_timeout: float = 20.0
     embed_retries: int = 2
-    # Предел сетевых запросов на процесс: дальше сверка идёт без эмбеддингов,
-    # чтобы медленная сеть и платный тариф не тормозили разбор файла.
     embed_max_requests: int = 400
     embed_model_path: str = "models/rubert-tiny2-int8.onnx"
     embed_tokenizer_path: str = "models/rubert-tiny2-tokenizer.json"
-    embed_cache_path: str = "data/embed-cache.json"
+    embed_cache_path: str = f"{STATE_DATA_DIR}/embed-cache.json"
     embed_cache_limit: int = 20000
 
-    # Обучение в интерфейсе.
     train_epochs: int = 300
     train_max_samples: int = 60000
 
-    # --- Справочники (причина, администратор, ревизоры) ---
-    # Папка местных копий книг и файл расписания.
     refs_dir: str = "/var/lib/excelkro/refs"
     refs_state_path: str = "/var/lib/excelkro/refs/state.json"
-    # Проверяющий всегда один и тот же: подставляется в форму сверки,
-    # а в мини-таблицу подписей попадает строкой «Проверил».
     default_checker: str = "Разумовский"
-    # Порог схожести имён складов и допустимый сдвиг даты в графике.
-    # На 0.90 правильные совпадения отбрасывались, поэтому порог ниже,
-    # а всё неточное уходит на подтверждение человеку.
     refs_match_min_score: float = 0.80
-    # Выше этой схожести значения пишутся в файл сразу, ниже — требуют
-    # подтверждения на странице результата.
     refs_confirm_min_score: float = 0.95
     refs_days_around: int = 3
-    # Адреса ячеек готового файла. Пустое значение — в файл не писать.
-    # Проверяющий в сам файл не пишется: в образце в верхней части
-    # никаких фамилий нет, он виден только в таблице подписей.
-    # Адреса учитывают две строки блока неучтёнки сверху.
     refs_cell_reason: str = "C6"
     refs_cell_admin: str = "L3"
     refs_cell_checker: str = ""
     refs_cell_auditors: str = "L5"
-    # Шаг проверки расписания копирования, секунды.
     refs_tick_seconds: int = 30
 
+    # Внешний доступ: при APP_HOST != loopback эти реквизиты обязательны.
+    web_auth_user: str = ""
+    web_auth_password: str = ""
+
     def refs_cells(self) -> dict[str, str]:
-        """Карта «поле → ячейка» для записи в готовый файл."""
         return {
             "reason": self.refs_cell_reason.strip(),
             "admin": self.refs_cell_admin.strip(),
@@ -199,8 +164,8 @@ class Settings:
             strict_resort=_flag("STRICT_RESORT", False),
             log_level=_text("LOG_LEVEL", "INFO"),
             verify_mode=_text("VERIFY_MODE", "off").lower(),
-            model_path=_text("VERIFIER_MODEL_PATH", "data/verifier.json"),
-            train_store_path=_text("TRAIN_STORE_PATH", "data/train-samples.jsonl"),
+            model_path=_state_path("VERIFIER_MODEL_PATH", f"{STATE_DATA_DIR}/verifier.json"),
+            train_store_path=_state_path("TRAIN_STORE_PATH", f"{STATE_DATA_DIR}/train-samples.jsonl"),
             verify_reject=_number("VERIFY_REJECT", 0.05),
             verify_gray_low=_number("VERIFY_GRAY_LOW", 0.35),
             verify_gray_high=_number("VERIFY_GRAY_HIGH", 0.55),
@@ -208,9 +173,7 @@ class Settings:
             logic_weight=_number("LOGIC_WEIGHT", 1.0),
             judge_provider=_text("JUDGE_PROVIDER", "openrouter").lower(),
             judge_model=_text("JUDGE_MODEL", "openai/gpt-4o-mini"),
-            judge_api_url=_text(
-                "JUDGE_API_URL", "https://openrouter.ai/api/v1/chat/completions"
-            ),
+            judge_api_url=_text("JUDGE_API_URL", "https://openrouter.ai/api/v1/chat/completions"),
             judge_timeout=_number("JUDGE_TIMEOUT", 60.0),
             judge_retries=int(_number("JUDGE_RETRIES", 1)),
             judge_max_requests=int(_number("JUDGE_MAX_REQUESTS", 60)),
@@ -225,7 +188,7 @@ class Settings:
             embed_max_requests=int(_number("EMBED_MAX_REQUESTS", 400)),
             embed_model_path=_text("EMBED_MODEL_PATH", "models/rubert-tiny2-int8.onnx"),
             embed_tokenizer_path=_text("EMBED_TOKENIZER_PATH", "models/rubert-tiny2-tokenizer.json"),
-            embed_cache_path=_text("EMBED_CACHE_PATH", "data/embed-cache.json"),
+            embed_cache_path=_state_path("EMBED_CACHE_PATH", f"{STATE_DATA_DIR}/embed-cache.json"),
             embed_cache_limit=int(_number("EMBED_CACHE_LIMIT", 20000)),
             train_epochs=int(_number("TRAIN_EPOCHS", 300)),
             train_max_samples=int(_number("TRAIN_MAX_SAMPLES", 60000)),
@@ -240,4 +203,6 @@ class Settings:
             refs_cell_checker=_text("REFS_CELL_CHECKER", ""),
             refs_cell_auditors=_text("REFS_CELL_AUDITORS", "L5"),
             refs_tick_seconds=int(_number("REFS_TICK_SECONDS", 30)),
+            web_auth_user=_text("WEB_AUTH_USER", ""),
+            web_auth_password=_text("WEB_AUTH_PASSWORD", ""),
         )
