@@ -192,7 +192,7 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert sheet["I5"].value == "=I4+C1"
     assert sheet["I6"].value is None
     assert sheet["G5"].value == "С неучтёнкой:"
-    assert sheet["G6"].value == "Недостача:"
+    assert sheet["G6"].value is None
     assert sheet["B5"].value == "Склад:"
     assert sheet["A5"].value is None
     assert sheet["B6"].value == "Причина инвентаризации:"
