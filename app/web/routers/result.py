@@ -88,7 +88,7 @@ async def meta_autosave(request: Request, token: str):
 async def confirm(request: Request, token: str):
     job = jobs.ready(token)
     if job is None:
-        return render.error_page(request, EXPIRED, status_code=404)
+        return render.error_page(request, EXPIRED, status=404)
     form = await request.form()
     strict = is_on(form.get("strict"))
     verify = mode(form.get("verify"))
