@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -80,16 +81,21 @@ def test_runtime_writes_are_atomic_and_private(tmp_path: Path) -> None:
 
 
 def test_runtime_replaces_configured_provider_urls(tmp_path: Path) -> None:
+    @dataclass
     class FakeSettings:
-        train_store_path = str(tmp_path / "data" / "train-samples.jsonl")
-        __dataclass_fields__ = {"judge_api_url": object, "embed_api_url": object}
+        train_store_path: str = str(tmp_path / "data" / "train-samples.jsonl")
+        judge_api_url: str = ""
+        embed_api_url: str = ""
 
+    state_dir = tmp_path / "data"
+    state_dir.mkdir()
     runtime.save(
         {
             "judge_api_url": "http://127.0.0.1:2375/secret",
             "embed_api_url": "http://169.254.169.254/latest/meta-data",
         },
-        tmp_path / "runtime.json",
+        state_dir / "runtime.json",
     )
-    assert runtime.apply(FakeSettings()).judge_api_url.endswith("/chat/completions")
-    assert runtime.apply(FakeSettings()).embed_api_url.endswith("/embeddings")
+    result = runtime.apply(FakeSettings())
+    assert result.judge_api_url.endswith("/chat/completions")
+    assert result.embed_api_url.endswith("/embeddings")
