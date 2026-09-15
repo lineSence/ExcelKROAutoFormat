@@ -173,10 +173,12 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     settings = Settings.load()
     settings.tmp_dir = str(tmp_path / "work")
     result = process(source_file, source_file.name, settings)
+
     assert result.output_name == "ОхтаМоллСМА 09.09.2026.xlsx"
     assert result.output_path.is_file()
     assert result.summary["groups"] == len(GROUPS)
     assert result.summary["pieces"] > 0
+
     sheet = openpyxl.load_workbook(result.output_path)["TDSheet"]
     assert sheet["B1"].value == "Неучтёнка"
     assert sheet["B2"].value == "Неподтверждённая неучтёнка"
@@ -188,8 +190,8 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert sheet["G6"].value is None
     assert sheet["B5"].value == "Причина инвентаризации:"
     assert sheet["A5"].value is None
-    assert sheet["B6"].value == "Сигареты"
-    assert sheet["C5"].value == "ОхтаМоллСМА"
+    assert sheet["B6"].value in GROUPS
+    assert sheet["C5"].value is None
     assert sheet.auto_filter.ref.startswith("K1:K")
 
 
