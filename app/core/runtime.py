@@ -1,4 +1,9 @@
-"""Переключатели интерфейса и их постоянное хранилище."""
+"""Переключатели интерфейса и их постоянное хранилище.
+
+Этот модуль отделяет пользовательские настройки от базового ``Settings``.
+Значения, введённые через web-интерфейс, живут в runtime.json и применяются
+при каждом построении рабочего экземпляра настроек.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,11 @@ from pathlib import Path
 from . import embed as embed_core
 
 logger = logging.getLogger("excelkro.runtime")
+# Все постоянные пользовательские параметры должны жить вне каталога кода.
 DEFAULT_PATH = "/var/lib/excelkro/data/runtime.json"
+# Внутренний кэш выбранного каталога нужен, чтобы не проверять права на запись
+# при каждом запросе. Ключом служит исходная папка, а значением — реально
+# пригодный для записи каталог (включая fallback для CI/ограниченных систем).
 _CHOSEN: dict[str, Path] = {}
 
 EMBED_FIELDS: dict[str, type] = {
@@ -28,6 +37,8 @@ EMBED_FIELDS: dict[str, type] = {
 }
 
 JUDGE_FIELDS: dict[str, type] = {
+    # verify_mode — именно режим по умолчанию. Значение конкретной загрузки
+    # может быть переопределено полем формы /upload.
     "verify_mode": str,
     "logic_weight": float,
     "judge_provider": str,
@@ -45,6 +56,7 @@ FIELDS: dict[str, type] = {**EMBED_FIELDS, **JUDGE_FIELDS}
 
 
 def load(path: str | Path = DEFAULT_PATH) -> dict:
+    """Прочитать JSON настроек; битый или отсутствующий файл означает «нет настроек»."""
     file = Path(path)
     if not file.is_file():
         return {}
@@ -57,7 +69,13 @@ def load(path: str | Path = DEFAULT_PATH) -> dict:
 
 
 def _atomic_write(file: Path, text: str) -> None:
-    """Атомарная запись: после сбоя не остаётся полуготового JSON."""
+    """Атомарно заменить файл и не оставить частично записанный JSON.
+
+    Сначала пишем во временный файл в той же директории, делаем fsync и только
+    затем выполняем os.replace. Это важно для runtime.json: потеря питания или
+    одновременное чтение не должны оставить некорректный JSON. Umask 077 и
+    chmod 0600 дополнительно не дают случайно сделать ключи читаемыми группой.
+    """
     file.parent.mkdir(parents=True, exist_ok=True)
     old_umask = os.umask(0o077)
     try:
@@ -77,6 +95,7 @@ def _atomic_write(file: Path, text: str) -> None:
 
 
 def save(values: dict, path: str | Path = DEFAULT_PATH) -> None:
+    """Сохранить полный набор runtime-настроек через атомарную замену."""
     file = Path(path)
     _atomic_write(file, json.dumps(values, ensure_ascii=False, indent=2))
 
@@ -89,6 +108,12 @@ def set_flag(name: str, value: bool, path: str | Path = DEFAULT_PATH) -> dict:
 
 
 def _writable(path: Path) -> bool:
+    """Проверить реальную запись, а не os.access().
+
+    Для systemd с ProtectSystem и для контейнеров os.access может давать
+    вводящее в заблуждение представление о возможности записи. Поэтому
+    создаём и удаляем небольшой пробный файл.
+    """
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".write-test"
@@ -100,7 +125,7 @@ def _writable(path: Path) -> bool:
 
 
 def data_dir(settings=None) -> Path:
-    """Единый каталог постоянных данных приложения."""
+    """Выбрать единый каталог постоянных данных приложения."""
     configured = str(getattr(settings, "train_store_path", "") or "")
     path = Path(configured) if configured else Path(DEFAULT_PATH)
     if not path.is_absolute():
@@ -112,6 +137,9 @@ def data_dir(settings=None) -> Path:
     if _writable(folder):
         _CHOSEN[key] = folder
         return folder
+    # В тестовой среде / ограниченном deployment каталог может быть недоступен.
+    # В таком случае используем временное состояние, но обязательно пишем
+    # предупреждение в журнал, чтобы это не выглядело как штатное хранилище.
     fallback = Path(tempfile.gettempdir()) / "excelkro-data"
     if _writable(fallback):
         logger.warning("Не удалось подготовить каталог состояния %s; используется %s", folder, fallback)
@@ -132,6 +160,7 @@ def _as_bool(value) -> bool:
 
 
 def _typed(name: str, value):
+    """Привести строковое значение из HTML/JSON к типу поля Settings."""
     kind = FIELDS[name]
     if kind is bool:
         return _as_bool(value)
@@ -144,7 +173,12 @@ def _typed(name: str, value):
 
 
 def apply(settings):
-    """Накладывает runtime-переключатели только на поля Settings."""
+    """Наложить сохранённые значения на базовый Settings.
+
+    Важная граница безопасности: URL сетевых провайдеров не берутся из
+    runtime.json. Пользователь может выбирать провайдера/модель, но endpoints
+    для разрешённых сервисов задаются кодом.
+    """
     values = load(runtime_path(settings))
     fields = getattr(settings, "__dataclass_fields__", {})
     changes: dict[str, object] = {}
@@ -154,10 +188,7 @@ def apply(settings):
             continue
         try:
             if name == "judge_api_url":
-                if judge_provider == "gigachat":
-                    changes[name] = ""
-                else:
-                    changes[name] = "https://openrouter.ai/api/v1/chat/completions"
+                changes[name] = "" if judge_provider == "gigachat" else "https://openrouter.ai/api/v1/chat/completions"
             elif name == "embed_api_url":
                 changes[name] = embed_core.OPENROUTER_URL
             elif name == "verify_mode":
@@ -239,6 +270,7 @@ def forget_judge_key(settings) -> None:
 
 
 def save_default_verify_mode(settings, value: str) -> dict:
+    """Сохранить режим, который будет выбран на форме новой сверки."""
     value = str(value or "").strip().lower()
     if value not in {"off", "model", "llm"}:
         raise ValueError("Неизвестный режим разбора.")
