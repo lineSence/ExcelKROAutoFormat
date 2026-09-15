@@ -100,7 +100,7 @@ def test_settings_and_key_saved_from_interface(tmp_path):
 
     state = vision.status(settings)
     assert state["ready"] is True
-    assert state["key_tail"] == "…a2V5"
+    assert state["key_tail"] == "…"
 
     assert vision.forget_key(settings)["vision_api_key"] == ""
     assert vision.check(settings)[0] is False
@@ -115,6 +115,7 @@ def test_model_answer_is_checked_and_cached(tmp_path):
             text="HUSKY MINT 30ml",
             candidates=[
                 {"row": 12, "confidence": 0.8},
+                # Строки 999 в сверке нет: её обязаны отбросить.
                 {"row": 999, "confidence": 0.9},
             ],
         )
