@@ -35,11 +35,21 @@
 за один заход разбирается ограниченная пачка: остальное — кнопкой в
 разделе почты.
 
+До любой отправки снимков в нейросеть письмо связывается со сверкой по
+названию магазина (`mail_match`). Ящик один на службу, и раньше в модель
+уходили снимки всех писем подряд, а на странице готовой сверки стояли
+кнопки архивов всех писем сразу — человеку предлагались фото чужого
+магазина. Теперь название склада сверки сравнивается с темой письма, где
+ревизор пишет магазин: своих писем нет — снимки не отправляются вовсе, а
+причина пишется текстом на странице.
+
 Письмо можно отправить в нейросеть и вручную: в разделе «Почта ревизоров»
 у каждого загруженного письма есть кнопка «Отправить на разбор». Она
 нужна, когда почту забрали после обработки сверки: ответы модели
 попадают на страницу «Фото товара» по выбранной сверке, и подтверждение
-строк идёт там же, где обычно.
+строк идёт там же, где обычно. Здесь письмо выбрал человек, поэтому
+несовпадение магазина разбор не запрещает, а лишь показывается
+предупреждением.
 
 Список писем не теряется при перезапуске службы: он читается с диска
 (`mail_store`, файл `mail-letters.json`). Без этого кнопки архивов
@@ -49,7 +59,7 @@
 
 Кнопка «Удалить все письма» убирает список, скачанные вложения и память
 о разобранных номерах разом (`mail_store.forget_all`). Номера забываются
-нарочно: иначе те же письма из ящика второй раз уже не забрать, и раздел
+нарочно: иначе те же письма из ящика второй раз не забрать, и раздел
 остался бы пустым.
 """
 
@@ -75,6 +85,7 @@ from .core import embed as embed_core
 from .core import judge as judge_core
 from .core import (
     learning,
+    mail_match,
     mail_store,
     mail_vision,
     photo_mark,
@@ -164,6 +175,11 @@ NO_JOB_FOR_LETTER = (
     "Разбор не запускался: нет обработанной сверки. Сначала загрузите сверку "
     "на главной странице, затем отправляйте письмо на разбор — снимки "
     "сравниваются с излишками сверки."
+)
+OTHER_STORE = (
+    "Внимание: тема письма не совпадает с магазином этой сверки. Разбор "
+    "выполнен, потому что письмо выбрали вручную — проверьте, к той ли "
+    "сверке относятся снимки."
 )
 
 
@@ -811,12 +827,17 @@ def _result_page(
         _note_refs(result)
     # Подтверждённые пары в таблице не показываются.
     pending = [row for row in result.doubtful if not row.get("answered")]
-    note = _mail_note()
+    # Письма показываются только свои: раньше на странице стояли кнопки
+    # архивов всех писем ящика, и подсказки бралась из чужого магазина.
+    link = _letters_for(result)
+    note = _mail_note(link["mine"])
     mail_report = MAIL_VISION.get(token) or {}
     # Своё сообщение страницы важнее; если его нет — рассказываем про разбор
     # снимков из писем и про архив письма.
     if not message and note["letters"]:
         message = mail_vision.summary(mail_report)
+    elif not message and link["others"]:
+        message = link["note"] or str(mail_report.get("note") or "")
     return templates.TemplateResponse(
         request=request,
         name="result.html",
@@ -840,6 +861,7 @@ def _result_page(
             "mail_note": note,
             "mail_letters": note["letters"],
             "mail_vision": mail_report,
+            "mail_others": len(link["others"]),
         },
     )
 
@@ -931,20 +953,48 @@ def _keep_answers(token: str, report: dict) -> int:
     return added
 
 
+def _letters_for(result: PipelineResult) -> dict:
+    """Письма, относящиеся к этой сверке, и все остальные.
+
+    Связка идёт по названию магазина: склад сверки против темы письма
+    (`mail_match.split`). Это единственное место, где решается, чьи снимки
+    вообще можно показывать и отправлять в нейросеть.
+    """
+    return mail_match.split(str(result.summary.get("warehouse") or ""), MAIL_LETTERS)
+
+
 def _mail_vision(token: str, result: PipelineResult) -> dict:
-    """Разбирает снимки писем сразу при обработке сверки.
+    """Разбирает снимки писем этого магазина сразу при обработке сверки.
 
     Снимки получают имя узнанного товара (это делает архив письма
     обработанным), а ответы модели попадают на страницу «Фото товара» по
     этому же токену: человек подтверждает строки руками, программа ничего
     за него не решает.
 
+    В модель уходят только письма своего магазина. Ящик один на службу, и
+    раньше каждая сверка гоняла в нейросеть снимки всех писем подряд —
+    человеку предлагали фото чужой точки, а запросы тратились впустую.
+    Совпадений нет — не отправляется ничего, причина пишется текстом.
+
     Разбираются только новые снимки и не больше одной пачки за раз: список
-    писем копится на диске, и без предела каждая сверка гоняла бы в модель
-    весь архив заново. Остальное — кнопкой «Отправить на разбор».
+    писем копится на диске. Остальное — кнопкой «Отправить на разбор».
     """
+    link = _letters_for(result)
+    if not link["mine"]:
+        report = {
+            "letters": 0,
+            "photos": 0,
+            "named": 0,
+            "skipped": 0,
+            "left": 0,
+            "results": [],
+            "note": link["note"],
+            "error": "",
+        }
+        MAIL_VISION[token] = report
+        return report
     report = mail_vision.recognize_letters(
-        MAIL_LETTERS, _vision_items(result), _base()
+        link["mine"], _vision_items(result), _base()
     )
     MAIL_VISION[token] = report
     _keep_answers(token, report)
@@ -963,8 +1013,10 @@ def _letter_vision(token: str, letter) -> dict:
     страницу «Фото товара» по выбранной сверке, снимки получают имя
     узнанного товара, и архив письма скачивается обработанным.
 
-    Здесь письмо выбрал человек, поэтому предел пачки снимается и уже
-    названные снимки разбираются заново: он мог быть недоволен ответом.
+    Здесь письмо выбрал человек, поэтому предел пачки снимается, уже
+    названные снимки разбираются заново, а несовпадение магазина только
+    показывается предупреждением: он мог быть недоволен ответом или знать
+    про письмо без названия магазина в теме.
     """
     result = RESULTS.get(token)
     if result is None or not result.output_path.is_file():
@@ -977,6 +1029,8 @@ def _letter_vision(token: str, letter) -> dict:
         limit=0,
     )
     report["added"] = _keep_answers(token, report)
+    good, _ = mail_match.fits(str(result.summary.get("warehouse") or ""), letter)
+    report["other_store"] = not good
     # Отчёт сверки не затираем: он про все письма, а здесь письмо одно.
     if not MAIL_VISION.get(token):
         MAIL_VISION[token] = report
@@ -1260,18 +1314,23 @@ def vision_key_clear(request: Request, token: str = Form(default="")):
 # --- Почта ревизоров -------------------------------------------------------
 
 
-def _mail_note() -> dict:
+def _mail_note(letters: list | None = None) -> dict:
     """Подсказки из разобранных писем.
 
     Этим пользуется страница готовой сверки: кнопки архивов писем,
     предупреждение о товаре в списке несосчитанного и ФИО ночного
     продавца для автоподстановки в форму.
+
+    По умолчанию берутся все известные письма, но страница сверки передаёт
+    только свои — связанные с ней по названию магазина. Иначе в форму
+    подставлялся продавец из письма чужой точки.
     """
-    letters: list[dict] = []
+    source = MAIL_LETTERS if letters is None else letters
+    letters_out: list[dict] = []
     in_list = False
     words: list[str] = []
     seller = ""
-    for letter in MAIL_LETTERS:
+    for letter in source:
         hints = getattr(letter, "hints", None) or {}
         if hints.get("in_list"):
             in_list = True
@@ -1280,7 +1339,7 @@ def _mail_note() -> dict:
                     words.append(word)
         if not seller and hints.get("seller"):
             seller = str(hints.get("seller"))
-        letters.append(
+        letters_out.append(
             {
                 "uid": str(getattr(letter, "uid", "")),
                 "subject": str(getattr(letter, "subject", "") or "без темы"),
@@ -1289,7 +1348,12 @@ def _mail_note() -> dict:
                 "seller": str(hints.get("seller") or ""),
             }
         )
-    return {"letters": letters, "in_list": in_list, "list_words": words, "seller": seller}
+    return {
+        "letters": letters_out,
+        "in_list": in_list,
+        "list_words": words,
+        "seller": seller,
+    }
 
 
 def _mail_list() -> list[dict]:
@@ -1361,6 +1425,10 @@ def _name_photos(letter, token: str = "") -> None:
     каждом скачивании архива незачем. Нет ключа, выключено распознавание
     или нет сверки — снимки остаются со своими именами: архив всё равно
     должен скачаться.
+
+    Если письмо относится к другому магазину, снимки в модель не уходят:
+    сравнивать их с излишками этой сверки незачем, архив собирается с
+    исходными именами.
     """
     photos = [item for item in (letter.photos or []) if item.path]
     if not photos:
@@ -1372,7 +1440,13 @@ def _name_photos(letter, token: str = "") -> None:
     if not config["vision_enabled"] or not config["vision_api_key"]:
         return
     result = RESULTS.get(token)
-    items = _vision_items(result) if result is not None else []
+    if result is None:
+        return
+    good, _ = mail_match.fits(str(result.summary.get("warehouse") or ""), letter)
+    if not good:
+        logger.info("Письмо %s не относится к сверке: снимки не разбираются", getattr(letter, "uid", ""))
+        return
+    items = _vision_items(result)
     if not items:
         return
     paths = [Path(item.path) for item in photos if Path(item.path).is_file()]
@@ -1566,6 +1640,10 @@ async def mail_parse(request: Request, uid: str, token: str = Form(default="")):
     Сверка выбирается в списке рядом с кнопкой: снимки сравниваются с её
     излишками. Ответы модели появляются в разделе «Фото товара» по этой
     сверке, решение по каждому снимку остаётся за человеком.
+
+    Фильтр по магазину здесь не запрещает разбор: письмо выбрал человек.
+    Но если тема письма не совпадает с магазином сверки, об этом пишется
+    предупреждение — так видно, что снимки могут быть не от этой точки.
     """
     letter = _letter_by_uid(uid)
     if letter is None:
@@ -1604,6 +1682,8 @@ async def mail_parse(request: Request, uid: str, token: str = Form(default="")):
         "товара», подтверждайте строки там."
     )
     error = str(report.get("error") or "")
+    if report.get("other_store"):
+        error = f"{OTHER_STORE} {error}".strip()
     return _mail_page(request, message=message, error=error, token=chosen)
 
 
@@ -1692,8 +1772,8 @@ async def mail_archive(uid: str, token: str = ""):
 
     Снимки в архиве названы товаром, который узнала нейросеть при обработке
     сверки. Если имён почему-то нет (например, почту забрали позже), они
-    проставляются здесь. Нет ключа или нет сверки — файлы сохраняют свои
-    имена, архив всё равно собирается.
+    проставляются здесь. Нет ключа, нет сверки или письмо от другого
+    магазина — файлы сохраняют свои имена, архив всё равно собирается.
     """
     letter = _letter_by_uid(uid)
     if letter is None:
