@@ -94,8 +94,9 @@ class Settings:
     # Значение работает только при включённом втором слое.
     logic_weight: float = 1.0
 
-    # --- Слой 2 в виде полноценной LLM (OpenRouter) ---
-    # Ключ в .env намеренно не читается: только интерфейс и runtime.json.
+    # --- Слой 2 в виде полноценной LLM (OpenRouter/GigaChat) ---
+    # Ключ и провайдер задаются только в интерфейсе и runtime.json.
+    judge_provider: str = "openrouter"
     judge_api_key: str = ""
     judge_model: str = "openai/gpt-4o-mini"
     judge_api_url: str = "https://openrouter.ai/api/v1/chat/completions"
@@ -205,6 +206,7 @@ class Settings:
             verify_gray_high=_number("VERIFY_GRAY_HIGH", 0.55),
             verify_weight=_number("VERIFY_WEIGHT", 0.30),
             logic_weight=_number("LOGIC_WEIGHT", 1.0),
+            judge_provider=_text("JUDGE_PROVIDER", "openrouter").lower(),
             judge_model=_text("JUDGE_MODEL", "openai/gpt-4o-mini"),
             judge_api_url=_text(
                 "JUDGE_API_URL", "https://openrouter.ai/api/v1/chat/completions"
