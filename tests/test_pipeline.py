@@ -44,13 +44,11 @@ def _build_source(path: Path) -> None:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = "TDSheet"
-
     sheet["A1"] = "Инвентаризация товаров № ИНВ-15 от 09.09.2026"
     sheet["A2"] = "Организация: ООО Торг"
     sheet["A3"] = "Склад:"
     sheet["H3"] = "Валюта"
     sheet["I3"] = "руб"
-
     row = 5
     for name, items in GROUPS.items():
         sheet.cell(row=row, column=1).value = "№"
@@ -72,7 +70,6 @@ def _build_source(path: Path) -> None:
         sheet.cell(row=row, column=6).value = sum(item[1] for item in items)
         sheet.cell(row=row, column=10).value = sum(item[2] for item in items)
         row += 2
-
     workbook.save(path)
 
 
@@ -176,12 +173,10 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     settings = Settings.load()
     settings.tmp_dir = str(tmp_path / "work")
     result = process(source_file, source_file.name, settings)
-
     assert result.output_name == "ОхтаМоллСМА 09.09.2026.xlsx"
     assert result.output_path.is_file()
     assert result.summary["groups"] == len(GROUPS)
     assert result.summary["pieces"] > 0
-
     sheet = openpyxl.load_workbook(result.output_path)["TDSheet"]
     assert sheet["B1"].value == "Неучтёнка"
     assert sheet["B2"].value == "Неподтверждённая неучтёнка"
@@ -193,7 +188,7 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert sheet["G6"].value is None
     assert sheet["B5"].value == "Причина инвентаризации:"
     assert sheet["A5"].value is None
-    assert sheet["B6"].value is None
+    assert sheet["B6"].value == "Сигареты"
     assert sheet["C5"].value == "ОхтаМоллСМА"
     assert sheet.auto_filter.ref.startswith("K1:K")
 
