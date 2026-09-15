@@ -15,7 +15,8 @@ def only_job(token,cards):
     token=str(token or ""); return token if any(str(x["token"])==token for x in cards) else ""
 def index_page(request:Request,error="",strict=None,verify=None,logic=None,status=200):
     current=base(); logic=int(round(float(getattr(current,"logic_weight",1.0))*100)) if logic is None else logic
-    return templates.TemplateResponse(request=request,name="index.html",context={"error":error,"max_upload_mb":settings.max_upload_mb,"strict":settings.strict_resort if strict is None else bool(strict),"verify":mode(settings.verify_mode if verify is None else verify),"logic":percent(logic),"model":model_status(settings),"embed":runtime.embed_status(current),"judge":runtime.judge_status(current),"jobs":job_cards()},status_code=status)
+    default_verify=mode(getattr(current,"verify_mode","off"))
+    return templates.TemplateResponse(request=request,name="index.html",context={"error":error,"max_upload_mb":settings.max_upload_mb,"strict":settings.strict_resort if strict is None else bool(strict),"verify":default_verify if verify is None else mode(verify),"default_verify":default_verify,"logic":percent(logic),"model":model_status(settings),"embed":runtime.embed_status(current),"judge":runtime.judge_status(current),"jobs":job_cards()},status_code=status)
 def error_page(request,message,strict=False,verify="off",logic=DEFAULT_LOGIC,status=400):return index_page(request,error=message,strict=strict,verify=verify,logic=logic,status=status)
 def result_page(request,job:Job,message=""):
     result=job.result; pending=[x for x in result.doubtful if not x.get("answered")]; link=letters_service.letters_for(result,letters); note=letters_service.mail_note(link["mine"]); report=job.mail_vision or {}

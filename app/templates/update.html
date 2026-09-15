@@ -3,17 +3,12 @@
 {% block heading %}Обновление программы{% endblock %}
 {% block subheading %}
 <p class="hint">
-	Кнопка ставит на сервер последнюю версию из Git: код, зависимости и перезапуск
-	службы. Работа идёт в отдельной службе, поэтому перезапуск её не обрывает.
-	На время перезапуска (около 10 секунд) страницы недоступны.
+	Выберите ветку Git, проверьте наличие новой версии и запустите установку.
+	Обновление выполняется отдельной службой, поэтому перезапуск приложения не обрывает сам процесс.
 </p>
 {% endblock %}
 
 {% block head %}
-{# Адрес указан явно: после кнопки браузер стоит на /update/check или
-   /update/apply, а эти адреса принимают только отправку формы. Без адреса
-   автообновление запрашивает текущий адрес обычным способом и страница
-   падает в Method Not Allowed. #}
 {% if status.busy %}<meta http-equiv="refresh" content="5; url=/update" />{% endif %}
 {% endblock %}
 
@@ -23,81 +18,68 @@
 	<ul class="facts">
 		<li>Версия: <b>{{ status.version }}</b></li>
 		<li>Сборка: <b>{{ status.commit or "неизвестна" }}</b></li>
-		<li>Ветка обновлений: <b>{{ status.branch }}</b></li>
+		<li>Ветка: <b>{{ status.branch }}</b></li>
 		<li>Папка: <b>{{ status.app_dir }}</b></li>
 		<li>Служба обновления: <b>{% if status.parts.ready %}установлена{% else %}не установлена{% endif %}</b></li>
 	</ul>
 
-	{% if message %}
-	<p class="hint">{{ message }}</p>
-	{% endif %}
-	{% if error %}
-	<p class="hint error">{{ error }}</p>
-	{% endif %}
+	{% if message %}<p class="hint">{{ message }}</p>{% endif %}
+	{% if error %}<p class="hint error">{{ error }}</p>{% endif %}
 
 	{% if not status.git %}
 	<p class="hint error">
-		Папка программы не является копией Git, поэтому обновление по кнопке
-		невозможно. Порядок перехода — в docs/09-ota-update.md.
+		Папка программы не является копией Git, поэтому обновление по кнопке невозможно.
 	</p>
 	{% endif %}
 
 	{% if not status.parts.ready %}
 	<p class="hint error">
-		Части обновления не установлены на сервере. Не хватает:
-		{{ status.parts.missing | join("; ") }}.
-		Выполните на сервере одну команду: <code>{{ status.parts.setup }}</code>
-		и обновите эту страницу.
+		Части обновления не установлены. Не хватает: {{ status.parts.missing | join("; ") }}.
+		Выполните: <code>{{ status.parts.setup }}</code>
 	</p>
 	{% endif %}
 
-	<form class="review-bar" method="post" action="/update/check">
-		<button type="submit" {% if status.busy or not status.git or not status.parts.ready %}disabled{% endif %}>
-			Проверить обновления
-		</button>
+	<div class="field">
+		<label class="field-label" for="update-branch">Ветка обновления</label>
+		<select id="update-branch" name="branch" form="update-check" {% if status.busy or not status.git or not status.parts.ready %}disabled{% endif %}>
+			{% for item in status.branches %}
+			<option value="{{ item }}" {% if item == status.branch %}selected{% endif %}>{{ item }}</option>
+			{% endfor %}
+		</select>
+		<p class="hint">Выбор сохраняется на сервере. Следующая проверка и установка используют выбранную ветку.</p>
+	</div>
+
+	<form id="update-check" class="review-bar" method="post" action="/update/check">
+		<button type="submit" {% if status.busy or not status.git or not status.parts.ready %}disabled{% endif %}>Проверить обновления</button>
 	</form>
 
-	<form
-		class="review-bar"
-		method="post"
-		action="/update/apply"
-		onsubmit="return confirm('Обновить программу и перезапустить службу? Незаконченные сверки будут потеряны.')"
-	>
-		<button type="submit" {% if status.busy or not status.git or not status.parts.ready %}disabled{% endif %}>
-			Установить последнюю версию
-		</button>
-		{% if status.behind %}
-		<span class="badge">новых коммитов: {{ status.behind }}</span>
-		{% endif %}
+	<form class="review-bar" method="post" action="/update/apply" onsubmit="return confirm('Обновить программу и перезапустить службу? Незаконченные сверки будут потеряны.')">
+		<input type="hidden" id="update-branch-apply" name="branch" value="{{ status.branch }}" />
+		<button type="submit" {% if status.busy or not status.git or not status.parts.ready %}disabled{% endif %}>Установить выбранную версию</button>
+		{% if status.behind %}<span class="badge">новых коммитов: {{ status.behind }}</span>{% endif %}
 	</form>
 
-	<p class="hint">
-		Перед обновлением скачайте готовые файлы: при перезапуске незаконченные
-		сверки и ссылки на скачивание пропадают. Справочники, реестр, примеры
-		обучения и модель остаются на месте: они лежат вне папки программы.
-	</p>
+	<p class="hint">Перед обновлением скачайте готовые файлы: при перезапуске незаконченные сверки и ссылки на скачивание пропадают. Справочники, реестр, примеры обучения и модель остаются на месте.</p>
 </section>
 
 <section class="card card-sub">
 	<h2>Состояние</h2>
 	{% if status.busy %}
-	<p class="hint">Идёт работа… страница обновляется сама каждые 5 секунд.</p>
+		<div class="loading-strip" aria-label="Обновление выполняется"></div>
+		<p class="hint">Идёт работа… страница обновляется сама каждые 5 секунд.</p>
 	{% endif %}
 
 	{% if state %}
 	<ul class="facts">
 		<li>Шаг: <b>{{ state.stage }}</b></li>
 		<li>Сообщение: {{ state.message }}</li>
+		<li>Ветка: {{ state.branch or status.branch }}</li>
 		<li>Режим: {{ "установка" if state.mode == "apply" else "проверка" }}</li>
 		<li>Начало: {{ state.started_at or "—" }}</li>
 		<li>Окончание: {{ state.finished_at or "—" }}</li>
-		{% if state.from or state.to %}
-		<li>Сборка: {{ state["from"] or "—" }} &rarr; {{ state.to or "—" }}</li>
-		{% endif %}
+		{% if state.from or state.to %}<li>Сборка: {{ state["from"] or "—" }} &rarr; {{ state.to or "—" }}</li>{% endif %}
 	</ul>
-	{% if state.ok is false %}
-	<p class="hint error">Обновление не доведено до конца. Подробности — в журнале ниже.</p>
-	{% endif %}
+	{% if state.ok is false %}<p class="hint error">Обновление не доведено до конца. Подробности — в журнале ниже.</p>{% endif %}
 	{% else %}
 	<p class="hint">Обновление ещё не запускалось.</p>
 	{% endif %}
@@ -107,4 +89,12 @@
 	<pre class="log">{{ status.log }}</pre>
 	{% endif %}
 </section>
+
+<script>
+(() => {
+	const select = document.getElementById('update-branch');
+	const apply = document.getElementById('update-branch-apply');
+	if (select && apply) select.addEventListener('change', () => { apply.value = select.value; });
+})();
+</script>
 {% endblock %}

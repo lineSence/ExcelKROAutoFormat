@@ -1,6 +1,5 @@
 from __future__ import annotations
 import shutil
-from pathlib import Path
 from fastapi import APIRouter,File,Form,Request,UploadFile
 from fastapi.responses import HTMLResponse,RedirectResponse
 from starlette.concurrency import run_in_threadpool
@@ -17,7 +16,8 @@ from ..uploads import save_upload
 router=APIRouter()
 @router.post("/upload",response_class=HTMLResponse)
 async def upload(request:Request,file:UploadFile=File(...),prev:UploadFile|None=File(default=None),strict:str|None=Form(default=None),verify:str|None=Form(default=None),logic:str|None=Form(default=None)):
-    await run_in_threadpool(jobs.drop_expired); strict_on=is_on(strict); verify_mode=mode(verify); logic_percent=percent(logic); name=safe_name(file.filename)
+    await run_in_threadpool(jobs.drop_expired); strict_on=is_on(strict)
+    current=base(); verify_mode=mode(verify if verify is not None else current.verify_mode); logic_percent=percent(logic); name=safe_name(file.filename)
     if not name.lower().endswith(".xlsx"):return render.error_page(request,"Нужен файл с расширением .xlsx.",strict_on,verify_mode,logic_percent)
     folder=work_dir(settings); source=folder/name
     try:size=await save_upload(file,source,settings.max_upload_mb)

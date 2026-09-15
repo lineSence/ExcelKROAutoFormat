@@ -1,0 +1,77 @@
+/* Компактные дополнения интерфейса: не требуют фронтенд-сборки. */
+
+.topbar-inner { min-height: 50px; gap: 12px; padding-left: 16px; padding-right: 16px; }
+.topbar { position: sticky; top: 0; z-index: 20; }
+.nav { gap: 2px; }
+.nav-link { padding: 5px 8px; }
+.page { max-width: 1040px; padding: 20px 16px 72px; }
+.page-head { margin-bottom: 14px; }
+.page-head h1 { font-size: 20px; }
+.card { padding: 16px; margin-bottom: 12px; }
+.card > h2 { font-size: 14px; }
+.card-sub { margin-bottom: 12px; }
+.field { margin-bottom: 12px; }
+input[type="file"] { padding: 10px; }
+.choice { padding: 8px 10px; margin-bottom: 6px; }
+.actions { gap: 8px; }
+button, .button { padding: 8px 13px; }
+.stats { gap: 8px; }
+.stat { padding: 9px 11px; }
+.stat-value { font-size: 16px; }
+.facts li { padding: 6px 0; }
+
+.inline-setting {
+	display: flex;
+	gap: 8px;
+	align-items: end;
+	flex-wrap: wrap;
+}
+.inline-setting .field { flex: 1 1 320px; margin-bottom: 0; }
+.inline-setting select { width: 100%; }
+
+.loading-strip {
+	position: relative;
+	height: 3px;
+	overflow: hidden;
+	margin: 8px 0 0;
+	border-radius: 999px;
+	background: #e7ebf1;
+}
+.loading-strip::after {
+	content: "";
+	position: absolute;
+	top: 0;
+	left: -35%;
+	width: 35%;
+	height: 100%;
+	background: currentColor;
+	animation: loading-slide 1.2s ease-in-out infinite;
+}
+@keyframes loading-slide {
+	0% { left: -35%; }
+	100% { left: 100%; }
+}
+.is-loading { opacity: 0.78; }
+
+details.compact-details {
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	background: var(--surface-soft);
+	margin: 8px 0;
+}
+details.compact-details > summary {
+	cursor: pointer;
+	padding: 8px 10px;
+	font-weight: 600;
+	list-style-position: inside;
+}
+details.compact-details > .compact-content {
+	padding: 0 10px 10px;
+}
+.compact-content > :first-child { margin-top: 0; }
+.compact-content > :last-child { margin-bottom: 0; }
+
+@media (max-width: 720px) {
+	.topbar-inner { align-items: flex-start; }
+	.page { padding-left: 12px; padding-right: 12px; }
+}

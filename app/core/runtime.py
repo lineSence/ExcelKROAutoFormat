@@ -28,6 +28,7 @@ EMBED_FIELDS: dict[str, type] = {
 }
 
 JUDGE_FIELDS: dict[str, type] = {
+    "verify_mode": str,
     "logic_weight": float,
     "judge_provider": str,
     "judge_api_key": str,
@@ -159,6 +160,9 @@ def apply(settings):
                     changes[name] = "https://openrouter.ai/api/v1/chat/completions"
             elif name == "embed_api_url":
                 changes[name] = embed_core.OPENROUTER_URL
+            elif name == "verify_mode":
+                value = _typed(name, values[name]).lower()
+                changes[name] = value if value in {"off", "model", "llm"} else "off"
             else:
                 changes[name] = _typed(name, values[name])
         except (TypeError, ValueError):
@@ -232,6 +236,16 @@ def forget_judge_key(settings) -> None:
     stored["judge_api_key"] = ""
     save(stored, path)
     judge_core.forget_judge()
+
+
+def save_default_verify_mode(settings, value: str) -> dict:
+    value = str(value or "").strip().lower()
+    if value not in {"off", "model", "llm"}:
+        raise ValueError("Неизвестный режим разбора.")
+    stored = load(runtime_path(settings))
+    stored["verify_mode"] = value
+    save(stored, runtime_path(settings))
+    return stored
 
 
 def judge_status(settings) -> dict:
