@@ -45,8 +45,9 @@ class LetterStore:
         with self._lock:
             return next((item for item in self.items if str(item.uid) == wanted), None)
 
-    def forget_all(self) -> None:
-        mail_store.forget_all(self._settings)
+    def forget_all(self) -> dict:
+        report = mail_store.forget_all(self._settings)
         with self._lock:
             self.items = []
             self.skipped = 0
+        return report
