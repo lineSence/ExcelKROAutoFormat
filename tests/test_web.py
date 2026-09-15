@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,35 @@ def source_bytes(tmp_path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _upload(client: TestClient, name: str, data: bytes) -> str:
+    """Отправляет файл и возвращает билет разбора.
+
+    Ответ на загрузку — редирект на страницу хода работы, а сам разбор идёт
+    фоновой задачей. Редирект не следуем, чтобы забрать билет из адреса.
+    """
+    answer = client.post(
+        "/upload",
+        files={"file": (name, data, XLSX_TYPE)},
+        follow_redirects=False,
+    )
+    assert answer.status_code == 303
+    location = answer.headers["location"]
+    assert location.startswith("/upload/progress/")
+    return location.rsplit("/", 1)[-1]
+
+
+def _wait_done(client: TestClient, ticket: str, timeout: float = 30.0) -> dict:
+    """Ждёт конца фонового разбора и возвращает последнее состояние билета."""
+    deadline = time.monotonic() + timeout
+    while True:
+        state = client.get(f"/upload/state/{ticket}").json()
+        assert state["found"]
+        if state["finished"] or state["error"]:
+            return state
+        assert time.monotonic() < deadline, "разбор не закончился вовремя"
+        time.sleep(0.05)
+
+
 def test_health(client: TestClient) -> None:
     answer = client.get("/health")
     assert answer.status_code == 200
@@ -57,16 +87,14 @@ def test_wrong_extension_is_rejected(client: TestClient) -> None:
 
 
 def test_upload_and_download(client: TestClient, source_bytes: bytes) -> None:
-    answer = client.post(
-        "/upload",
-        files={"file": ("ОхтаМоллСМА без форматирования.xlsx", source_bytes, XLSX_TYPE)},
-    )
-    assert answer.status_code == 200
+    ticket = _upload(client, "ОхтаМоллСМА без форматирования.xlsx", source_bytes)
+    state = _wait_done(client, ticket)
+    assert not state["error"]
+    token = state["token"]
 
     import app.main as web
 
-    assert len(web.RESULTS) == 1
-    token = next(iter(web.RESULTS))
+    assert token in web.RESULTS
 
     downloaded = client.get(f"/download/{token}")
     assert downloaded.status_code == 200
@@ -77,6 +105,39 @@ def test_upload_and_download(client: TestClient, source_bytes: bytes) -> None:
     assert client.get(f"/download/{token}").status_code == 404
 
 
+def test_upload_progress_page(client: TestClient, source_bytes: bytes) -> None:
+    """Страница хода работы: билет открывается, по концу ведёт на сверку."""
+    import app.main as web
+
+    ticket = _upload(client, "ОхтаМоллСМА без форматирования.xlsx", source_bytes)
+
+    page = client.get(f"/upload/progress/{ticket}", follow_redirects=False)
+    if page.status_code == 200:
+        # Разбор ещё идёт: видны полоса и список этапов.
+        assert "Разбор сверки" in page.text
+    else:
+        # Маленький файл мог разобраться ещё до первого захода на страницу.
+        assert page.status_code == 303
+
+    state = _wait_done(client, ticket)
+    assert not state["error"]
+    assert state["token"] in web.RESULTS
+
+    done = client.get(f"/upload/progress/{ticket}", follow_redirects=False)
+    assert done.status_code == 303
+    assert done.headers["location"] == f"/result/{state['token']}"
+
+
+def test_unknown_ticket_is_explained(client: TestClient) -> None:
+    """Неизвестный билет — понятный текст, а не Internal server error."""
+    page = client.get("/upload/progress/нет-такого-билета")
+    assert page.status_code == 404
+    assert "Загрузите файл заново" in page.text
+
+    state = client.get("/upload/state/нет-такого-билета").json()
+    assert state["found"] is False
+
+
 def test_unsafe_filename_is_cleaned(client: TestClient, source_bytes: bytes) -> None:
     """Имя с путём не выводит запись из рабочей папки."""
     import app.main as web
@@ -84,14 +145,11 @@ def test_unsafe_filename_is_cleaned(client: TestClient, source_bytes: bytes) -> 
     assert web._safe_name("../../secret.xlsx") == "secret.xlsx"
     assert web._safe_name("") == "input.xlsx"
 
-    answer = client.post(
-        "/upload",
-        files={"file": ("../../ОхтаМоллСМА без цен.xlsx", source_bytes, XLSX_TYPE)},
-    )
-    assert answer.status_code == 200
+    ticket = _upload(client, "../../ОхтаМоллСМА без цен.xlsx", source_bytes)
+    state = _wait_done(client, ticket)
+    assert not state["error"]
 
-    token = next(iter(web.RESULTS))
-    result = web.RESULTS[token]
+    result = web.RESULTS[state["token"]]
     assert result.output_path.parent.parent.name == "work"
 
 
