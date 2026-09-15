@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import shutil
 import threading
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from ..core.pipeline import PipelineResult
@@ -50,7 +50,8 @@ class JobStore:
         self._jobs: dict[str, Job] = {}
 
     def get(self, token: str) -> Job | None:
-        return self._jobs.get(str(token or ""))
+        with self._lock:
+            return self._jobs.get(str(token or ""))
 
     def alive(self, token: str) -> Job | None:
         job = self.get(token)
@@ -58,7 +59,9 @@ class JobStore:
 
     def ready(self, token: str) -> Job | None:
         job = self.alive(token)
-        return job if job is not None and job.result.source_path is not None and job.result.source_path.exists() else None
+        if job is None or job.result.source_path is None:
+            return None
+        return job if job.result.source_path.exists() else None
 
     def __contains__(self, token: object) -> bool:
         return self.get(str(token or "")) is not None
@@ -69,7 +72,8 @@ class JobStore:
         return iter(values)
 
     def __len__(self) -> int:
-        return len(self._jobs)
+        with self._lock:
+            return len(self._jobs)
 
     def cards(self, surplus: Callable[[PipelineResult], int] | None = None) -> list[dict]:
         return [job.card(surplus) for job in self if job.alive]
@@ -97,24 +101,19 @@ class JobStore:
             job.photos = list(old.photos)
             job.photo_rows = set(old.photo_rows)
             job.mail_vision = dict(old.mail_vision)
-            self.forget(old_token)
+            # Пересборка пишет новый файл в ту же рабочую папку. Старую запись
+            # надо убрать из индекса, но нельзя удалять папку: она теперь нужна
+            # новой Job.
+            with self._lock:
+                self._jobs.pop(str(old_token or ""), None)
         return job
 
     def forget(self, token: str) -> None:
         with self._lock:
             job = self._jobs.pop(str(token or ""), None)
-        if job is not None:
-            folder = job.result.output_path.parent
-            try:
-                for path in sorted(folder.rglob("*"), reverse=True):
-                    if path.is_file() or path.is_symlink():
-                        path.unlink(missing_ok=True)
-                    elif path.is_dir():
-                        path.rmdir()
-                folder.rmdir()
-            except OSError:
-                import shutil
-                shutil.rmtree(folder, ignore_errors=True)
+        if job is None:
+            return
+        shutil.rmtree(job.result.output_path.parent, ignore_errors=True)
 
     def drop_expired(self) -> int:
         edge = datetime.now() - timedelta(minutes=max(int(self._settings.result_ttl_minutes), 1))
