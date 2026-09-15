@@ -70,9 +70,12 @@ def test_letter_store_uses_core_dataclasses(tmp_path: Path, monkeypatch) -> None
     store = LetterStore(settings)
     assert store.restore() == 1
     assert store.by_uid("42") is letter
+    assert store.skipped == []
     fresh = SimpleNamespace(uid="43", photos=[])
     assert store.remember([fresh]) == 1
     assert store.by_uid("43") is fresh
+    assert store.note_skipped(["письмо 43: нет снимков"]) == ["письмо 43: нет снимков"]
+    assert store.skipped == ["письмо 43: нет снимков"]
 
 
 def test_job_replace_keeps_rebuilt_folder(tmp_path: Path) -> None:
