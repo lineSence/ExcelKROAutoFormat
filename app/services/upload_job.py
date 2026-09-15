@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -187,4 +188,4 @@ async def rebuild(
 # `run_pipeline()` использует локальную ссылку `process`, которую импортировал
 # выше. После загрузки модуля заменяем её на обёртку, отключающую прямую запись
 # справочников в шапку. Все реальные значения проходят через SheetMeta.
-install_process_hook(__import__(__name__))
+install_process_hook(sys.modules[__name__])
