@@ -1,9 +1,4 @@
-"""Переключатели, доступные прямо в интерфейсе.
-
-Настройки интерфейса хранятся в runtime.json. При наложении на Settings
-учитываются только реальные поля dataclass: внутренние ключи runtime,
-которые не являются полями Settings, не передаются в dataclasses.replace().
-"""
+"""Переключатели интерфейса и их постоянное хранилище."""
 
 from __future__ import annotations
 
@@ -18,7 +13,7 @@ from pathlib import Path
 from . import embed as embed_core
 
 logger = logging.getLogger("excelkro.runtime")
-DEFAULT_PATH = "data/runtime.json"
+DEFAULT_PATH = "/var/lib/excelkro/data/runtime.json"
 
 EMBED_FIELDS: dict[str, type] = {
     "embed_enabled": bool,
@@ -45,7 +40,6 @@ JUDGE_FIELDS: dict[str, type] = {
 }
 
 FIELDS: dict[str, type] = {**EMBED_FIELDS, **JUDGE_FIELDS}
-_CHOSEN: dict[str, Path] = {}
 
 
 def load(path: str | Path = DEFAULT_PATH) -> dict:
@@ -60,10 +54,29 @@ def load(path: str | Path = DEFAULT_PATH) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _atomic_write(file: Path, text: str) -> None:
+    """Атомарная запись: после сбоя не остаётся полуготового JSON."""
+    file.parent.mkdir(parents=True, exist_ok=True)
+    old_umask = os.umask(0o077)
+    try:
+        fd, name = tempfile.mkstemp(prefix=f".{file.name}.", dir=file.parent)
+        temp = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp, 0o600)
+            os.replace(temp, file)
+        finally:
+            temp.unlink(missing_ok=True)
+    finally:
+        os.umask(old_umask)
+
+
 def save(values: dict, path: str | Path = DEFAULT_PATH) -> None:
     file = Path(path)
-    file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(file, json.dumps(values, ensure_ascii=False, indent=2))
 
 
 def set_flag(name: str, value: bool, path: str | Path = DEFAULT_PATH) -> dict:
@@ -73,44 +86,19 @@ def set_flag(name: str, value: bool, path: str | Path = DEFAULT_PATH) -> dict:
     return values
 
 
-def _writable(folder: Path) -> bool:
+def data_dir(settings=None) -> Path:
+    """Единый каталог постоянных данных приложения."""
+    configured = str(getattr(settings, "train_store_path", "") or "")
+    path = Path(configured) if configured else Path(DEFAULT_PATH)
+    if not path.is_absolute():
+        path = Path("/var/lib/excelkro/data") / path.name
+    folder = path.parent
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        probe = folder / ".write-test"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        os.chmod(folder, 0o700)
     except OSError:
-        return False
-    return True
-
-
-def _spares() -> list[Path]:
-    spares: list[Path] = []
-    for part in os.environ.get("STATE_DIRECTORY", "").split(":"):
-        if part.strip():
-            spares.append(Path(part.strip()) / "data")
-    spares.append(Path("/var/lib/excelkro/data"))
-    spares.append(Path(tempfile.gettempdir()) / "excelkro-data")
-    return spares
-
-
-def data_dir(settings=None) -> Path:
-    store = Path(getattr(settings, "train_store_path", "") or DEFAULT_PATH)
-    wanted = store.parent if str(store.parent) not in ("", ".") else Path("data")
-    key = str(wanted)
-    chosen = _CHOSEN.get(key)
-    if chosen is not None:
-        return chosen
-    if _writable(wanted):
-        _CHOSEN[key] = wanted
-        return wanted
-    for spare in _spares():
-        if spare == wanted or not _writable(spare):
-            continue
-        logger.warning("Папка %s недоступна для записи, настройки хранятся в %s", wanted, spare)
-        _CHOSEN[key] = spare
-        return spare
-    return wanted
+        logger.warning("Не удалось подготовить каталог состояния %s", folder)
+    return folder
 
 
 def runtime_path(settings) -> str:
@@ -156,8 +144,7 @@ def set_embed(settings, enabled: bool) -> None:
 
 
 def _save_fields(settings, values: dict, allowed: dict[str, type]) -> dict:
-    path = runtime_path(settings)
-    stored = load(path)
+    stored = load(runtime_path(settings))
     for name, value in values.items():
         if name not in allowed:
             continue
@@ -177,6 +164,8 @@ def save_embed(settings, values: dict) -> dict:
     stored = _save_fields(settings, values, EMBED_FIELDS)
     if stored.get("embed_provider") not in embed_core.PROVIDERS:
         stored["embed_provider"] = "local"
+    if stored.get("embed_provider") == "openrouter":
+        stored["embed_api_url"] = embed_core.OPENROUTER_URL
     save(stored, runtime_path(settings))
     embed_core.forget_embedder()
     return stored
@@ -193,10 +182,16 @@ def forget_embed_key(settings) -> None:
 def save_judge(settings, values: dict) -> dict:
     from . import judge as judge_core
     stored = _save_fields(settings, values, JUDGE_FIELDS)
+    provider = stored.get("judge_provider")
+    if provider not in judge_core.PROVIDERS:
+        provider = judge_core.OPENROUTER
+        stored["judge_provider"] = provider
+    if provider == judge_core.OPENROUTER:
+        stored["judge_api_url"] = judge_core.OPENROUTER_URL
+    else:
+        stored["judge_api_url"] = ""
     if "logic_weight" in stored:
         stored["logic_weight"] = judge_core.clamp_weight(stored["logic_weight"])
-    if stored.get("judge_provider") not in judge_core.PROVIDERS:
-        stored["judge_provider"] = judge_core.OPENROUTER
     save(stored, runtime_path(settings))
     judge_core.forget_judge()
     return stored
@@ -253,7 +248,7 @@ def embed_status(settings) -> dict:
         "provider_label": embed_core.provider_label(provider),
         "providers": [{"value": name, "label": embed_core.provider_label(name)} for name in embed_core.PROVIDERS],
         "model": model,
-        "api_url": str(getattr(settings, "embed_api_url", "") or embed_core.OPENROUTER_URL),
+        "api_url": embed_core.OPENROUTER_URL if provider == "openrouter" else "",
         "key_tail": embed_core.mask_key(key),
         "has_key": bool(key),
         "timeout": float(getattr(settings, "embed_timeout", 20.0) or 20.0),
