@@ -20,12 +20,12 @@ class _Settings:
     type_words: tuple = ()
 
 
-def _letter(tmp_path: Path) -> Letter:
-    folder = tmp_path / "mail-photos" / "7"
+def _letter(tmp_path: Path, uid: str = "7") -> Letter:
+    folder = tmp_path / "mail-photos" / uid
     folder.mkdir(parents=True)
     file = folder / "01-photo.jpg"
     file.write_bytes(b"jpeg")
-    return Letter(uid="7", photos=[Photo(name="photo.jpg", path=str(file))])
+    return Letter(uid=uid, photos=[Photo(name="photo.jpg", path=str(file))])
 
 
 def _ready(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,3 +112,72 @@ def test_recognize_survives_failure(
     assert report["error"]
     assert report["named"] == 0
     assert letter.photos[0].title == ""
+
+
+def test_recognize_skips_named_letters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Письмо, все снимки которого уже названы, в модель второй раз не уходит."""
+    letter = _letter(tmp_path)
+    letter.photos[0].title = "Табак Свежий"
+    _ready(monkeypatch)
+
+    def fail(paths, items, settings):
+        raise AssertionError("названный снимок не должен уходить в модель")
+
+    report = mail_vision.recognize_letters(
+        [letter], [object()], _Settings(), recognizer=fail
+    )
+
+    assert report["photos"] == 0
+    assert report["skipped"] == 1
+    assert "разобрала раньше" in report["note"]
+
+
+def test_recognize_limit_leaves_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """За один заход разбирается не больше предела, остаток считается."""
+    _ready(monkeypatch)
+    sent: list[int] = []
+
+    def fake(paths, items, settings):
+        sent.append(len(paths))
+        return []
+
+    report = mail_vision.recognize_letters(
+        [_letter(tmp_path, "7"), _letter(tmp_path, "8")],
+        [object()],
+        _Settings(),
+        recognizer=fake,
+        limit=1,
+    )
+
+    assert report["photos"] == 1
+    assert report["left"] == 1
+    assert sent == [1]
+    assert "Писем осталось: 1" in mail_vision.summary(report)
+
+
+def test_recognize_button_reruns_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Кнопка «Отправить на разбор» снимает пределы: письмо выбрал человек."""
+    letter = _letter(tmp_path)
+    letter.photos[0].title = "Старое имя"
+    _ready(monkeypatch)
+    answer = PhotoResult(photo="01-photo.jpg", digest="abc")
+    answer.candidates = [Candidate(row=12, name="Табак Свежий", diff=2, price=100)]
+
+    report = mail_vision.recognize_letters(
+        [letter],
+        [object()],
+        _Settings(),
+        recognizer=lambda paths, items, settings: [answer],
+        only_new=False,
+        limit=0,
+    )
+
+    assert report["photos"] == 1
+    assert report["named"] == 1
+    assert letter.photos[0].title == "Табак Свежий"
