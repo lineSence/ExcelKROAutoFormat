@@ -13,13 +13,13 @@ class LetterStore:
         self._settings = settings
         self._lock = threading.Lock()
         self.items: list[Letter] = []
-        self.skipped = 0
+        self.skipped: list[str] = []
 
     def restore(self) -> int:
         stored = mail_store.load(self._settings)
         with self._lock:
             self.items = list(stored)
-            self.skipped = sum(1 for item in self.items if not item.photos)
+            self.skipped = []
         return len(self.items)
 
     def remember(self, fresh: list[Letter]) -> int:
@@ -27,13 +27,15 @@ class LetterStore:
         merged = mail_store.remember(self._settings, list(fresh))
         with self._lock:
             self.items = list(merged)
-            self.skipped = sum(1 for item in self.items if not item.photos)
+            self.skipped = []
         return sum(1 for item in fresh if str(item.uid) not in before)
 
-    def note_skipped(self) -> int:
+    def note_skipped(self, skipped: list[str] | None = None) -> list[str]:
+        """Запоминает причины пропуска последнего захода для страницы почты."""
+        values = [str(item) for item in (skipped or []) if str(item).strip()]
         with self._lock:
-            self.skipped = sum(1 for item in self.items if not item.photos)
-            return self.skipped
+            self.skipped = values
+            return list(self.skipped)
 
     def save(self) -> None:
         with self._lock:
@@ -49,5 +51,5 @@ class LetterStore:
         report = mail_store.forget_all(self._settings)
         with self._lock:
             self.items = []
-            self.skipped = 0
+            self.skipped = []
         return report
