@@ -18,7 +18,7 @@ from ..web.forms import DEFAULT_LOGIC
 from ..web.messages import GENERIC_ERROR
 from .letters import mail_vision_for
 from .photos import photo_notes
-from .refs_notes import note_refs
+from .refs_notes import configure_auto_confirm, note_refs
 
 logger = logging.getLogger("excelkro")
 
@@ -48,6 +48,11 @@ async def run_pipeline(
     prev_name: str = "",
     claim_decisions: dict[str, bool] | None = None,
 ) -> PipelineResult:
+    """Запустить синхронный pipeline в worker-потоке с настройками конкретной сверки."""
+    # Настройка находится в request_settings, а не в глобальном состоянии приложения.
+    # Она передаётся вместе с контекстом в worker-поток и влияет только на вызов
+    # refs.pending() внутри этого pipeline.
+    configure_auto_confirm(bool(getattr(request_settings, "refs_auto_confirm", True)))
     return await run_in_threadpool(
         process,
         source,
