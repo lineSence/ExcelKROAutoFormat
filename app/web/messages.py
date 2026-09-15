@@ -1,0 +1,11 @@
+from __future__ import annotations
+GENERIC_ERROR="Что-то пошло не так. Подробности — в журнале службы."
+EMPTY_UPLOAD="Файл пустой."
+EXPIRED="Сверка уже удалена по сроку. Загрузите файл заново."
+NO_TICKET="Работа не найдена или уже забыта. Загрузите файл заново."
+NO_JOB_FOR_LETTER="Сначала выберите сверку, к которой относится письмо."
+OTHER_STORE="Письмо относится к другому магазину или к другой дате."
+NO_LETTER="Письмо не найдено. Загрузите письма заново."
+NO_PHOTO="Снимок не найден."
+def settings_not_saved(error:Exception,runtime_path:object)->str: return f"Настройки не сохранены: {error}. Проверьте права на файл {runtime_path}."
+def key_not_cleared(what:str,error:Exception,runtime_path:object)->str: return f"{what} не удалён: {error}. Проверьте права на файл {runtime_path}."
