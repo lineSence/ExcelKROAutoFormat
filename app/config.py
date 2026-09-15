@@ -114,6 +114,7 @@ class Settings:
     default_checker: str = "Разумовский"
     refs_match_min_score: float = 0.80
     refs_confirm_min_score: float = 0.95
+    refs_auto_confirm: bool = True
     refs_days_around: int = 3
     refs_cell_reason: str = "C6"
     refs_cell_admin: str = "L3"
@@ -197,6 +198,7 @@ class Settings:
             default_checker=_text("DEFAULT_CHECKER", "Разумовский"),
             refs_match_min_score=_number("REFS_MATCH_MIN_SCORE", 0.80),
             refs_confirm_min_score=_number("REFS_CONFIRM_MIN_SCORE", 0.95),
+            refs_auto_confirm=_flag("REFS_AUTO_CONFIRM", True),
             refs_days_around=int(_number("REFS_DAYS_AROUND", 3)),
             refs_cell_reason=_text("REFS_CELL_REASON", "C6"),
             refs_cell_admin=_text("REFS_CELL_ADMIN", "L3"),
