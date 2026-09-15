@@ -19,6 +19,14 @@ def _answers(form, prefix):
     return {key[len(prefix):]: is_on(value) for key, value in form.multi_items() if key.startswith(prefix)}
 
 
+def _meta_form(form):
+    """Сохраняет все повторяющиеся поля формы, а не только последнее значение."""
+    values = dict(form)
+    for name in ("sellers", "seller_hours", "auditors"):
+        values[name] = form.getlist(name)
+    return values
+
+
 @router.get("/result/{token}", response_class=HTMLResponse)
 def result(request: Request, token: str):
     job = jobs.alive(token)
@@ -36,7 +44,7 @@ async def meta(request: Request, token: str):
     strict = is_on(form.get("strict"))
     verify = mode(form.get("verify"))
     logic = percent(form.get("logic"), job.logic)
-    sheet_meta = SheetMeta.from_form(form)
+    sheet_meta = SheetMeta.from_form(_meta_form(form))
     try:
         fresh = await rebuild(
             job,
@@ -71,7 +79,7 @@ async def meta_autosave(request: Request, token: str):
     if job is None:
         return JSONResponse({"ok": False, "error": EXPIRED}, status_code=404)
     form = await request.form()
-    job.result.sheet_meta = SheetMeta.from_form(form)
+    job.result.sheet_meta = SheetMeta.from_form(_meta_form(form))
     logger.debug("Автосохранение ручных полей: %s", token)
     return {"ok": True}
 
@@ -80,7 +88,7 @@ async def meta_autosave(request: Request, token: str):
 async def confirm(request: Request, token: str):
     job = jobs.ready(token)
     if job is None:
-        return render.error_page(request, EXPIRED, status=404)
+        return render.error_page(request, EXPIRED, status_code=404)
     form = await request.form()
     strict = is_on(form.get("strict"))
     verify = mode(form.get("verify"))
