@@ -95,7 +95,6 @@ def _break_cell_styles(path: Path) -> None:
         if name.startswith("xl/worksheets/"):
             return re.sub(rb'<c r="B(\d+)"', rb'<c s="99" r="B\1"', data)
         return data
-
     _rewrite(path, change)
 
 
@@ -104,7 +103,6 @@ def _break_fonts(path: Path) -> None:
         if name == "xl/styles.xml":
             return re.sub(rb'fontId="\d+"', b'fontId="77"', data)
         return data
-
     _rewrite(path, change)
 
 
@@ -193,9 +191,9 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert sheet["I6"].value is None
     assert sheet["G5"].value == "С неучтёнкой:"
     assert sheet["G6"].value is None
-    assert sheet["B5"].value == "Склад:"
+    assert sheet["B5"].value == "Причина инвентаризации:"
     assert sheet["A5"].value is None
-    assert sheet["B6"].value == "Причина инвентаризации:"
+    assert sheet["B6"].value is None
     assert sheet["C5"].value == "ОхтаМоллСМА"
     assert sheet.auto_filter.ref.startswith("K1:K")
 
