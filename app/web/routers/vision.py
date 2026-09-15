@@ -168,18 +168,7 @@ async def vision_confirm(
         return render.vision_page(request, error=GENERIC_ERROR, token=token, status_code=500)
 
     if chosen:
-        keep_answers(
-            job,
-            {
-                "results": [
-                    type(
-                        "Answer",
-                        (),
-                        {"candidates": [type("Candidate", (), {"row": number})()],},
-                    )()
-                ]
-            },
-        )
+        job.photo_rows.add(number)
     drop_photo(job, photo, digest)
     ok, detail = photo_notes(job, settings)
     warning = detail if not ok else ""
@@ -193,20 +182,17 @@ async def vision_confirm(
 @router.post("/vision/check", response_class=HTMLResponse)
 async def vision_check(request: Request, token: str = Form(default="")):
     try:
-        note = await run_in_threadpool(vision_core.check, base())
+        ok, note = await run_in_threadpool(vision_core.check, base())
     except Exception as error:  # noqa: BLE001
         logger.exception("Проверка распознавания не удалась")
         return render.vision_page(request, error=str(error), token=token, status_code=502)
-    if isinstance(note, tuple):
-        ok, text = note
-        return render.vision_page(
-            request,
-            message=str(text) if ok else "",
-            error=str(text) if not ok else "",
-            token=token,
-            status_code=200 if ok else 400,
-        )
-    return render.vision_page(request, message=str(note), token=token)
+    return render.vision_page(
+        request,
+        message=str(note) if ok else "",
+        error="" if ok else str(note),
+        token=token,
+        status_code=200 if ok else 400,
+    )
 
 
 @router.post("/vision/cache/clear", response_class=HTMLResponse)
