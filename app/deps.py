@@ -8,6 +8,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import Settings
 from .core import runtime
+from .state.exports import ExportStore
 from .state.jobs import JobStore
 from .state.letters import LetterStore
 from .web.forms import mode, percent
@@ -19,6 +20,9 @@ logger = logging.getLogger("excelkro")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 jobs = JobStore(settings)
 letters = LetterStore(settings)
+# Очередь выгрузок на рабочий компьютер: кнопка на странице сверки
+# ставит задание, программа-компаньон его забирает.
+exports = ExportStore()
 
 def base() -> Settings:
     return runtime.apply(settings)
