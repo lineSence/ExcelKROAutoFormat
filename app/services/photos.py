@@ -1,19 +1,57 @@
 from __future__ import annotations
+
 import logging
+
 from ..core import photo_mark, vision as vision_core
-logger=logging.getLogger("excelkro")
-def vision_items(result,settings)->list[dict]:return vision_core.items_from_rows(result,settings)
-def surplus_count(result,settings)->int:return len(vision_core.surplus_items(result,settings))
-def photo_notes(job,settings)->tuple[bool,str]:
-    rows=sorted(job.photo_rows)
-    if not rows:return True,""
-    try:changed=photo_mark.apply(job.result.output_path,rows,sheet_name=settings.sheet_name)
-    except Exception as error:
-        logger.exception("Пометки по фото не обновлены"); return False,f"Файл не обновлён: {error}"
-    return True,f"Строк с фото: {changed}."
-def keep_answers(job,report:dict)->None:
-    for row in report.get("rows",[]) or []:
-        n=int(row.get("row") or 0)
-        if n>0:job.photo_rows.add(n)
-def drop_photo(job,photo:str,digest:str)->None:
-    job.photos[:]=[x for x in job.photos if not(str(x.get("photo",""))==str(photo) and str(x.get("digest",""))==str(digest))]
+
+logger = logging.getLogger("excelkro")
+
+
+def vision_items(result, settings) -> list:
+    """Преобразует строки кластеров результата в кандидатов vision."""
+    return vision_core.items_from_rows(
+        result.clusters or [],
+        tuple(getattr(settings, "type_words", ())),
+    )
+
+
+def surplus_count(result, settings) -> int:
+    """Количество строк с фактическим излишком, доступных vision."""
+    return len(vision_core.surplus_items(vision_items(result, settings)))
+
+
+def photo_notes(job, settings) -> tuple[bool, str]:
+    rows = sorted(job.photo_rows)
+    if not rows:
+        return True, ""
+    try:
+        changed = photo_mark.apply(
+            job.result.output_path,
+            rows,
+            sheet_name=settings.sheet_name,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.exception("Пометки по фото не обновлены")
+        return False, f"Файл не обновлён: {error}"
+    return True, f"Строк с фото: {changed}."
+
+
+def keep_answers(job, report: dict) -> int:
+    """Добавляет ответы vision в состояние результата и возвращает число новых."""
+    answers = list(report.get("results") or [])
+    added = 0
+    for answer in answers:
+        for candidate in getattr(answer, "candidates", None) or []:
+            number = int(getattr(candidate, "row", 0) or 0)
+            if number > 0 and number not in job.photo_rows:
+                job.photo_rows.add(number)
+                added += 1
+    return added
+
+
+def drop_photo(job, photo: str, digest: str) -> None:
+    def same(item) -> bool:
+        return str(getattr(item, "photo", "")) == str(photo) and (
+            not digest or not getattr(item, "digest", "") or str(getattr(item, "digest", "")) == str(digest)
+        )
+    job.photos[:] = [item for item in job.photos if not same(item)]
