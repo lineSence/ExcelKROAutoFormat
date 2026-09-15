@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 
 from fastapi import Request
 from fastapi.responses import PlainTextResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import Settings
 
@@ -43,7 +42,9 @@ def _authorized(request: Request, settings: Settings) -> bool:
     if not expected_user or not expected_password or supplied is None:
         return False
     user, password = supplied
-    return hmac.compare_digest(user, expected_user) and hmac.compare_digest(password, expected_password)
+    return hmac.compare_digest(user, expected_user) and hmac.compare_digest(
+        password, expected_password
+    )
 
 
 def _origin_matches(request: Request) -> bool:
@@ -54,23 +55,43 @@ def _origin_matches(request: Request) -> bool:
     return bool(parsed.netloc) and parsed.netloc == request.headers.get("host", "")
 
 
-class SecurityMiddleware(BaseHTTPMiddleware):
+class SecurityMiddleware:
+    """Pure ASGI middleware: does not create a per-request task group.
+
+    This is important for application routes which deliberately start a background
+    asyncio task and return immediately after accepting an upload.
+    """
+
     def __init__(self, app, settings: Settings) -> None:
-        super().__init__(app)
+        self.app = app
         self.settings = settings
 
-    async def dispatch(self, request: Request, call_next):
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
         path = request.url.path
         if path not in SAFE_PUBLIC_PATHS and _auth_required(self.settings):
             if not _authorized(request, self.settings):
-                return PlainTextResponse(
+                response = PlainTextResponse(
                     "Требуется авторизация.",
                     status_code=401,
                     headers={"WWW-Authenticate": 'Basic realm="ExcelKROAutoFormat"'},
                 )
+                await response(scope, receive, send)
+                return
+
         if request.method not in SAFE_METHODS and not _origin_matches(request):
-            return PlainTextResponse("Запрос заблокирован: неверный источник.", status_code=403)
-        return await call_next(request)
+            response = PlainTextResponse(
+                "Запрос заблокирован: неверный источник.",
+                status_code=403,
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 def install_security(app, settings: Settings) -> None:
