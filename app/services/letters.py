@@ -73,11 +73,6 @@ def mail_list(store: LetterStore) -> list[dict]:
     return rows
 
 
-def name_photos(letter, job: Job, settings) -> list:
-    paths = mail_vision.letter_photos(letter)
-    return [{"path": str(path)} for path in paths]
-
-
 async def letter_vision(
     job: Job,
     letter,
@@ -105,6 +100,8 @@ async def letter_vision(
         return False, GENERIC_ERROR
     job.mail_vision = dict(report)
     keep_answers(job, report)
+    if report.get("named"):
+        store.save()
     ok, detail = photo_notes(job, settings)
     if not ok:
         return False, detail
@@ -135,5 +132,7 @@ async def mail_vision_for(
         return {}
     job.mail_vision = dict(report)
     keep_answers(job, report)
+    if report.get("named"):
+        store.save()
     photo_notes(job, settings)
     return report
