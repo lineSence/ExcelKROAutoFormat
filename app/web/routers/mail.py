@@ -9,7 +9,14 @@ from ...deps import base, jobs, letters, logger, settings
 from ...services.letters import letter_vision
 from .. import render
 from ..forms import is_on, safe_name, whole_number
-from ..messages import GENERIC_ERROR, NO_JOB_FOR_LETTER, NO_LETTER, NO_PHOTO, key_not_cleared, settings_not_saved
+from ..messages import (
+    GENERIC_ERROR,
+    NO_JOB_FOR_LETTER,
+    NO_LETTER,
+    NO_PHOTO,
+    key_not_cleared,
+    settings_not_saved,
+)
 
 router = APIRouter()
 
@@ -57,7 +64,6 @@ async def mail_settings(
     }
     try:
         await run_in_threadpool(mail_core.save_config, settings, values)
-        # Пустой список отправителей — осознанная команда снять фильтр.
         if senders is not None and not str(senders).strip():
             path = runtime.runtime_path(settings)
             stored = runtime.load(path)
@@ -152,9 +158,7 @@ async def mail_clear(request: Request, token: str = Form(default="")):
         return render.mail_page(request, error=str(error), status_code=500, token=token)
     return render.mail_page(
         request,
-        message=(
-            f"Письма удалены: память очищена, файлов на диске удалено {int(report.get('files') or 0)}."
-        ),
+        message=f"Письма удалены: память очищена, файлов на диске удалено {int(report.get('files') or 0)}.",
         token=token,
     )
 
@@ -193,12 +197,19 @@ def mail_photo(uid: str, name: str):
 
 
 @router.get("/mail/archive/{uid}")
-def mail_archive(uid: str):
+async def mail_archive(uid: str, token: str = ""):
     letter = letters.by_uid(uid)
     if letter is None:
         raise HTTPException(status_code=404, detail=NO_LETTER)
+    if token:
+        job = jobs.alive(token)
+        if job is not None:
+            try:
+                await letter_vision(job, letter, letters, settings, base)
+            except Exception:  # noqa: BLE001
+                logger.exception("Перед сборкой архива снимки не разобраны")
     try:
-        archive = mail_core.build_archive(settings, letter)
+        archive = await run_in_threadpool(mail_core.build_archive, settings, letter)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=NO_PHOTO) from error
     return FileResponse(
