@@ -106,7 +106,6 @@ async def run_upload_job(
     job = jobs.remember(result, strict, verify, logic)
     progress.ready(ticket, job.token)
 
-    # Готовый файл не должен ждать сетевой разбор фотографий.
     progress.begin(ticket, "photo")
     try:
         ok, detail = photo_notes(job, settings)
@@ -118,8 +117,6 @@ async def run_upload_job(
         logger.exception("Пометки о фото не записаны")
         progress.stage_failed(ticket, "photo", "пометки не записаны")
 
-    # Почта — необязательный сетевой этап. Он идёт после того, как сверка
-    # уже доступна по постоянному адресу.
     progress.begin(ticket, "mail")
     try:
         if letters.items:
@@ -139,7 +136,7 @@ async def run_upload_job(
             "разбор снимков не удался, сверка при этом готова",
         )
 
-    progress.finish(ticket)
+    progress.finish(ticket, job.token)
     logger.info("Сверка готова: %s", job.token)
 
 
