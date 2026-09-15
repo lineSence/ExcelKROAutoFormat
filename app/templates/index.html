@@ -32,6 +32,23 @@
 </section>
 {% endif %}
 
+<section class="card">
+	<h2>Режим разбора по умолчанию</h2>
+	<p class="card-sub">Ниже задаётся вариант, который будет выбран автоматически при новой загрузке.</p>
+	<form class="inline-setting" action="/settings/default-mode" method="post">
+		<div class="field">
+			<label class="field-label" for="default-verify">Проверка пар</label>
+			<select id="default-verify" name="verify">
+				<option value="off" {% if default_verify == "off" %}selected{% endif %}>Только детерминированная логика</option>
+				<option value="model" {% if default_verify == "model" %}selected{% endif %}>Логика + нейросеть</option>
+				<option value="llm" {% if default_verify == "llm" %}selected{% endif %}>Логика + LLM (OpenRouter)</option>
+			</select>
+		</div>
+		<button type="submit">Сохранить</button>
+	</form>
+	<p class="hint">Вариант «Логика + нейросеть» доступен только после обучения модели, а LLM — после настройки ключа. При недоступности выбранного режима программа всё равно позволит вручную выбрать другой на странице загрузки.</p>
+</section>
+
 <form class="card" action="/upload" method="post" enctype="multipart/form-data">
 	<div class="field">
 		<label class="field-label" for="file">Файл сверки</label>

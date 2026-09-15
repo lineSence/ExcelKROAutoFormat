@@ -84,8 +84,8 @@ def start(stages) -> str:
     ticket = uuid.uuid4().hex
     steps = [Stage(key=str(key), title=str(title)) for key, title in stages]
     with _lock:
-        _clean()
         _jobs[ticket] = Job(ticket=ticket, stages=steps)
+        _clean()
     return ticket
 
 

@@ -17,10 +17,18 @@ if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
 fi
 
 echo "3. Папки приложения и данных"
-sudo mkdir -p "${APP_DIR}" "${DATA_DIR}/work" "${DATA_DIR}/update"
+sudo mkdir -p "${APP_DIR}" "${DATA_DIR}/data" "${DATA_DIR}/work" "${DATA_DIR}/update"
 sudo chown "$(id -u):$(id -g)" "${APP_DIR}"
 sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}"
 sudo chmod 750 "${DATA_DIR}"
+sudo chmod 700 "${DATA_DIR}/data" "${DATA_DIR}/work" "${DATA_DIR}/update"
+# Модель из Git — это только начальное значение. После установки её копия
+# живёт в state-dir и не зависит от ProtectSystem=strict.
+if [ -f "${APP_DIR}/data/verifier.json" ] && [ ! -f "${DATA_DIR}/data/verifier.json" ]; then
+	sudo cp "${APP_DIR}/data/verifier.json" "${DATA_DIR}/data/verifier.json"
+	sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}/data/verifier.json"
+	sudo chmod 600 "${DATA_DIR}/data/verifier.json"
+fi
 
 echo "4. Окружение Python"
 python3 -m venv "${APP_DIR}/venv"
@@ -32,7 +40,7 @@ if [ ! -f "${APP_DIR}/.env" ]; then
 	cp "${APP_DIR}/deploy/.env.example" "${APP_DIR}/.env"
 fi
 sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.env"
-sudo chmod 640 "${APP_DIR}/.env"
+sudo chmod 600 "${APP_DIR}/.env"
 
 echo "6. Служба systemd"
 sudo cp "${APP_DIR}/deploy/app.service" "/etc/systemd/system/${SERVICE_NAME}.service"
@@ -40,7 +48,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now "${SERVICE_NAME}"
 
 echo "7. Обновление по кнопке (OTA)"
-# Разовая служба обновления и узкое право sudo только на её запуск.
 sudo cp "${APP_DIR}/deploy/excelkro-update@.service" "/etc/systemd/system/excelkro-update@.service"
 sudo chmod 755 "${APP_DIR}/deploy/ota-update.sh"
 sudo install -m 440 -o root -g root "${APP_DIR}/deploy/sudoers-excelkro" /etc/sudoers.d/excelkro

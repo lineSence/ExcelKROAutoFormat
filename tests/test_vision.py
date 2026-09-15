@@ -100,7 +100,7 @@ def test_settings_and_key_saved_from_interface(tmp_path):
 
     state = vision.status(settings)
     assert state["ready"] is True
-    assert state["key_tail"] == "…a2V5"
+    assert state["key_tail"] == "…"
 
     assert vision.forget_key(settings)["vision_api_key"] == ""
     assert vision.check(settings)[0] is False

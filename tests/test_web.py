@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -18,14 +20,34 @@ XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """Клиент со своей рабочей папкой: ничего не пишется в системные папки."""
-    monkeypatch.setenv("TMP_DIR", str(tmp_path / "work"))
+    """Клиент со своей рабочей папкой: ничего не пишется в системные папки.
+
+    Upload-задание в production запускается как asyncio.create_task().
+    TestClient закрывает свой event loop сразу после ответа, поэтому здесь
+    фоновой корутине нужен отдельный стабильный loop. Это меняет только тест,
+    а не production-код.
+    """
+    work = tmp_path / "work"
+    monkeypatch.setenv("TMP_DIR", str(work))
     monkeypatch.setenv("MAX_UPLOAD_MB", "5")
     for module in ("app.main", "app.config"):
         sys.modules.pop(module, None)
     import app.main as web
+    from app.web.routers import upload as upload_router
 
-    return TestClient(web.app)
+    web.settings.tmp_dir = str(work)
+    web.settings.max_upload_mb = 5
+
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    def run_background(coro):
+        return executor.submit(asyncio.run, coro)
+
+    monkeypatch.setattr(upload_router, "background", run_background)
+    try:
+        yield TestClient(web.app)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 @pytest.fixture()
@@ -113,10 +135,8 @@ def test_upload_progress_page(client: TestClient, source_bytes: bytes) -> None:
 
     page = client.get(f"/upload/progress/{ticket}", follow_redirects=False)
     if page.status_code == 200:
-        # Разбор ещё идёт: видны полоса и список этапов.
         assert "Разбор сверки" in page.text
     else:
-        # Маленький файл мог разобраться ещё до первого захода на страницу.
         assert page.status_code == 303
 
     state = _wait_done(client, ticket)
@@ -138,7 +158,9 @@ def test_unknown_ticket_is_explained(client: TestClient) -> None:
     assert state["found"] is False
 
 
-def test_unsafe_filename_is_cleaned(client: TestClient, source_bytes: bytes) -> None:
+def test_unsafe_filename_is_cleaned(
+    client: TestClient, source_bytes: bytes, tmp_path: Path
+) -> None:
     """Имя с путём не выводит запись из рабочей папки."""
     import app.main as web
 
@@ -150,7 +172,7 @@ def test_unsafe_filename_is_cleaned(client: TestClient, source_bytes: bytes) -> 
     assert not state["error"]
 
     result = web.RESULTS[state["token"]]
-    assert result.output_path.parent.parent.name == "work"
+    assert result.output_path.parent.parent == tmp_path / "work"
 
 
 def test_too_big_file_is_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

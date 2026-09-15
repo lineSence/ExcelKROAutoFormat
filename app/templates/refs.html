@@ -39,6 +39,26 @@
     </form>
 
     <section class="card">
+      <h2>Автоподтверждение распознанных параметров</h2>
+      <p class="hint">
+        При включённой настройке найденные справочниками причина, администратор и
+        ревизоры записываются в готовую сверку автоматически, даже если совпадение
+        потребовало нечёткого поиска. При выключении такие значения остаются на
+        странице результата до явного подтверждения человека.
+      </p>
+      <form method="post" action="/refs/settings" class="inline-setting">
+        <label class="choice">
+          <input type="checkbox" name="auto_confirm" value="on" {% if auto_confirm %}checked{% endif %} />
+          <span>
+            <span class="choice-title">Подтверждать распознанные параметры автоматически</span>
+            <span class="choice-note">Включено по умолчанию.</span>
+          </span>
+        </label>
+        <button type="submit">Сохранить настройку</button>
+      </form>
+    </section>
+
+    <section class="card">
       <h2>Ошибки справочников</h2>
       <p class="hint">
         Здесь видно, почему при обработке инвентаризации не подставились причина,

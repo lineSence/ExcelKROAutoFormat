@@ -1,8 +1,8 @@
-"""Переключатели, доступные прямо в интерфейсе.
+"""Переключатели интерфейса и их постоянное хранилище.
 
-Настройки интерфейса хранятся в runtime.json. При наложении на Settings
-учитываются только реальные поля dataclass: внутренние ключи runtime,
-которые не являются полями Settings, не передаются в dataclasses.replace().
+Этот модуль отделяет пользовательские настройки от базового ``Settings``.
+Значения, введённые через web-интерфейс, живут в runtime.json и применяются
+при каждом построении рабочего экземпляра настроек.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from pathlib import Path
 from . import embed as embed_core
 
 logger = logging.getLogger("excelkro.runtime")
-DEFAULT_PATH = "data/runtime.json"
+DEFAULT_PATH = "/var/lib/excelkro/data/runtime.json"
+_CHOSEN: dict[str, Path] = {}
 
 EMBED_FIELDS: dict[str, type] = {
     "embed_enabled": bool,
@@ -32,6 +33,7 @@ EMBED_FIELDS: dict[str, type] = {
 }
 
 JUDGE_FIELDS: dict[str, type] = {
+    "verify_mode": str,
     "logic_weight": float,
     "judge_provider": str,
     "judge_api_key": str,
@@ -42,13 +44,16 @@ JUDGE_FIELDS: dict[str, type] = {
     "judge_max_requests": int,
     "judge_batch": int,
     "judge_max_pairs": int,
+    # Если true, найденные справочниками значения не требуют ручного POST
+    # подтверждения на странице результата.
+    "refs_auto_confirm": bool,
 }
 
 FIELDS: dict[str, type] = {**EMBED_FIELDS, **JUDGE_FIELDS}
-_CHOSEN: dict[str, Path] = {}
 
 
 def load(path: str | Path = DEFAULT_PATH) -> dict:
+    """Прочитать JSON настроек; битый или отсутствующий файл означает «нет настроек»."""
     file = Path(path)
     if not file.is_file():
         return {}
@@ -60,23 +65,45 @@ def load(path: str | Path = DEFAULT_PATH) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def save(values: dict, path: str | Path = DEFAULT_PATH) -> None:
-    file = Path(path)
+def _atomic_write(file: Path, text: str) -> None:
+    """Атомарно заменить файл и не оставить частично записанный JSON."""
     file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
+    old_umask = os.umask(0o077)
+    try:
+        fd, name = tempfile.mkstemp(prefix=f".{file.name}.", dir=file.parent)
+        temp = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp, 0o600)
+            os.replace(temp, file)
+        finally:
+            temp.unlink(missing_ok=True)
+    finally:
+        os.umask(old_umask)
+
+
+def save(values: dict, path: str | Path = DEFAULT_PATH) -> None:
+    """Сохранить полный набор runtime-настроек через атомарную замену."""
+    file = Path(path)
+    _atomic_write(file, json.dumps(values, ensure_ascii=False, indent=2))
 
 
 def set_flag(name: str, value: bool, path: str | Path = DEFAULT_PATH) -> dict:
+    """Изменить один булевый переключатель, не затрагивая остальные значения."""
     values = load(path)
     values[name] = bool(value)
     save(values, path)
     return values
 
 
-def _writable(folder: Path) -> bool:
+def _writable(path: Path) -> bool:
+    """Проверить реальную запись, а не os.access()."""
     try:
-        folder.mkdir(parents=True, exist_ok=True)
-        probe = folder / ".write-test"
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write-test"
         probe.write_text("", encoding="utf-8")
         probe.unlink(missing_ok=True)
     except OSError:
@@ -84,46 +111,42 @@ def _writable(folder: Path) -> bool:
     return True
 
 
-def _spares() -> list[Path]:
-    spares: list[Path] = []
-    for part in os.environ.get("STATE_DIRECTORY", "").split(":"):
-        if part.strip():
-            spares.append(Path(part.strip()) / "data")
-    spares.append(Path("/var/lib/excelkro/data"))
-    spares.append(Path(tempfile.gettempdir()) / "excelkro-data")
-    return spares
-
-
 def data_dir(settings=None) -> Path:
-    store = Path(getattr(settings, "train_store_path", "") or DEFAULT_PATH)
-    wanted = store.parent if str(store.parent) not in ("", ".") else Path("data")
-    key = str(wanted)
-    chosen = _CHOSEN.get(key)
-    if chosen is not None:
-        return chosen
-    if _writable(wanted):
-        _CHOSEN[key] = wanted
-        return wanted
-    for spare in _spares():
-        if spare == wanted or not _writable(spare):
-            continue
-        logger.warning("Папка %s недоступна для записи, настройки хранятся в %s", wanted, spare)
-        _CHOSEN[key] = spare
-        return spare
-    return wanted
+    """Выбрать единый каталог постоянных данных приложения."""
+    configured = str(getattr(settings, "train_store_path", "") or "")
+    path = Path(configured) if configured else Path(DEFAULT_PATH)
+    if not path.is_absolute():
+        path = Path("/var/lib/excelkro/data") / path.name
+    folder = path.parent
+    key = str(folder)
+    if key in _CHOSEN:
+        return _CHOSEN[key]
+    if _writable(folder):
+        _CHOSEN[key] = folder
+        return folder
+    fallback = Path(tempfile.gettempdir()) / "excelkro-data"
+    if _writable(fallback):
+        logger.warning("Не удалось подготовить каталог состояния %s; используется %s", folder, fallback)
+        _CHOSEN[key] = fallback
+        return fallback
+    logger.warning("Не удалось подготовить каталог состояния %s", folder)
+    return folder
 
 
 def runtime_path(settings) -> str:
+    """Полный путь к runtime.json для текущей установки."""
     return str(data_dir(settings) / "runtime.json")
 
 
 def _as_bool(value) -> bool:
+    """Преобразовать HTML/JSON-значение в bool."""
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in ("1", "true", "yes", "on", "да")
 
 
 def _typed(name: str, value):
+    """Привести строковое значение из HTML/JSON к типу поля Settings."""
     kind = FIELDS[name]
     if kind is bool:
         return _as_bool(value)
@@ -136,28 +159,49 @@ def _typed(name: str, value):
 
 
 def apply(settings):
-    """Накладывает runtime-переключатели только на поля Settings."""
+    """Наложить сохранённые значения на базовый Settings.
+
+    URL сетевых провайдеров не берутся из runtime.json: пользователь может
+    выбрать провайдера, но допустимый endpoint задаётся кодом. Для справочников
+    флаг авто-подтверждения переводит только отдельный порог подтверждения в
+    ноль; алгоритм поиска магазина, даты и значений при этом не меняется.
+    """
     values = load(runtime_path(settings))
     fields = getattr(settings, "__dataclass_fields__", {})
     changes: dict[str, object] = {}
+    judge_provider = str(values.get("judge_provider") or getattr(settings, "judge_provider", "openrouter")).strip().lower()
     for name in FIELDS:
         if name not in values or name not in fields:
             continue
         try:
-            changes[name] = _typed(name, values[name])
+            if name == "judge_api_url":
+                changes[name] = "" if judge_provider == "gigachat" else "https://openrouter.ai/api/v1/chat/completions"
+            elif name == "embed_api_url":
+                changes[name] = embed_core.OPENROUTER_URL
+            elif name == "verify_mode":
+                value = _typed(name, values[name]).lower()
+                changes[name] = value if value in {"off", "model", "llm"} else "off"
+            elif name == "refs_auto_confirm":
+                enabled = _as_bool(values[name])
+                changes[name] = enabled
+                if enabled:
+                    changes["refs_confirm_min_score"] = 0.0
+            else:
+                changes[name] = _typed(name, values[name])
         except (TypeError, ValueError):
             logger.warning("Значение %s в runtime.json не понятно, берётся прежнее", name)
     return replace(settings, **changes) if changes else settings
 
 
 def set_embed(settings, enabled: bool) -> None:
+    """Включить/выключить эмбеддинги и сбросить кэш рабочего объекта."""
     set_flag("embed_enabled", enabled, runtime_path(settings))
     embed_core.forget_embedder()
 
 
 def _save_fields(settings, values: dict, allowed: dict[str, type]) -> dict:
-    path = runtime_path(settings)
-    stored = load(path)
+    """Обновить только разрешённые поля выбранной секции runtime-настроек."""
+    stored = load(runtime_path(settings))
     for name, value in values.items():
         if name not in allowed:
             continue
@@ -174,15 +218,19 @@ def _save_fields(settings, values: dict, allowed: dict[str, type]) -> dict:
 
 
 def save_embed(settings, values: dict) -> dict:
+    """Сохранить настройки эмбеддингов и инвалидировать их рабочий объект."""
     stored = _save_fields(settings, values, EMBED_FIELDS)
     if stored.get("embed_provider") not in embed_core.PROVIDERS:
         stored["embed_provider"] = "local"
+    if stored.get("embed_provider") == "openrouter":
+        stored["embed_api_url"] = embed_core.OPENROUTER_URL
     save(stored, runtime_path(settings))
     embed_core.forget_embedder()
     return stored
 
 
 def forget_embed_key(settings) -> None:
+    """Удалить сохранённый ключ эмбеддингов."""
     path = runtime_path(settings)
     stored = load(path)
     stored["embed_api_key"] = ""
@@ -191,19 +239,29 @@ def forget_embed_key(settings) -> None:
 
 
 def save_judge(settings, values: dict) -> dict:
+    """Сохранить параметры второго слоя, LLM-судьи и связанные флаги."""
     from . import judge as judge_core
+
     stored = _save_fields(settings, values, JUDGE_FIELDS)
+    provider = stored.get("judge_provider")
+    if provider not in judge_core.PROVIDERS:
+        provider = judge_core.OPENROUTER
+        stored["judge_provider"] = provider
+    if provider == judge_core.OPENROUTER:
+        stored["judge_api_url"] = judge_core.OPENROUTER_URL
+    else:
+        stored["judge_api_url"] = ""
     if "logic_weight" in stored:
         stored["logic_weight"] = judge_core.clamp_weight(stored["logic_weight"])
-    if stored.get("judge_provider") not in judge_core.PROVIDERS:
-        stored["judge_provider"] = judge_core.OPENROUTER
     save(stored, runtime_path(settings))
     judge_core.forget_judge()
     return stored
 
 
 def forget_judge_key(settings) -> None:
+    """Удалить сохранённый ключ LLM-судьи."""
     from . import judge as judge_core
+
     path = runtime_path(settings)
     stored = load(path)
     stored["judge_api_key"] = ""
@@ -211,12 +269,25 @@ def forget_judge_key(settings) -> None:
     judge_core.forget_judge()
 
 
+def save_default_verify_mode(settings, value: str) -> dict:
+    """Сохранить режим, который будет выбран на форме новой сверки."""
+    value = str(value or "").strip().lower()
+    if value not in {"off", "model", "llm"}:
+        raise ValueError("Неизвестный режим разбора.")
+    stored = load(runtime_path(settings))
+    stored["verify_mode"] = value
+    save(stored, runtime_path(settings))
+    return stored
+
+
 def judge_status(settings) -> dict:
+    """Вернуть диагностическое состояние LLM-судьи."""
     from . import judge as judge_core
     return judge_core.status(settings)
 
 
 def embed_status(settings) -> dict:
+    """Вернуть диагностическое состояние эмбеддингов для интерфейса."""
     provider = embed_core.provider_name(settings)
     enabled = bool(settings.embed_enabled)
     key = str(getattr(settings, "embed_api_key", "") or "").strip()
@@ -224,7 +295,6 @@ def embed_status(settings) -> dict:
     model_file = Path(settings.embed_model_path).is_file()
     tokenizer_file = Path(settings.embed_tokenizer_path).is_file()
     library = util.find_spec("onnxruntime") is not None and util.find_spec("tokenizers") is not None
-
     if provider == "openrouter":
         ready = bool(key)
         if not enabled:
@@ -245,7 +315,6 @@ def embed_status(settings) -> dict:
             reason = f"Включены, но нет файла модели {settings.embed_model_path}: venv/bin/python scripts/export_embed_model.py"
         else:
             reason = f"Включены, но нет файла словаря {settings.embed_tokenizer_path}."
-
     return {
         "enabled": enabled,
         "ready": ready,
@@ -253,7 +322,7 @@ def embed_status(settings) -> dict:
         "provider_label": embed_core.provider_label(provider),
         "providers": [{"value": name, "label": embed_core.provider_label(name)} for name in embed_core.PROVIDERS],
         "model": model,
-        "api_url": str(getattr(settings, "embed_api_url", "") or embed_core.OPENROUTER_URL),
+        "api_url": embed_core.OPENROUTER_URL if provider == "openrouter" else "",
         "key_tail": embed_core.mask_key(key),
         "has_key": bool(key),
         "timeout": float(getattr(settings, "embed_timeout", 20.0) or 20.0),

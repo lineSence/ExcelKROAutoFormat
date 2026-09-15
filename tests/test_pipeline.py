@@ -37,22 +37,18 @@ GROUPS = {
 
 
 def _accept_text(days: int = NOTICE_DAYS) -> str:
-    """Срок приёма товара на сегодняшний день обработки."""
     return (date.today() + timedelta(days=days)).strftime("%d.%m.%Y")
 
 
 def _build_source(path: Path) -> None:
-    """Собирает файл, похожий на выгрузку 1С."""
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = "TDSheet"
-
     sheet["A1"] = "Инвентаризация товаров № ИНВ-15 от 09.09.2026"
     sheet["A2"] = "Организация: ООО Торг"
     sheet["A3"] = "Склад:"
     sheet["H3"] = "Валюта"
     sheet["I3"] = "руб"
-
     row = 5
     for name, items in GROUPS.items():
         sheet.cell(row=row, column=1).value = "№"
@@ -74,7 +70,6 @@ def _build_source(path: Path) -> None:
         sheet.cell(row=row, column=6).value = sum(item[1] for item in items)
         sheet.cell(row=row, column=10).value = sum(item[2] for item in items)
         row += 2
-
     workbook.save(path)
 
 
@@ -84,35 +79,27 @@ def _rewrite(path: Path, change) -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         for item, data in items:
             new_data = change(item.filename, data)
-            if new_data is None:
-                continue
-            archive.writestr(item, new_data)
+            if new_data is not None:
+                archive.writestr(item, new_data)
 
 
 def _drop_shared_strings(path: Path) -> None:
-    """Убирает xl/sharedStrings.xml, как в выгрузке 1С."""
     _rewrite(path, lambda name, data: None if name == "xl/sharedStrings.xml" else data)
 
 
 def _break_cell_styles(path: Path) -> None:
-    """Стили ячеек ссылаются за пределы cellXfs — болезнь выгрузки 1С."""
-
     def change(name: str, data: bytes) -> bytes:
         if name.startswith("xl/worksheets/"):
             return re.sub(rb'<c r="B(\d+)"', rb'<c s="99" r="B\1"', data)
         return data
-
     _rewrite(path, change)
 
 
 def _break_fonts(path: Path) -> None:
-    """Записи стилей ссылаются на несуществующий шрифт."""
-
     def change(name: str, data: bytes) -> bytes:
         if name == "xl/styles.xml":
             return re.sub(rb'fontId="\d+"', b'fontId="77"', data)
         return data
-
     _rewrite(path, change)
 
 
@@ -128,7 +115,6 @@ def source_file(tmp_path: Path) -> Path:
 def test_warehouse_from_filename() -> None:
     assert warehouse_from_filename("ОхтаМоллСМА без форматирования.xlsx") == "ОхтаМоллСМА"
     assert warehouse_from_filename("БалтийскийТЦМДБ.xlsx") == "БалтийскийТЦМДБ"
-    # Имя из нескольких слов берётся целиком.
     assert warehouse_from_filename("Красные Ворота.xlsx") == "Красные Ворота"
     assert warehouse_from_filename("Красные Ворота 09.09.2026 (1).xlsx") == "Красные Ворота"
 
@@ -138,12 +124,8 @@ def test_output_filename() -> None:
 
 
 def test_accept_date_counts_from_processing_day() -> None:
-    """Срок приёма товара: три дня со дня обработки сверки."""
-    # Без аргумента день обработки — сегодняшний.
     assert accept_date() == _accept_text()
-    # Дата инвентаризации на срок больше не влияет.
     assert accept_date("") == _accept_text()
-    # День обработки можно задать явно: переход через конец месяца календарный.
     assert accept_date("30.09.2026") == "03.10.2026"
     assert accept_date(date(2026, 9, 9)) == "12.09.2026"
 
@@ -157,10 +139,6 @@ def test_normalize_folds_names() -> None:
 
 
 def test_broken_file_fails_without_repair(source_file: Path) -> None:
-    """Без ремонта openpyxl файл не открывает.
-
-    Тип ошибки зависит от версии openpyxl, поэтому проверяется любая из трёх.
-    """
     with pytest.raises((IndexError, KeyError, ValueError)):
         openpyxl.load_workbook(source_file)
 
@@ -168,10 +146,8 @@ def test_broken_file_fails_without_repair(source_file: Path) -> None:
 def test_repair_fixes_styles_and_strings(source_file: Path, tmp_path: Path) -> None:
     assert needs_repair(source_file) is True
     assert describe(source_file)["style_problems"] > 0
-
     repaired = repair_by_inject(source_file, tmp_path / "repaired.xlsx")
     assert needs_repair(repaired) is False
-
     sheet = openpyxl.load_workbook(repaired)["TDSheet"]
     assert sheet["A1"].value.startswith("Инвентаризация товаров")
 
@@ -180,7 +156,6 @@ def test_repair_fixes_broken_fonts(tmp_path: Path) -> None:
     path = tmp_path / "ОхтаМоллСМА без форматирования.xlsx"
     _build_source(path)
     _break_fonts(path)
-
     assert needs_repair(path) is True
     repaired = repair_by_inject(path, tmp_path / "repaired-fonts.xlsx")
     openpyxl.load_workbook(repaired)
@@ -205,33 +180,26 @@ def test_process_makes_output(source_file: Path, tmp_path: Path) -> None:
     assert result.summary["pieces"] > 0
 
     sheet = openpyxl.load_workbook(result.output_path)["TDSheet"]
-    # Шапка сдвинута вниз двумя строками блока неучтёнки.
     assert sheet["B1"].value == "Неучтёнка"
     assert sheet["B2"].value == "Неподтверждённая неучтёнка"
-    # Неподтверждённая неучтёнка всегда пустая: её вписывают руками.
     assert sheet["C2"].value is None
-    # Плашка срока приёма: день обработки сверки плюс три дня.
     assert sheet["E1"].value == f"Найденный товар принимается до:{_accept_text()}"
-    assert str(sheet["I5"].value).startswith("=SUM(")
-    assert str(sheet["I6"].value).startswith("=I5")
-    # Подписи итогов стоят в G:H.
-    assert sheet["G5"].value == "Недостача:"
-    assert sheet["G6"].value == "С неучтёнкой:"
-    # Подписи шапки в столбце B, значения в C.
-    assert sheet["B5"].value == "Склад:"
+    assert sheet["I5"].value == "=I4+C1"
+    assert sheet["I6"].value is None
+    assert sheet["G5"].value == "С неучтёнкой:"
+    assert sheet["G6"].value is None
+    assert sheet["B5"].value == "Причина инвентаризации:"
     assert sheet["A5"].value is None
-    assert sheet["B6"].value == "Причина инвентаризации:"
-    assert sheet["C5"].value == "ОхтаМоллСМА"
+    assert sheet["B6"].value in GROUPS
+    assert sheet["C5"].value is None
     assert sheet.auto_filter.ref.startswith("K1:K")
 
 
 def test_process_uses_given_folder(source_file: Path, tmp_path: Path) -> None:
-    """Веб-слой даёт свою папку: лишние папки не создаются."""
     settings = Settings.load()
     settings.tmp_dir = str(tmp_path / "work")
     folder = Path(settings.tmp_dir) / "one"
     result = process(source_file, source_file.name, settings, folder=folder)
-
     assert result.output_path.parent == folder
     assert [item.name for item in Path(settings.tmp_dir).iterdir()] == ["one"]
 
@@ -240,14 +208,12 @@ def test_sweep_removes_old_folders(tmp_path: Path) -> None:
     settings = Settings.load()
     settings.tmp_dir = str(tmp_path / "work")
     settings.result_ttl_minutes = 1
-
     old = Path(settings.tmp_dir) / "old"
     fresh = Path(settings.tmp_dir) / "fresh"
     old.mkdir(parents=True)
     fresh.mkdir(parents=True)
     past = time.time() - 3600
     os.utime(old, (past, past))
-
     assert sweep(settings) == 1
     assert not old.exists()
     assert fresh.exists()

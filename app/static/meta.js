@@ -3,6 +3,12 @@
 (function () {
 	"use strict"
 
+	var autosaveTimer = null
+
+	function metaForm() {
+		return document.querySelector("form[action^='/meta/']")
+	}
+
 	function addRow(name) {
 		var list = document.querySelector('[data-rows="' + name + '"]')
 		if (!list) return
@@ -14,6 +20,7 @@
 		})
 		list.appendChild(copy)
 		syncShareMode()
+		queueAutosave()
 		var first = copy.querySelector("input")
 		if (first) first.focus()
 	}
@@ -27,9 +34,11 @@
 			Array.prototype.forEach.call(row.querySelectorAll("input"), function (input) {
 				input.value = ""
 			})
+			queueAutosave()
 			return
 		}
 		row.remove()
+		queueAutosave()
 	}
 
 	// В режиме «поровну» часы не участвуют в расчёте, но остаются в форме:
@@ -59,6 +68,33 @@
 		if (!toggle.checked) name.value = ""
 	}
 
+	function queueAutosave() {
+		var form = metaForm()
+		if (!form) return
+		window.clearTimeout(autosaveTimer)
+		autosaveTimer = window.setTimeout(function () {
+			var action = form.getAttribute("action") || ""
+			var marker = "/meta/"
+			var start = action.indexOf(marker)
+			if (start < 0) return
+			var token = action.slice(start + marker.length).split("/")[0]
+			if (!token) return
+			var data = new FormData(form)
+			// Autosave не отправляет основную форму и не запускает пересборку.
+			// Он только обновляет SheetMeta в текущей Job. Следующее действие,
+			// которому действительно нужен новый xlsx, возьмёт уже сохранённые поля.
+			fetch("/meta/" + encodeURIComponent(token) + "/autosave", {
+				method: "POST",
+				body: data,
+				credentials: "same-origin",
+				headers: {"X-Requested-With": "XMLHttpRequest"}
+			}).catch(function () {
+				// Потеря одного запроса не считается ошибкой страницы: любое
+				// следующее изменение формы повторит autosave с актуальным состоянием.
+			})
+		}, 500)
+	}
+
 	document.addEventListener("click", function (event) {
 		var add = event.target.closest("[data-row-add]")
 		if (add) {
@@ -84,9 +120,14 @@
 		addRow(list.getAttribute("data-rows"))
 	})
 
+	document.addEventListener("input", function (event) {
+		if (event.target.closest("form[action^='/meta/']")) queueAutosave()
+	})
+
 	document.addEventListener("change", function (event) {
 		if (event.target.name === "share_mode") syncShareMode()
 		if (event.target.hasAttribute("data-night-toggle")) syncNight()
+		if (event.target.closest("form[action^='/meta/']")) queueAutosave()
 	})
 
 	syncShareMode()
