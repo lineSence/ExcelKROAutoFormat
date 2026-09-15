@@ -37,6 +37,49 @@
 	{% endif %}
 </section>
 
+<section class="card">
+	<h2>Выгрузка на рабочий компьютер</h2>
+	<p class="card-sub">
+		Нажимайте, когда разбор закончен: спорные пары решены, заявки и шапка
+		сохранены. Сервер поставит сверку в очередь, а программа-компаньон на
+		рабочем компьютере положит готовый файл и архив снимков в нужную папку.
+		Сама она ничего не выгружает — только по этой кнопке.
+	</p>
+
+	<div class="card-row">
+		<div class="actions">
+			<form method="post" action="/export/{{ token }}">
+				<input type="hidden" name="token" value="{{ token }}" />
+				<button type="submit">Выгрузить на компьютер</button>
+			</form>
+			{% if export %}
+			<form method="post" action="/export/{{ token }}/cancel">
+				<input type="hidden" name="token" value="{{ token }}" />
+				<button class="button-secondary" type="submit">Отменить выгрузку</button>
+			</form>
+			{% endif %}
+		</div>
+		<div class="actions">
+			{% if export %}
+			{% if export.status == "выгружено" %}<span class="badge badge-ok">выгружено</span>
+			{% elif export.status == "сбой" %}<span class="badge badge-warn">сбой выгрузки</span>
+			{% else %}<span class="badge">{{ export.status }}</span>{% endif %}
+			{% else %}
+			<span class="badge">в очередь не поставлена</span>
+			{% endif %}
+		</div>
+	</div>
+
+	{% if export %}
+	<p class="hint">
+		Файл: {{ export.name or output_name }}. Состояние: {{ export.status }}{% if export.note %} — {{ export.note }}{% endif %}.
+		Обновите страницу через минуту, если компаньон ещё не забрал файл.
+	</p>
+	{% else %}
+	<p class="hint">Если компаньон не запущен, файл всегда можно скачать кнопкой «Скачать» выше.</p>
+	{% endif %}
+</section>
+
 {% if claims and (claims.rows or claims.skipped or claims.problems) %}
 <section class="card">
 	<h2>Заявки реестра расхождений</h2>
