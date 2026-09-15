@@ -22,6 +22,12 @@
 несосчитанного, ФИО ночного продавца) по-прежнему попадают в форму данных
 сверки.
 
+Письмо можно отправить в нейросеть и вручную: в разделе «Почта ревизоров»
+у каждого загруженного письма есть кнопка «Отправить на разбор». Она
+нужна, когда почту забрали после обработки сверки: ответы модели
+попадают на страницу «Фото товара» по выбранной сверке, и подтверждение
+строк идёт там же, где обычно.
+
 Список писем не теряется при перезапуске службы: он читается с диска
 (`mail_store`, файл `mail-letters.json`). Без этого кнопки архивов
 пропадали после каждого перезапуска, а вернуть их было нечем — номера
@@ -114,6 +120,11 @@ EMPTY_UPLOAD = (
     "Закройте его в Excel и выберите заново."
 )
 EXPIRED = "Срок хранения истёк. Загрузите сверку заново."
+NO_JOB_FOR_LETTER = (
+    "Разбор не запускался: нет обработанной сверки. Сначала загрузите сверку "
+    "на главной странице, затем отправляйте письмо на разбор — снимки "
+    "сравниваются с излишками сверки."
+)
 
 
 def _mode(value: object) -> str:
@@ -190,8 +201,9 @@ def _drop_expired() -> None:
 def _jobs(with_surplus: bool = False) -> list[dict]:
     """Сверки, которые ещё живут в памяти.
 
-    Этот список показывается на главной странице и на странице фото: по нему
-    человек возвращается к своей работе после перехода в другой раздел.
+    Этот список показывается на главной странице, на странице фото и в
+    разделе почты: по нему человек возвращается к своей работе после
+    перехода в другой раздел и выбирает, к какой сверке отнести письмо.
     """
     jobs: list[dict] = []
     for key, result in RESULTS.items():
@@ -724,6 +736,29 @@ def _photo_notes(token: str, result: PipelineResult) -> tuple[bool, str]:
     return ok, detail
 
 
+def _keep_answers(token: str, report: dict) -> int:
+    """Кладёт ответы модели по снимкам писем на страницу «Фото товара».
+
+    Прежние ответы не стираются: человек подтверждает снимки по одному, и
+    повторный разбор другого письма не должен убирать уже показанные.
+    """
+    found = [item for item in report.get("results") or [] if item.candidates]
+    if not found:
+        return 0
+    kept = list(PHOTOS.get(token, []))
+    known = {(item.photo, item.digest) for item in kept}
+    added = 0
+    for answer in found:
+        key = (answer.photo, answer.digest)
+        if key in known:
+            continue
+        known.add(key)
+        kept.append(answer)
+        added += 1
+    PHOTOS[token] = kept
+    return added
+
+
 def _mail_vision(token: str, result: PipelineResult) -> dict:
     """Разбирает снимки писем сразу при обработке сверки.
 
@@ -736,19 +771,30 @@ def _mail_vision(token: str, result: PipelineResult) -> dict:
         MAIL_LETTERS, _vision_items(result), _base()
     )
     MAIL_VISION[token] = report
-    found = [item for item in report.get("results") or [] if item.candidates]
-    if found:
-        kept = list(PHOTOS.get(token, []))
-        known = {(item.photo, item.digest) for item in kept}
-        for answer in found:
-            key = (answer.photo, answer.digest)
-            if key in known:
-                continue
-            known.add(key)
-            kept.append(answer)
-        PHOTOS[token] = kept
+    _keep_answers(token, report)
     # Имена, которые дала нейросеть, должны дожить до скачивания архива и
     # после перезапуска службы.
+    if report.get("named"):
+        mail_store.save(settings, MAIL_LETTERS)
+    return report
+
+
+def _letter_vision(token: str, letter) -> dict:
+    """Отправляет снимки одного письма в нейросеть по кнопке в разделе почты.
+
+    Нужно, когда почту забрали уже после обработки сверки: разбор при
+    обработке тогда не видел этих снимков. Ответы модели ложатся на
+    страницу «Фото товара» по выбранной сверке, снимки получают имя
+    узнанного товара, и архив письма скачивается обработанным.
+    """
+    result = RESULTS.get(token)
+    if result is None or not result.output_path.is_file():
+        return {"note": NO_JOB_FOR_LETTER, "photos": 0, "named": 0, "results": []}
+    report = mail_vision.recognize_letters([letter], _vision_items(result), _base())
+    report["added"] = _keep_answers(token, report)
+    # Отчёт сверки не затираем: он про все письма, а здесь письмо одно.
+    if not MAIL_VISION.get(token):
+        MAIL_VISION[token] = report
     if report.get("named"):
         mail_store.save(settings, MAIL_LETTERS)
     return report
@@ -1061,6 +1107,32 @@ def _mail_note() -> dict:
     return {"letters": letters, "in_list": in_list, "list_words": words, "seller": seller}
 
 
+def _mail_list() -> list[dict]:
+    """Короткий список загруженных писем без их содержимого.
+
+    Показывается в разделе почты: тема, отправитель, дата, счёт снимков и
+    сколько из них уже разобрала нейросеть. Текст письма и подсказки здесь
+    не нужны — по кнопке письмо уходит на разбор, а текст лежит в архиве.
+    """
+    rows: list[dict] = []
+    for letter in MAIL_LETTERS:
+        hints = getattr(letter, "hints", None) or {}
+        photos = mail_vision.letter_photos(letter)
+        rows.append(
+            {
+                "uid": str(getattr(letter, "uid", "")),
+                "subject": str(getattr(letter, "subject", "") or "без темы"),
+                "sender": str(getattr(letter, "sender", "") or "неизвестно"),
+                "day": str(getattr(letter, "day", "") or ""),
+                "store": str(hints.get("store") or ""),
+                "photos": len(getattr(letter, "photos", None) or []),
+                "on_disk": len(photos),
+                "named": mail_vision.named(letter),
+            }
+        )
+    return rows
+
+
 def _letter_by_uid(uid: str):
     """Письмо по его номеру в ящике.
 
@@ -1126,14 +1198,25 @@ def _mail_page(
     message: str = "",
     error: str = "",
     status_code: int = 200,
+    token: str = "",
 ) -> HTMLResponse:
-    """Страница почты: состояние ящика, разобранные письма, настройки."""
+    """Страница почты: состояние ящика, загруженные письма, настройки.
+
+    Список сверок нужен кнопке «Отправить на разбор»: снимки письма
+    сравниваются с излишками выбранной сверки.
+    """
+    jobs = _jobs()
+    if not token and len(jobs) == 1:
+        token = jobs[0]["token"]
     return templates.TemplateResponse(
         request=request,
         name="mail.html",
         context={
             "mail": mail_core.status(settings),
             "letters": MAIL_LETTERS,
+            "rows": _mail_list(),
+            "jobs": jobs,
+            "token": token,
             "skipped": MAIL_SKIPPED,
             "message": message,
             "error": error,
@@ -1143,9 +1226,9 @@ def _mail_page(
 
 
 @app.get("/mail", response_class=HTMLResponse)
-def mail_page(request: Request):
+def mail_page(request: Request, token: str = ""):
     """Раздел «Почта ревизоров». Письма забираются только по кнопке."""
-    return _mail_page(request)
+    return _mail_page(request, token=token if token in RESULTS else "")
 
 
 @app.post("/mail/settings")
@@ -1272,6 +1355,54 @@ async def mail_fetch(request: Request):
     if cleaned:
         message += f" Удалено старых снимков: {cleaned}."
     return _mail_page(request, message=message)
+
+
+@app.post("/mail/parse/{uid}", response_class=HTMLResponse)
+async def mail_parse(request: Request, uid: str, token: str = Form(default="")):
+    """Отправляет снимки одного письма в нейросеть по кнопке.
+
+    Сверка выбирается в списке рядом с кнопкой: снимки сравниваются с её
+    излишками. Ответы модели появляются в разделе «Фото товара» по этой
+    сверке, решение по каждому снимку остаётся за человеком.
+    """
+    letter = _letter_by_uid(uid)
+    if letter is None:
+        return _mail_page(
+            request,
+            error="Письмо не найдено: заберите почту заново.",
+            status_code=404,
+        )
+
+    jobs = _jobs()
+    chosen = str(token or "").strip()
+    if chosen not in RESULTS and len(jobs) == 1:
+        chosen = jobs[0]["token"]
+    if chosen not in RESULTS:
+        return _mail_page(request, error=NO_JOB_FOR_LETTER, status_code=400)
+
+    try:
+        report = await run_in_threadpool(_letter_vision, chosen, letter)
+    except Exception:  # noqa: BLE001
+        logger.exception("Письмо не отправлено на разбор")
+        return _mail_page(
+            request,
+            error="Разбор не удался. Подробности — в журнале службы.",
+            token=chosen,
+            status_code=500,
+        )
+
+    note = str(report.get("note") or "")
+    if note:
+        return _mail_page(request, error=note, token=chosen, status_code=400)
+
+    message = (
+        f"Письмо № {uid} отправлено на разбор: снимков "
+        f"{int(report.get('photos') or 0)}, узнано товаров "
+        f"{int(report.get('named') or 0)}. Результат — в разделе «Фото "
+        "товара», подтверждайте строки там."
+    )
+    error = str(report.get("error") or "")
+    return _mail_page(request, message=message, error=error, token=chosen)
 
 
 @app.post("/mail/password/clear", response_class=HTMLResponse)
