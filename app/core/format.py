@@ -65,10 +65,10 @@ SCAN_COLUMNS = 12
 NOTICE_ROW = 1
 COL_NOTICE = 5           # E
 NOTICE_LABEL = "Найденный товар принимается до:"
-# Товар принимается три дня с момента инвентаризации,
-# текущий день не считается: дата документа плюс три дня.
+# Товар принимается три дня с дня обработки сверки, текущий день
+# не считается: дата сборки файла плюс три дня. Дата инвентаризации
+# на срок больше не влияет — файл могут собрать и через неделю.
 NOTICE_DAYS = 3
-DATE_PLACEHOLDER = "ДД.ММ.ГГГГ"
 DATE_OUT = "%d.%m.%Y"
 DATE_PATTERNS = ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%y")
 
@@ -179,16 +179,17 @@ def _date(value: object) -> date | None:
     return None
 
 
-def accept_date(doc_date: object, days: int = NOTICE_DAYS) -> str:
+def accept_date(moment: object = None, days: int = NOTICE_DAYS) -> str:
     """Срок приёма найденного товара текстом.
 
-    Три дня с момента инвентаризации, текущий день не считается:
-    дата документа плюс три дня. Если дата документа не разобрана,
-    остаётся заглушка «ДД.ММ.ГГГГ» для ручного ввода.
+    Три дня с дня обработки сверки, текущий день не считается: день
+    сборки файла плюс три дня. Дата инвентаризации в расчёт не берётся —
+    сверку могут собрать и позже, а магазину важен срок от разбора.
+
+    `moment` нужен тестам и пересборке задним числом: пустое значение
+    или нераспознанная дата означают «сегодня».
     """
-    value = _date(doc_date)
-    if value is None:
-        return DATE_PLACEHOLDER
+    value = _date(moment) or date.today()
     return (value + timedelta(days=days)).strftime(DATE_OUT)
 
 
@@ -674,13 +675,13 @@ def write_extra_total(sheet, value: float | int | None = None) -> None:
         style.style_extra_value_cell(value_cell)
 
 
-def write_notice(sheet, document: Document) -> str:
+def write_notice(sheet, moment: object = None) -> str:
     """Шаг 6.7: плашка «Найденный товар принимается до:» в E1:J1.
 
-    Дата считается сама: три дня с даты инвентаризации,
-    текущий день не считается.
+    Дата считается сама: три дня со дня обработки сверки, текущий день
+    не считается. `moment` задаёт день обработки (по умолчанию сегодня).
     """
-    text = accept_date(getattr(document, "doc_date", ""))
+    text = accept_date(moment)
     unmerge_cell(sheet, NOTICE_ROW, COL_NOTICE)
     cell = sheet.cell(row=NOTICE_ROW, column=COL_NOTICE)
     cell.value = f"{NOTICE_LABEL}{text}"
@@ -840,7 +841,8 @@ def format_workbook(
         write_net_total(sheet, header_row)
     # Блок неучтёнки и плашка срока нужны всегда, даже без итогов групп.
     write_extra_total(sheet, sheet_meta.extra_value if sheet_meta is not None else None)
-    write_notice(sheet, document)
+    # Срок приёма считается от дня обработки сверки, а не от титула файла.
+    write_notice(sheet)
 
     if previous is not None:
         shares, notes = credit_shares(previous, result.comparison.credit_sum)
