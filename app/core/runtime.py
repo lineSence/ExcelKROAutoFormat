@@ -18,11 +18,7 @@ from pathlib import Path
 from . import embed as embed_core
 
 logger = logging.getLogger("excelkro.runtime")
-# Все постоянные пользовательские параметры должны жить вне каталога кода.
 DEFAULT_PATH = "/var/lib/excelkro/data/runtime.json"
-# Внутренний кэш выбранного каталога нужен, чтобы не проверять права на запись
-# при каждом запросе. Ключом служит исходная папка, а значением — реально
-# пригодный для записи каталог (включая fallback для CI/ограниченных систем).
 _CHOSEN: dict[str, Path] = {}
 
 EMBED_FIELDS: dict[str, type] = {
@@ -37,8 +33,6 @@ EMBED_FIELDS: dict[str, type] = {
 }
 
 JUDGE_FIELDS: dict[str, type] = {
-    # verify_mode — именно режим по умолчанию. Значение конкретной загрузки
-    # может быть переопределено полем формы /upload.
     "verify_mode": str,
     "logic_weight": float,
     "judge_provider": str,
@@ -50,11 +44,10 @@ JUDGE_FIELDS: dict[str, type] = {
     "judge_max_requests": int,
     "judge_batch": int,
     "judge_max_pairs": int,
+    # Если true, найденные справочниками значения не требуют ручного POST
+    # подтверждения на странице результата.
+    "refs_auto_confirm": bool,
 }
-
-# Настройки справочников хранятся здесь, а не только в окружении: их можно
-# менять из браузера без редактирования файлов и перезапуска службы.
-JUDGE_FIELDS["refs_auto_confirm"] = bool
 
 FIELDS: dict[str, type] = {**EMBED_FIELDS, **JUDGE_FIELDS}
 
@@ -73,13 +66,7 @@ def load(path: str | Path = DEFAULT_PATH) -> dict:
 
 
 def _atomic_write(file: Path, text: str) -> None:
-    """Атомарно заменить файл и не оставить частично записанный JSON.
-
-    Сначала пишем во временный файл в той же директории, делаем fsync и только
-    затем выполняем os.replace. Это важно для runtime.json: потеря питания или
-    одновременное чтение не должны оставить некорректный JSON. Umask 077 и
-    chmod 0600 дополнительно не дают случайно сделать ключи читаемыми группой.
-    """
+    """Атомарно заменить файл и не оставить частично записанный JSON."""
     file.parent.mkdir(parents=True, exist_ok=True)
     old_umask = os.umask(0o077)
     try:
@@ -113,12 +100,7 @@ def set_flag(name: str, value: bool, path: str | Path = DEFAULT_PATH) -> dict:
 
 
 def _writable(path: Path) -> bool:
-    """Проверить реальную запись, а не os.access().
-
-    Для systemd с ProtectSystem и для контейнеров os.access может давать
-    вводящее в заблуждение представление о возможности записи. Поэтому
-    создаём и удаляем небольшой пробный файл.
-    """
+    """Проверить реальную запись, а не os.access()."""
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".write-test"
@@ -142,9 +124,6 @@ def data_dir(settings=None) -> Path:
     if _writable(folder):
         _CHOSEN[key] = folder
         return folder
-    # В тестовой среде / ограниченном deployment каталог может быть недоступен.
-    # В таком случае используем временное состояние, но обязательно пишем
-    # предупреждение в журнал, чтобы это не выглядело как штатное хранилище.
     fallback = Path(tempfile.gettempdir()) / "excelkro-data"
     if _writable(fallback):
         logger.warning("Не удалось подготовить каталог состояния %s; используется %s", folder, fallback)
@@ -183,7 +162,9 @@ def apply(settings):
     """Наложить сохранённые значения на базовый Settings.
 
     URL сетевых провайдеров не берутся из runtime.json: пользователь может
-    выбрать провайдера, но допустимый endpoint задаётся кодом.
+    выбрать провайдера, но допустимый endpoint задаётся кодом. Для справочников
+    флаг авто-подтверждения переводит только отдельный порог подтверждения в
+    ноль; алгоритм поиска магазина, даты и значений при этом не меняется.
     """
     values = load(runtime_path(settings))
     fields = getattr(settings, "__dataclass_fields__", {})
@@ -200,6 +181,11 @@ def apply(settings):
             elif name == "verify_mode":
                 value = _typed(name, values[name]).lower()
                 changes[name] = value if value in {"off", "model", "llm"} else "off"
+            elif name == "refs_auto_confirm":
+                enabled = _as_bool(values[name])
+                changes[name] = enabled
+                if enabled:
+                    changes["refs_confirm_min_score"] = 0.0
             else:
                 changes[name] = _typed(name, values[name])
         except (TypeError, ValueError):
