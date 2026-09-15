@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -18,14 +20,30 @@ XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """Клиент со своей рабочей папкой: ничего не пишется в системные папки."""
+    """Клиент со своей рабочей папкой: ничего не пишется в системные папки.
+
+    Upload-задание в production запускается как asyncio.create_task().
+    TestClient закрывает свой event loop сразу после ответа, поэтому здесь
+    фоновой корутине нужен отдельный стабильный loop. Это меняет только тест,
+    а не production-код.
+    """
     monkeypatch.setenv("TMP_DIR", str(tmp_path / "work"))
     monkeypatch.setenv("MAX_UPLOAD_MB", "5")
     for module in ("app.main", "app.config"):
         sys.modules.pop(module, None)
     import app.main as web
+    from app.web.routers import upload as upload_router
 
-    return TestClient(web.app)
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    def run_background(coro):
+        return executor.submit(asyncio.run, coro)
+
+    monkeypatch.setattr(upload_router, "background", run_background)
+    try:
+        yield TestClient(web.app)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 @pytest.fixture()
