@@ -128,12 +128,16 @@ def apply(settings):
     values = load(runtime_path(settings))
     fields = getattr(settings, "__dataclass_fields__", {})
     changes: dict[str, object] = {}
+    judge_provider = str(values.get("judge_provider") or getattr(settings, "judge_provider", "openrouter")).strip().lower()
     for name in FIELDS:
         if name not in values or name not in fields:
             continue
         try:
             if name == "judge_api_url":
-                changes[name] = embed_core.OPENROUTER_URL.replace("/embeddings", "/chat/completions")
+                if judge_provider == "gigachat":
+                    changes[name] = ""
+                else:
+                    changes[name] = "https://openrouter.ai/api/v1/chat/completions"
             elif name == "embed_api_url":
                 changes[name] = embed_core.OPENROUTER_URL
             else:
