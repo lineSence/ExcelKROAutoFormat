@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .deps import jobs, letters, logger, settings
+from .security import install_security
 from .web.forms import safe_name
 from .web.routers import ROUTERS
 
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Сверка КРО", version=__version__, lifespan=lifespan)
+    install_security(app, settings)
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
     for router in ROUTERS:
         app.include_router(router)
