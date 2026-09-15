@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse
 from ..core import claims as claims_book, mail as mail_core, mail_vision, refs_sync, runtime, update as ota, vision as vision_core
 from ..core.learning import dataset_stats
 from ..core.verify import model_status
-from ..deps import base, jobs, letters, logger, settings, settings_for, templates
+from ..deps import base, exports, jobs, letters, logger, settings, settings_for, templates
 from ..services import letters as letters_service, photos as photos_service
 from ..state.jobs import Job
 from .forms import DEFAULT_LOGIC, mode, percent
@@ -19,6 +19,12 @@ def job_cards(with_surplus=False):
 def only_job(token, cards):
     token = str(token or "")
     return token if any(str(x["token"]) == token for x in cards) else ""
+
+
+def export_state(token):
+    """Состояние выгрузки на рабочий компьютер. Не заказана — `None`."""
+    item = exports.get(token)
+    return item.view() if item is not None else None
 
 
 def index_page(request: Request, error="", strict=None, verify=None, logic=None, status=200):
@@ -82,6 +88,7 @@ def result_page(request, job: Job, message=""):
             "mail_letters": note["letters"],
             "mail_vision": report,
             "mail_others": len(link["others"]),
+            "export": export_state(job.token),
         },
     )
 

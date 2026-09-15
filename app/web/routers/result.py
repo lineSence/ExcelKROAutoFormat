@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from ...core.meta import SheetMeta
-from ...deps import base, jobs, letters, logger, settings, settings_for
+from ...deps import base, exports, jobs, letters, logger, settings, settings_for
 from ...services.samples import store_answers
 from ...services.upload_job import RebuildFailed, rebuild
 from .. import render
@@ -13,6 +13,10 @@ from ..messages import EXPIRED
 
 router = APIRouter()
 XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+EXPORT_QUEUED = (
+    "Сверка поставлена в очередь выгрузки. Программа на рабочем компьютере "
+    "заберёт файл и архив снимков в ближайшие минуты."
+)
 
 
 def _answers(form, prefix):
@@ -158,6 +162,32 @@ def download(token: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Файл уже удалён. Загрузите сверку заново.")
     return FileResponse(path=job.result.output_path, filename=job.result.output_name, media_type=XLSX_TYPE)
+
+
+@router.post("/export/{token}", response_class=HTMLResponse)
+def export(request: Request, token: str):
+    """Кнопка «Выгрузить на компьютер».
+
+    Сервер стоит за туннелем и сам до рабочего компьютера не достучится,
+    поэтому кнопка лишь ставит сверку в очередь. Файлы забирает
+    программа-компаньон. См. `docs/13-companion.md`.
+    """
+    job = jobs.alive(token)
+    if job is None:
+        return render.error_page(request, EXPIRED, status=404)
+    exports.request(token, job.result.output_name, job.warehouse)
+    logger.info("Сверка отправлена на выгрузку: %s", token)
+    return render.result_page(request, job, EXPORT_QUEUED)
+
+
+@router.post("/export/{token}/cancel", response_class=HTMLResponse)
+def export_cancel(request: Request, token: str):
+    """Отмена выгрузки, пока компаньон ещё не забрал файлы."""
+    job = jobs.alive(token)
+    if job is None:
+        return render.error_page(request, EXPIRED, status=404)
+    exports.forget(token)
+    return render.result_page(request, job, "Выгрузка отменена.")
 
 
 @router.post("/cleanup/{token}")
