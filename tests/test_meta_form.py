@@ -1,7 +1,10 @@
-"""Регрессия: повторяющиеся поля HTML-формы не должны терять строки."""
+"""Регрессии: повторяющиеся поля формы и адреса справочников в шапке."""
 
-from starlette.datastructures import FormData, MutableHeaders
+from openpyxl import Workbook
+from starlette.datastructures import FormData
 
+from app.core import refs
+from app.services import refs_notes
 from app.web.routers.result import _meta_form
 
 
@@ -29,3 +32,21 @@ def test_meta_form_keeps_all_sellers_and_hours():
     ]
     assert data["seller_hours"] == ["8", "6", "4"]
     assert data["auditors"] == ["Ревизор Один", "Ревизор Два"]
+
+
+def test_refs_write_uses_configured_cell_after_merged_header():
+    book = Workbook()
+    sheet = book.active
+    sheet["A3"] = "Склад:"
+    sheet.merge_cells("A3:L3")
+
+    info = refs.RefsInfo(admin="Казаков А.", auditors=("Иванов Иван Иванович",))
+    refs_notes._write_cells(
+        sheet,
+        info,
+        {"admin": "L3", "auditors": "L5"},
+    )
+
+    assert sheet["A3"].value == "Склад:"
+    assert sheet["L3"].value == "Казаков А."
+    assert sheet["L5"].value == "Иванов Иван Иванович"
