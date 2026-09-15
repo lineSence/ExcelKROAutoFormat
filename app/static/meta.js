@@ -3,6 +3,8 @@
 (function () {
 	"use strict"
 
+	var autosaveTimer = null
+
 	function addRow(name) {
 		var list = document.querySelector('[data-rows="' + name + '"]')
 		if (!list) return
@@ -14,6 +16,7 @@
 		})
 		list.appendChild(copy)
 		syncShareMode()
+		queueAutosave()
 		var first = copy.querySelector("input")
 		if (first) first.focus()
 	}
@@ -27,9 +30,11 @@
 			Array.prototype.forEach.call(row.querySelectorAll("input"), function (input) {
 				input.value = ""
 			})
+			queueAutosave()
 			return
 		}
 		row.remove()
+		queueAutosave()
 	}
 
 	// В режиме «поровну» часы не участвуют в расчёте, но остаются в форме:
@@ -59,6 +64,32 @@
 		if (!toggle.checked) name.value = ""
 	}
 
+	function formForAutosave() {
+		return document.querySelector("form[data-meta-form]")
+	}
+
+	function queueAutosave() {
+		var form = formForAutosave()
+		if (!form) return
+		window.clearTimeout(autosaveTimer)
+		autosaveTimer = window.setTimeout(function () {
+			var token = form.getAttribute("data-token")
+			if (!token) return
+			var data = new FormData(form)
+			// Autosave не должен имитировать отправку основной формы: его задача
+			// только обновить SheetMeta в текущей Job, не пересобирая Excel.
+			fetch("/meta/" + encodeURIComponent(token) + "/autosave", {
+				method: "POST",
+				body: data,
+				credentials: "same-origin",
+				headers: {"X-Requested-With": "XMLHttpRequest"}
+			}).catch(function () {
+				// Потеря одного autosave-запроса не должна ломать страницу.
+				// Следующее изменение формы отправит актуальное состояние снова.
+			})
+		}, 500)
+	}
+
 	document.addEventListener("click", function (event) {
 		var add = event.target.closest("[data-row-add]")
 		if (add) {
@@ -84,9 +115,14 @@
 		addRow(list.getAttribute("data-rows"))
 	})
 
+	document.addEventListener("input", function (event) {
+		if (event.target.closest("form[data-meta-form]")) queueAutosave()
+	})
+
 	document.addEventListener("change", function (event) {
 		if (event.target.name === "share_mode") syncShareMode()
 		if (event.target.hasAttribute("data-night-toggle")) syncNight()
+		if (event.target.closest("form[data-meta-form]")) queueAutosave()
 	})
 
 	syncShareMode()
