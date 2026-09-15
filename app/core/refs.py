@@ -47,6 +47,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 
 from .schedule import SCHEDULE_SHEET, debug_schedule_block, read_schedule
 
@@ -670,10 +671,36 @@ def pending(info: RefsInfo) -> RefsInfo:
     )
 
 
+def _writable_cell(sheet, address: str):
+    """Возвращает ячейку, в которую можно записать значение.
+
+    Excel допускает адреса внутри объединённого диапазона, но openpyxl
+    представляет неякорные клетки такого диапазона как `MergedCell` — их
+    атрибут `value` доступен только для чтения. Для записи используем
+    верхнюю левую (якорную) клетку объединения.
+    """
+    cell = sheet[address]
+    if not isinstance(cell, MergedCell):
+        return cell
+    for merged_range in sheet.merged_cells.ranges:
+        if cell.coordinate in merged_range:
+            anchor = merged_range.start_cell.coordinate
+            logger.debug(
+                "Адрес %s входит в объединение %s; запись выполняется в %s",
+                address,
+                merged_range.coord,
+                anchor,
+            )
+            return sheet[anchor]
+    return None
+
+
 def write_cells(sheet, info: RefsInfo, cells: dict[str, str]) -> list[str]:
     """Пишет найденные значения в ячейки готового файла.
 
     Пустые значения не пишутся: служебных пометок в сверке быть не должно.
+    Если настроенный адрес попадает внутрь объединённой области Excel,
+    значение записывается в её верхнюю левую клетку.
     """
     written: list[str] = []
     values = {
@@ -687,8 +714,12 @@ def write_cells(sheet, info: RefsInfo, cells: dict[str, str]) -> list[str]:
         if not address or not value:
             continue
         try:
-            sheet[address] = value
-        except (KeyError, ValueError):
+            cell = _writable_cell(sheet, address)
+            if cell is None:
+                logger.warning("Не удалось определить ячейку для адреса: %s", address)
+                continue
+            cell.value = value
+        except (KeyError, TypeError, ValueError, AttributeError):
             logger.warning("Неверный адрес ячейки в настройках: %s", address)
             continue
         written.append(address)
