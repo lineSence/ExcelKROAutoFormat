@@ -14,6 +14,7 @@ from . import embed as embed_core
 
 logger = logging.getLogger("excelkro.runtime")
 DEFAULT_PATH = "/var/lib/excelkro/data/runtime.json"
+_CHOSEN: dict[str, Path] = {}
 
 EMBED_FIELDS: dict[str, type] = {
     "embed_enabled": bool,
@@ -86,6 +87,17 @@ def set_flag(name: str, value: bool, path: str | Path = DEFAULT_PATH) -> dict:
     return values
 
 
+def _writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write-test"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
+
+
 def data_dir(settings=None) -> Path:
     """Единый каталог постоянных данных приложения."""
     configured = str(getattr(settings, "train_store_path", "") or "")
@@ -93,11 +105,18 @@ def data_dir(settings=None) -> Path:
     if not path.is_absolute():
         path = Path("/var/lib/excelkro/data") / path.name
     folder = path.parent
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-        os.chmod(folder, 0o700)
-    except OSError:
-        logger.warning("Не удалось подготовить каталог состояния %s", folder)
+    key = str(folder)
+    if key in _CHOSEN:
+        return _CHOSEN[key]
+    if _writable(folder):
+        _CHOSEN[key] = folder
+        return folder
+    fallback = Path(tempfile.gettempdir()) / "excelkro-data"
+    if _writable(fallback):
+        logger.warning("Не удалось подготовить каталог состояния %s; используется %s", folder, fallback)
+        _CHOSEN[key] = fallback
+        return fallback
+    logger.warning("Не удалось подготовить каталог состояния %s", folder)
     return folder
 
 
@@ -228,7 +247,6 @@ def embed_status(settings) -> dict:
     model_file = Path(settings.embed_model_path).is_file()
     tokenizer_file = Path(settings.embed_tokenizer_path).is_file()
     library = util.find_spec("onnxruntime") is not None and util.find_spec("tokenizers") is not None
-
     if provider == "openrouter":
         ready = bool(key)
         if not enabled:
@@ -249,7 +267,6 @@ def embed_status(settings) -> dict:
             reason = f"Включены, но нет файла модели {settings.embed_model_path}: venv/bin/python scripts/export_embed_model.py"
         else:
             reason = f"Включены, но нет файла словаря {settings.embed_tokenizer_path}."
-
     return {
         "enabled": enabled,
         "ready": ready,
