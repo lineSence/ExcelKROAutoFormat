@@ -33,6 +33,11 @@
 пропадали после каждого перезапуска, а вернуть их было нечем — номера
 разобранных писем лежат в `mail-state.json`, и повторный заход в ящик
 отвечал «новых писем нет».
+
+Кнопка «Удалить все письма» убирает список, скачанные вложения и память
+о разобранных номерах разом (`mail_store.forget_all`). Номера забываются
+нарочно: иначе те же письма из ящика второй раз уже не забрать, и раздел
+остался бы пустым.
 """
 
 from __future__ import annotations
@@ -1151,6 +1156,23 @@ def _letter_by_uid(uid: str):
     return None
 
 
+def _forget_letters() -> dict:
+    """Удаляет все письма по кнопке «Удалить все письма».
+
+    Из памяти уходит список писем и список пропущенных, с диска —
+    `mail-letters.json`, скачанные вложения и память о разобранных
+    номерах (`mail_store.forget_all`). Ответы модели, которые человек уже
+    видит на странице «Фото товара», здесь не трогаются: подтверждение
+    строк — его работа, и обрывать её удалением писем неправильно.
+    """
+    count = len(MAIL_LETTERS)
+    MAIL_LETTERS.clear()
+    MAIL_SKIPPED.clear()
+    report = mail_store.forget_all(settings)
+    report["letters"] = count
+    return report
+
+
 def _name_photos(letter, token: str = "") -> None:
     """Даёт снимкам письма имя товара, который узнала нейросеть.
 
@@ -1403,6 +1425,33 @@ async def mail_parse(request: Request, uid: str, token: str = Form(default="")):
     )
     error = str(report.get("error") or "")
     return _mail_page(request, message=message, error=error, token=chosen)
+
+
+@app.post("/mail/clear", response_class=HTMLResponse)
+async def mail_clear(request: Request):
+    """Удаляет все загруженные письма вместе со скачанными вложениями.
+
+    Нужно, когда в ящик попало лишнее или снимки уже разобраны и мешают.
+    Номера разобранных писем тоже забываются: без этого те же письма из
+    ящика второй раз не придут, и раздел остался бы пустым.
+    """
+    try:
+        report = await run_in_threadpool(_forget_letters)
+    except Exception:  # noqa: BLE001
+        logger.exception("Письма не удалены")
+        return _mail_page(
+            request,
+            error="Письма не удалены. Подробности — в журнале службы.",
+            status_code=500,
+        )
+
+    message = (
+        f"Письма удалены: {int(report.get('letters') or 0)}, файлов с диска "
+        f"удалено: {int(report.get('files') or 0)}. Номера разобранных писем "
+        "забыты — те же письма можно забрать из ящика заново."
+    )
+    troubles = "; ".join(str(item) for item in report.get("troubles") or [])
+    return _mail_page(request, message=message, error=troubles)
 
 
 @app.post("/mail/password/clear", response_class=HTMLResponse)
