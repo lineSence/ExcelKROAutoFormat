@@ -36,6 +36,16 @@ def test_split_form_compatibility() -> None:
     assert META_MULTI_FIELDS == ("sellers", "seller_hours", "auditors")
 
 
+def test_judge_provider_is_a_persistent_setting(monkeypatch) -> None:
+    from app.config import Settings
+
+    monkeypatch.setenv("JUDGE_PROVIDER", "gigachat")
+    loaded = Settings.load()
+
+    assert loaded.judge_provider == "gigachat"
+    assert "judge_provider" in loaded.__dataclass_fields__
+
+
 def test_letter_store_uses_core_dataclasses(tmp_path: Path, monkeypatch) -> None:
     from app.state.letters import LetterStore
 
