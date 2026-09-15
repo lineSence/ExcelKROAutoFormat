@@ -22,6 +22,13 @@ sudo chown "$(id -u):$(id -g)" "${APP_DIR}"
 sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}"
 sudo chmod 750 "${DATA_DIR}"
 sudo chmod 700 "${DATA_DIR}/data" "${DATA_DIR}/work" "${DATA_DIR}/update"
+# Модель из Git — это только начальное значение. После установки её копия
+# живёт в state-dir и не зависит от ProtectSystem=strict.
+if [ -f "${APP_DIR}/data/verifier.json" ] && [ ! -f "${DATA_DIR}/data/verifier.json" ]; then
+	sudo cp "${APP_DIR}/data/verifier.json" "${DATA_DIR}/data/verifier.json"
+	sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}/data/verifier.json"
+	sudo chmod 600 "${DATA_DIR}/data/verifier.json"
+fi
 
 echo "4. Окружение Python"
 python3 -m venv "${APP_DIR}/venv"
