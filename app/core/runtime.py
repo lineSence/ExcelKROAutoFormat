@@ -132,7 +132,12 @@ def apply(settings):
         if name not in values or name not in fields:
             continue
         try:
-            changes[name] = _typed(name, values[name])
+            if name == "judge_api_url":
+                changes[name] = embed_core.OPENROUTER_URL.replace("/embeddings", "/chat/completions")
+            elif name == "embed_api_url":
+                changes[name] = embed_core.OPENROUTER_URL
+            else:
+                changes[name] = _typed(name, values[name])
         except (TypeError, ValueError):
             logger.warning("Значение %s в runtime.json не понятно, берётся прежнее", name)
     return replace(settings, **changes) if changes else settings
