@@ -48,9 +48,61 @@
 	<p class="hint">Повторный заход уже разобранные письма не тянет: их номера хранятся в mail-state.json.</p>
 </section>
 
+<section class="card">
+	<h2>2. Загруженные письма</h2>
+	<p class="card-sub">Только перечень без содержимого. Кнопка «Отправить на разбор» шлёт снимки письма в нейросеть, а ответы появляются в разделе «Фото товара».</p>
+	{% if not rows %}
+	<p class="hint">Писем пока нет: нажмите «Забрать почту».</p>
+	{% else %}
+	{% if not jobs %}
+	<p class="alert alert-warn">Сверки в работе нет. Снимки сравниваются с излишками сверки, поэтому сначала загрузите сверку на главной странице.</p>
+	{% endif %}
+	<table class="table">
+		<thead>
+			<tr>
+				<th>№</th>
+				<th>Тема</th>
+				<th>От кого</th>
+				<th>Дата</th>
+				<th>Снимков</th>
+				<th>Узнано</th>
+				<th>Разбор</th>
+			</tr>
+		</thead>
+		<tbody>
+			{% for row in rows %}
+			<tr>
+				<td>{{ row.uid }}</td>
+				<td>{{ row.subject }}{% if row.store %} · магазин {{ row.store }}{% endif %}</td>
+				<td>{{ row.sender }}</td>
+				<td>{{ row.day or "нет" }}</td>
+				<td>{{ row.on_disk }}{% if row.photos != row.on_disk %} из {{ row.photos }}{% endif %}</td>
+				<td>{{ row.named }}</td>
+				<td>
+					<form action="/mail/parse/{{ row.uid }}" method="post">
+						{% if jobs | length > 1 %}
+						<select name="token">
+							{% for job in jobs %}
+							<option value="{{ job.token }}" {% if job.token == token %}selected{% endif %}>{{ job.warehouse }} {{ job.date }}</option>
+							{% endfor %}
+						</select>
+						{% else %}
+						<input type="hidden" name="token" value="{{ token }}" />
+						{% endif %}
+						<button class="button-secondary" type="submit" {% if not jobs or not row.on_disk %}disabled{% endif %}>Отправить на разбор</button>
+					</form>
+				</td>
+			</tr>
+			{% endfor %}
+		</tbody>
+	</table>
+	<p class="hint">После разбора откройте <a href="/vision{% if token %}?token={{ token }}{% endif %}">«Фото товара»</a>: там видны предложенные строки и подтверждение по каждому снимку. Снимки без файлов на диске (истёк срок хранения) на разбор не уходят.</p>
+	{% endif %}
+</section>
+
 {% if letters %}
 <section class="card">
-	<h2>2. Письма последнего захода</h2>
+	<h2>3. Подробно о письмах</h2>
 	{% for letter in letters %}
 	<article class="card card-inner">
 		<h3>{{ letter.subject or "Без темы" }}</h3>
@@ -119,7 +171,7 @@
 {% endif %}
 
 <section class="card">
-	<h2>3. Настройки ящика</h2>
+	<h2>4. Настройки ящика</h2>
 	<p class="card-sub">Нужен отдельный ящик для фото и <b>пароль приложения</b>, а не основной пароль от почты. В Mail.ru он создаётся в настройках безопасности ящика.</p>
 	<p class="alert alert-warn">Пароль хранится в настройках службы на сервере и на странице не показывается. Отдавайте ящику только ту почту, потеря которой не страшна.</p>
 	<form action="/mail/settings" method="post">
