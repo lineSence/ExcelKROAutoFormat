@@ -1,11 +1,8 @@
 """Переключатели, доступные прямо в интерфейсе.
 
-Некоторые настройки удобно менять без правки файлов и перезапуска службы:
-это эмбеддинги имён, LLM-судья и настройки распознавания фото. Значения
-хранятся в маленьком JSON-файле `runtime.json` и накладываются поверх
-`Settings` только для тех ключей, которые реально являются полями `Settings`.
-Ключи, используемые исключительно внутренними модулями runtime/сервисов,
-не должны передаваться в `dataclasses.replace()`.
+Настройки интерфейса хранятся в runtime.json. При наложении на Settings
+учитываются только реальные поля dataclass: внутренние ключи runtime,
+которые не являются полями Settings, не передаются в dataclasses.replace().
 """
 
 from __future__ import annotations
@@ -21,7 +18,6 @@ from pathlib import Path
 from . import embed as embed_core
 
 logger = logging.getLogger("excelkro.runtime")
-
 DEFAULT_PATH = "data/runtime.json"
 
 EMBED_FIELDS: dict[str, type] = {
@@ -49,7 +45,6 @@ JUDGE_FIELDS: dict[str, type] = {
 }
 
 FIELDS: dict[str, type] = {**EMBED_FIELDS, **JUDGE_FIELDS}
-
 _CHOSEN: dict[str, Path] = {}
 
 
@@ -112,9 +107,7 @@ def data_dir(settings=None) -> Path:
     for spare in _spares():
         if spare == wanted or not _writable(spare):
             continue
-        logger.warning(
-            "Папка %s недоступна для записи, настройки хранятся в %s", wanted, spare
-        )
+        logger.warning("Папка %s недоступна для записи, настройки хранятся в %s", wanted, spare)
         _CHOSEN[key] = spare
         return spare
     return wanted
@@ -145,22 +138,16 @@ def _typed(name: str, value):
 def apply(settings):
     """Накладывает runtime-переключатели только на поля Settings."""
     values = load(runtime_path(settings))
+    fields = getattr(settings, "__dataclass_fields__", {})
     changes: dict[str, object] = {}
-    settings_fields = getattr(settings, "__dataclass_fields__", {})
     for name in FIELDS:
-        if name not in values:
-            continue
-        if name not in settings_fields:
-            # Эти ключи нужны внутренним модулям, но не являются аргументами
-            # Settings.__init__(). Никогда не передаём их в dataclasses.replace.
+        if name not in values or name not in fields:
             continue
         try:
             changes[name] = _typed(name, values[name])
         except (TypeError, ValueError):
             logger.warning("Значение %s в runtime.json не понятно, берётся прежнее", name)
-    if not changes:
-        return settings
-    return replace(settings, **changes)
+    return replace(settings, **changes) if changes else settings
 
 
 def set_embed(settings, enabled: bool) -> None:
@@ -205,7 +192,6 @@ def forget_embed_key(settings) -> None:
 
 def save_judge(settings, values: dict) -> dict:
     from . import judge as judge_core
-
     stored = _save_fields(settings, values, JUDGE_FIELDS)
     if "logic_weight" in stored:
         stored["logic_weight"] = judge_core.clamp_weight(stored["logic_weight"])
@@ -218,9 +204,64 @@ def save_judge(settings, values: dict) -> dict:
 
 def forget_judge_key(settings) -> None:
     from . import judge as judge_core
-
     path = runtime_path(settings)
     stored = load(path)
     stored["judge_api_key"] = ""
     save(stored, path)
     judge_core.forget_judge()
+
+
+def judge_status(settings) -> dict:
+    from . import judge as judge_core
+    return judge_core.status(settings)
+
+
+def embed_status(settings) -> dict:
+    provider = embed_core.provider_name(settings)
+    enabled = bool(settings.embed_enabled)
+    key = str(getattr(settings, "embed_api_key", "") or "").strip()
+    model = str(getattr(settings, "embed_model", "") or embed_core.DEFAULT_REMOTE_MODEL)
+    model_file = Path(settings.embed_model_path).is_file()
+    tokenizer_file = Path(settings.embed_tokenizer_path).is_file()
+    library = util.find_spec("onnxruntime") is not None and util.find_spec("tokenizers") is not None
+
+    if provider == "openrouter":
+        ready = bool(key)
+        if not enabled:
+            reason = "Выключены: модель сравнивает только признаки имён, цен и количеств."
+        elif ready:
+            reason = f"Включены: векторы берутся из OpenRouter, модель {model}. Запросы идут в интернет и тратят баланс ключа."
+        else:
+            reason = "Включены, но не введён ключ OpenRouter: сверка идёт без эмбеддингов."
+    else:
+        ready = model_file and tokenizer_file and library
+        if not enabled:
+            reason = "Выключены: модель сравнивает только признаки имён, цен и количеств."
+        elif ready:
+            reason = "Включены и готовы к работе: векторы считаются на сервере."
+        elif not library:
+            reason = "Включены, но не установлены пакеты: venv/bin/pip install -r requirements-ml.txt"
+        elif not model_file:
+            reason = f"Включены, но нет файла модели {settings.embed_model_path}: venv/bin/python scripts/export_embed_model.py"
+        else:
+            reason = f"Включены, но нет файла словаря {settings.embed_tokenizer_path}."
+
+    return {
+        "enabled": enabled,
+        "ready": ready,
+        "provider": provider,
+        "provider_label": embed_core.provider_label(provider),
+        "providers": [{"value": name, "label": embed_core.provider_label(name)} for name in embed_core.PROVIDERS],
+        "model": model,
+        "api_url": str(getattr(settings, "embed_api_url", "") or embed_core.OPENROUTER_URL),
+        "key_tail": embed_core.mask_key(key),
+        "has_key": bool(key),
+        "timeout": float(getattr(settings, "embed_timeout", 20.0) or 20.0),
+        "max_requests": int(getattr(settings, "embed_max_requests", 400) or 0),
+        "model_file": model_file,
+        "tokenizer_file": tokenizer_file,
+        "library": library,
+        "model_path": settings.embed_model_path,
+        "tokenizer_path": settings.embed_tokenizer_path,
+        "reason": reason,
+    }
