@@ -1,4 +1,10 @@
-"""OTA-обновление: установка выбранной версии по кнопке."""
+"""OTA-обновление: установка выбранной версии по кнопке.
+
+Обновление выполняется отдельной systemd-службой, потому что основной
+uvicorn-процесс перезапускается в ходе установки. Этот модуль только проверяет
+состояние и запускает именованную службу; сам git/pip/restart выполняет
+``deploy/ota-update.sh``.
+"""
 
 from __future__ import annotations
 
@@ -18,11 +24,17 @@ UNIT = "excelkro-update"
 MODES = ("check", "apply")
 STATE_NAME = "update-state.json"
 LOG_NAME = "update.log"
+# Имя маленького state-файла, в котором хранится выбранная пользователем ветка.
+# Он хранится отдельно от runtime.json: выбор ветки относится к OTA, а не к
+# рабочей логике сверки.
 BRANCH_NAME = "selected-branch"
 TIMEOUT = 20
 LOG_TAIL = 40
 UNIT_FILE = Path("/etc/systemd/system/excelkro-update@.service")
 SUDOERS_FILE = Path("/etc/sudoers.d/excelkro")
+# Проверка выполняется до передачи значения shell/git: сама строка может
+# содержать только безопасные символы Git ref. Дополнительные проверки ниже
+# отсекают path traversal-подобные конструкции и пустые сегменты.
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 NO_GIT = (
     "Папка программы не является копией Git, поэтому обновлять нечего. "
@@ -46,8 +58,15 @@ def state_dir() -> Path:
 
 
 def _valid_branch(value: str) -> bool:
+    """Проверить только синтаксис имени ветки, не обращаясь к Git."""
     value = str(value or "").strip()
-    return bool(value and BRANCH_RE.fullmatch(value) and ".." not in value and not value.startswith(("/", "-")) and not value.endswith("/"))
+    return bool(
+        value
+        and BRANCH_RE.fullmatch(value)
+        and ".." not in value
+        and not value.startswith(("/", "-"))
+        and not value.endswith("/")
+    )
 
 
 def _branch_file() -> Path:
@@ -55,6 +74,7 @@ def _branch_file() -> Path:
 
 
 def _read_selected_branch() -> str:
+    """Прочитать сохранённую ветку; повреждённый state безопасно игнорируется."""
     try:
         value = _branch_file().read_text(encoding="utf-8").strip()
     except OSError:
@@ -63,14 +83,26 @@ def _read_selected_branch() -> str:
 
 
 def branch() -> str:
+    """Вернуть выбранную ветку или исторический fallback из окружения/main."""
     return _read_selected_branch() or os.environ.get("UPDATE_BRANCH", "main").strip() or "main"
 
 
 def available_branches() -> list[str]:
+    """Собрать ветки, уже известные локальному Git-клону.
+
+    Мы не делаем сетевой запрос при отрисовке страницы: список строится из
+    локальных refs. Обычная кнопка «Проверить обновления» сначала выполняет
+    fetch, после чего список на следующем открытии страницы обновится.
+    """
     if not is_git_repo():
         return ["main"]
     branches: set[str] = {"main"}
-    code, output = _run(["git", "-C", str(app_dir()), "for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin/"])
+    code, output = _run(
+        [
+            "git", "-C", str(app_dir()), "for-each-ref",
+            "--format=%(refname:strip=3)", "refs/remotes/origin/",
+        ]
+    )
     if code == 0:
         for item in output.splitlines():
             item = item.strip()
@@ -82,6 +114,8 @@ def available_branches() -> list[str]:
             item = item.strip()
             if _valid_branch(item):
                 branches.add(item)
+    # Не теряем выбранную ветку, если она была сохранена раньше, но временно
+    # отсутствует в локальном списке refs (например, после очистки кеша refs).
     selected = branch()
     if _valid_branch(selected):
         branches.add(selected)
@@ -89,6 +123,12 @@ def available_branches() -> list[str]:
 
 
 def set_branch(value: str) -> str:
+    """Проверить и атомарно сохранить выбор пользователя.
+
+    Проверка существования ветки выполняется именно до записи state. Поэтому
+    ошибочный select/POST не может оставить сервер в состоянии «выбрана ветка,
+    которой нет».
+    """
     value = str(value or "").strip()
     if not _valid_branch(value):
         raise UpdateError("Недопустимое имя ветки.")
@@ -133,6 +173,8 @@ def _systemctl() -> str:
 
 
 def _run(args: list[str]) -> tuple[int, str]:
+    # Используем список аргументов, а не shell=True. Это одновременно проще
+    # анализировать и исключает интерпретацию имени ветки как shell-команды.
     try:
         done = subprocess.run(args, capture_output=True, text=True, timeout=TIMEOUT, check=False)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as error:
@@ -153,9 +195,12 @@ def _has_sudoers() -> bool:
 
 
 def parts() -> dict:
+    """Показать, достаточно ли установлено компонентов OTA для запуска."""
     script = app_dir() / "deploy" / "ota-update.sh"
     root = as_root()
     unit = UNIT_FILE.is_file()
+    # Для root отдельное sudoers-правило не нужно: он и так может запустить
+    # systemd. Для непривилегированного процесса правило обязательно.
     sudoers = root or _has_sudoers()
     runnable = script.is_file()
     missing: list[str] = []
@@ -207,10 +252,13 @@ def read_log(tail: int = LOG_TAIL) -> str:
 
 
 def status() -> dict:
+    """Собрать всё, что нужно странице /update, без запуска самого обновления."""
     state = read_state()
     selected = branch()
     busy = running("apply") or running("check")
     state_branch = str(state.get("branch") or "")
+    # `behind` относится только к той же ветке. Иначе после переключения с main
+    # на fix/* на странице мог бы остаться старый результат предыдущей проверки.
     behind = int(state.get("behind") or 0) if state_branch in ("", selected) else 0
     return {
         "version": __version__,
@@ -229,6 +277,12 @@ def status() -> dict:
 
 
 def start(mode: str, selected_branch: str | None = None) -> None:
+    """Проверить параметры и запустить разовую systemd-службу OTA.
+
+    Сама функция ничего не обновляет синхронно. `--no-block` позволяет сразу
+    вернуть HTTP-ответ, а отдельная служба продолжает работу после перезапуска
+    uvicorn.
+    """
     if mode not in MODES:
         raise UpdateError("Неизвестный режим обновления.")
     if not is_git_repo():
