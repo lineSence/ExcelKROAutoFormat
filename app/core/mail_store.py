@@ -12,6 +12,11 @@
 в файл они не попадают. Письмо, у которого на диске не осталось ни
 одного файла (снимки убрал срок хранения), при чтении отбрасывается:
 архив из него собрать уже нельзя.
+
+Кнопка «Удалить все письма» в разделе почты зовёт `forget_all`: список
+писем, скачанные вложения и память о разобранных номерах убираются
+разом. Номера забываются намеренно — иначе те же письма второй раз из
+ящика уже не забрать, и страница осталась бы пустой.
 """
 
 from __future__ import annotations
@@ -19,10 +24,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import shutil
 from pathlib import Path
 
 from . import runtime
-from .mail import Letter, Photo
+from .mail import Letter, Photo, load_state, photos_dir, save_state
 
 logger = logging.getLogger("excelkro.mail_store")
 
@@ -157,3 +163,47 @@ def remember(settings, letters: list) -> list[Letter]:
     merged = merged[:LIMIT]
     save(settings, merged)
     return merged
+
+
+def forget_all(settings) -> dict:
+    """Удаляет все письма: список, скачанные вложения и номера писем.
+
+    Это работа кнопки «Удалить все письма». Убираются три вещи:
+
+    * `mail-letters.json` — список писем для страниц;
+    * папка `mail-photos` — скачанные снимки и прочие вложения;
+    * список `seen` в `mail-state.json` — память о разобранных номерах.
+
+    Номера забываются нарочно: без этого те же письма из ящика второй раз
+    не придут («новых писем нет»), и вернуть удалённое было бы нечем.
+    Ответы нейросети по снимкам на странице «Фото товара» здесь не
+    трогаются: их человек подтверждает сам.
+
+    Беда с диском не роняет страницу: о ней рассказывается в `troubles`.
+    """
+    troubles: list[str] = []
+
+    file = store_path(settings)
+    try:
+        file.unlink(missing_ok=True)
+    except OSError as error:
+        troubles.append(f"файл списка писем не удалён: {error}")
+
+    folder = photos_dir(settings)
+    files = 0
+    if folder.is_dir():
+        for item in folder.rglob("*"):
+            if item.is_file():
+                files += 1
+        shutil.rmtree(folder, ignore_errors=True)
+        if folder.is_dir():
+            troubles.append(f"папка снимков очищена не целиком: {folder}")
+
+    state = load_state(settings)
+    state["seen"] = []
+    try:
+        save_state(settings, state)
+    except OSError as error:
+        troubles.append(f"память о разобранных письмах не очищена: {error}")
+
+    return {"files": files, "troubles": troubles}
