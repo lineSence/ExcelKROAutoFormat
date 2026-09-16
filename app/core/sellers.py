@@ -27,7 +27,8 @@ from pathlib import Path
 import openpyxl
 
 from .guard import check_archive
-from .meta import Seller, hours_text
+from .meta import Seller
+from .meta import _hours as hours_text
 from .repair import repair
 
 logger = logging.getLogger("excelkro.sellers")
