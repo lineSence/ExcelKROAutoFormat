@@ -99,9 +99,11 @@ def vision_page(request, message="", error="", results=None, token="", status_co
     cards = job_cards(True)
     token = only_job(token, cards)
     job = jobs.get(token)
-    # Карточки — все снимки архива сверки. Таблицей кандидатов ниже идут
-    # только снимки, отправленные в ручной подбор, и загруженные руками.
+    # Карточки — все снимки архива сверки, к ним же список плюсующих товаров
+    # для ручного выбора по кнопке «Нет». Таблицей кандидатов ниже идут только
+    # фото, загруженные на странице руками: их в архиве письма нет.
     photos = photo_cards.cards(job, letters) if job else []
+    options = photo_cards.options(job, current) if job else []
     shown = results if results is not None else (photo_cards.manual_items(job, letters) if job else [])
     return templates.TemplateResponse(
         request=request,
@@ -113,6 +115,7 @@ def vision_page(request, message="", error="", results=None, token="", status_co
             "jobs": cards,
             "token": token,
             "photo_cards": photos,
+            "photo_options": options,
             "results": shown,
             "message": message,
             "error": error,

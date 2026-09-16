@@ -39,7 +39,7 @@
 {% if photo_cards %}
 <section class="card" data-photo-grid>
 	<h2>Снимки из архива</h2>
-	<p class="card-sub">Все снимки из архива выбранной сверки. «Да» — подтверждает строку, которую предложила модель: с неё снимается пометка «нет фото», а файл в архиве получает имя узнанного товара. «Нет» — снимок уходит в ручной подбор строки ниже, пометка «нет фото» остаётся. Карточка сворачивается на месте, страница не перезагружается. Файл сверки после ответов скачайте заново.</p>
+	<p class="card-sub">Все снимки из архива выбранной сверки. «Да» — подтверждает строку, которую предложила модель: с неё снимается пометка «нет фото», а файл в архиве получает имя узнанного товара. «Нет» — открывает список плюсующих товаров сверки: выберите строку руками. Первый пункт списка — «Не товар»: строка не подтверждается, а имя снимка в архиве остаётся ровно таким, каким пришло в письме. Карточка сворачивается на месте, страница не перезагружается. Файл сверки после ответов скачайте заново.</p>
 	<div class="photo-grid">
 		{% for item in photo_cards %}
 		<figure class="photo-card{% if item.state %} photo-card-done{% endif %}" data-photo-card data-key="{{ item.key }}" data-state="{{ item.state }}">
@@ -49,7 +49,7 @@
 				{% if item.row %}
 				<span class="hint">Строка {{ item.row }} — {{ item.guess }}</span>
 				{% else %}
-				<span class="hint">Модель строку не предложила: нажмите «Нет» и подберите строку руками.</span>
+				<span class="hint">Модель строку не предложила: нажмите «Нет» и выберите товар из списка.</span>
 				{% endif %}
 				{% if item.text %}<span class="hint">Прочитано: {{ item.text }}</span>{% endif %}
 			</figcaption>
@@ -60,14 +60,24 @@
 					<input type="hidden" name="decision" value="yes" />
 					<button type="submit"{% if not item.row %} disabled{% endif %}>Да</button>
 				</form>
+				<button class="button-secondary" type="button" data-photo-no>Нет</button>
+			</div>
+			<div class="photo-pick" data-photo-pick>
 				<form action="/vision/answer" method="post" data-photo-form>
 					<input type="hidden" name="token" value="{{ token }}" />
 					<input type="hidden" name="key" value="{{ item.key }}" />
-					<input type="hidden" name="decision" value="no" />
-					<button class="button-secondary" type="submit">Нет</button>
+					<input type="hidden" name="decision" value="pick" />
+					<label for="photo-pick-{{ loop.index }}">Товар из сверки</label>
+					<select id="photo-pick-{{ loop.index }}" name="row">
+						<option value="0">Не товар</option>
+						{% for option in photo_options %}
+						<option value="{{ option.row }}"{% if option.row == item.row %} selected{% endif %}>Строка {{ option.row }} — {{ option.name }} ({{ "%g" | format(option.diff) }} шт.)</option>
+						{% endfor %}
+					</select>
+					<button class="button-secondary" type="submit">Сохранить выбор</button>
 				</form>
 			</div>
-			<p class="photo-note" data-photo-note{% if not item.state %} hidden{% endif %}>{% if item.state == "yes" %}Строка подтверждена.{% elif item.state %}Снимок в ручном подборе строки.{% endif %}</p>
+			<p class="photo-note" data-photo-note{% if not item.state %} hidden{% endif %}>{% if item.state == "notitem" %}Отмечено «не товар»: имя снимка в архиве осталось как в письме.{% elif item.state %}Строка подтверждена.{% endif %}</p>
 		</figure>
 		{% endfor %}
 	</div>
@@ -110,7 +120,7 @@
 {% if results %}
 <section class="card">
 	<h2>2. Что распознано</h2>
-	<p class="card-sub">Ручной подбор строки: снимки, по которым нажали «Нет», и фото, загруженные здесь руками. Отметьте строку, которой соответствует товар на фото. Ответ сохраняется как пример, а с подтверждённой строки снимается пометка «нет фото». После ответа скачайте файл заново.</p>
+	<p class="card-sub">Фото, загруженные здесь руками: в архиве письма их нет, поэтому карточкой они не показываются. Отметьте строку, которой соответствует товар на фото. Ответ сохраняется как пример, а с подтверждённой строки снимается пометка «нет фото». После ответа скачайте файл заново.</p>
 	{% for item in results %}
 	<div class="cluster">
 		<h3>{{ item.photo }}</h3>
