@@ -83,7 +83,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Таблицы с небольшим числом строк читаются напрямую. Для больших таблиц
   // показываем только заголовок и количество строк; содержимое не удаляется.
+  // Таблица, которую сервер уже положил в <details>, повторно не заворачивается:
+  // иначе до данных пришлось бы кликать дважды.
   document.querySelectorAll("table").forEach((table) => {
+    if (table.closest("details")) return;
     const rows = table.querySelectorAll("tbody tr");
     if (rows.length > 15 && table.parentElement) {
       const parent = table.parentElement;
