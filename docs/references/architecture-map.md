@@ -11,20 +11,21 @@
 | `app/config.py` | `Settings` — админский слой настроек |
 | `app/security.py` | Basic, проверка источника, `SecurityMiddleware` |
 | `app/deps.py` | общие зависимости и доступ к памяти |
-| `app/core/` | предметная логика (29 модулей) |
+| `app/core/` | предметная логика (30 модулей) |
 | `app/state/` | состояние в памяти процесса |
 | `app/web/` | роутеры, формы, сообщения, рендер |
 | `app/services/` | длительные задачи (разбор загрузки) |
 | `app/templates/`, `app/static/` | Jinja2-шаблоны без сборки |
 | `companion/` | агент для сетевой папки на Windows |
 | `deploy/` | юниты, скрипты, sudoers, пример окружения |
-| `tests/` | 22 файла тестов, без сети |
+| `tests/` | 23 файла тестов, без сети |
 
 ## Предметная логика (`app/core/`)
 
 | Задача | Модули |
 | --- | --- |
 | разбор и сборка файла | `parse.py`, `pipeline.py`, `format.py`, `style.py`, `repair.py`, `meta.py` |
+| продавцы и часы из файла | `sellers.py` (`read`, `read_sheet`, `warehouse_from_filter`, `SellersError`) |
 | пересорт и сверка | `resort.py`, `prev.py`, `report.py`, `claims.py` |
 | справочники | `refs.py`, `refs_sync.py` |
 | проверка моделями | `verify.py`, `embed.py`, `judge.py`, `learning.py` |
@@ -36,11 +37,24 @@
 `vision.py` (~37 КБ), `refs.py` (~30 КБ). При правке читается нужная
 функция, а не весь файл.
 
+## Загрузка: три файла и четыре этапа
+
+Форма на `app/templates/index.html` принимает поля `file` (сверка),
+`prev` (предыдущая инвентаризация) и `sellers` (продавцы и часы,
+`[DOM-SELLERS-FILE]`). Второй и третий файлы необязательны.
+
+`UPLOAD_STAGES` в `app/services/upload_job.py`: `save` → `sellers` → `parse` →
+`photo` → `mail`. Этап `sellers` вызывает `read_sellers()`, тот —
+`app/core/sellers.read()`, и отдаёт `SheetMeta(sellers=..., share_mode="hours")`
+в `run_pipeline`. Ошибка разбора не валит загрузку: этап помечается
+сбоем, сверка собирается без продавцов, их можно вписать вручную
+на странице результата.
+
 ## Маршруты (`app/web/routers/`)
 
 | Файл | Главное |
 | --- | --- |
-| `upload.py` | `POST /upload`, `GET /upload/state/{билет}`, страница хода |
+| `upload.py` | `POST /upload` (файлы `file`, `prev`, `sellers`), `GET /upload/state/{билет}`, страница хода |
 | `result.py` | `/result/{token}`, `/meta`, `/confirm`, `/claims`, `/download`, `/export`, `/cleanup` |
 | `refs.py` | справочники и подтверждение значений |
 | `training.py` | эмбеддинги, судья, проверки ключей |
