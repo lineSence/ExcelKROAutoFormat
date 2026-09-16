@@ -44,7 +44,21 @@
 	<p class="hint">Обучена {{ model.trained_at }} на {{ model.samples }} примерах. Файл: {{ model.path }}</p>
 	{% endif %}
 	{% if stats.sources %}
-	<p class="hint">Источники примеров: {{ stats.sources | join(", ") }}</p>
+	<details class="compact-details">
+		<summary>Источники примеров: файлов {{ stats.sources | length }}, примеров {{ stats.total }}</summary>
+		<div class="compact-content table-wrap">
+			<table>
+				<thead>
+					<tr><th>Файл</th><th class="num">Примеров</th></tr>
+				</thead>
+				<tbody>
+					{% for name, count in stats.sources %}
+					<tr><td>{{ name }}</td><td class="num">{{ count }}</td></tr>
+					{% endfor %}
+				</tbody>
+			</table>
+		</div>
+	</details>
 	{% endif %}
 </section>
 
