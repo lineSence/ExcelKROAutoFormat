@@ -1,23 +1,29 @@
-"""Карточки снимков архива и ответы человека «Да»/«Нет».
+"""Карточки снимков архива и ответы человека по ним.
 
 Раньше подтверждение шло только таблицей кандидатов: человек искал строку
 в списке и на каждый снимок получал перезагрузку страницы. Теперь на
 странице «Фото товара» сразу видна сетка карточек — все снимки из архива
-сверки, — и решение принимается двумя кнопками:
+сверки, — и решение принимается на самой карточке:
 
 * «Да» — подтверждается строка, которую предложила модель. Номер уходит в
   `job.photo_rows`, пометка «нет фото» с этой строки снимается
   (`photos.photo_notes`), а снимок в архиве письма получает имя узнанного
   товара (`Photo.title` — отсюда берётся имя файла в архиве).
-* «Нет» — имя снимка в архиве стирается, пометка «нет фото» на строке
-  остаётся, а снимок уходит в ручной подбор: он остаётся в `job.photos` и
-  показывается таблицей кандидатов ниже.
+* «Нет» — открывается выпадающий список плюсующих товаров сверки
+  (правка владельца 16.09.2026). Человек выбирает строку руками: она
+  подтверждается так же, как по кнопке «Да», а имя файла в архиве
+  становится именем выбранного товара.
+* «Не товар» — первый пункт того же списка. Строка не подтверждается,
+  пометка «нет фото» остаётся, а **имя снимка в архиве не меняется:
+  остаётся ровно таким, каким пришло в письме**. Для этого `Photo.title`
+  не трогается вовсе: `mail_archive.entry_name` без него берёт
+  собственное имя вложения.
 
-Ответ пишется в базу примеров (`vision.remember`) в обоих случаях: по ней
+Ответ пишется в базу примеров (`vision.remember`) в любом случае: по ней
 считается точность на своих фото.
 
 Модуль ничего не решает за человека и не падает наружу: не нашёлся снимок
-или модель не предложила строку — возвращается текст для страницы.
+или строка выбрана не из списка — возвращается текст для страницы.
 """
 
 from __future__ import annotations
@@ -31,13 +37,22 @@ from .photos import drop_photo, photo_notes
 
 logger = logging.getLogger("excelkro")
 
+# Ответы, которые принимает маршрут.
 YES = "yes"
-NO = "no"
-MANUAL = "manual"
+PICK = "pick"
+
+# Состояния карточки после ответа.
+DONE = "yes"
+NOT_ITEM = "notitem"
+
+# Значение пункта «Не товар» в выпадающем списке.
+NOT_ITEM_ROW = 0
+NOT_ITEM_LABEL = "Не товар"
 
 NO_CARD = "Снимок не найден: архив письма мог уехать по сроку хранения."
-NO_ROW = "Модель строку не предложила: нажмите «Нет» и подберите строку руками."
-NO_DECISION = "Ответ не понят: нужно «Да» или «Нет»."
+NO_ROW = "Модель строку не предложила: нажмите «Нет» и выберите товар из списка."
+NO_PICK = "Такой строки в сверке нет: выберите товар из списка или «Не товар»."
+NO_DECISION = "Ответ не понят: нужно «Да» или выбор из списка."
 
 
 def card_key(uid, name) -> str:
@@ -77,6 +92,21 @@ def _photo_files(letter) -> list:
     return files
 
 
+def options(job, settings) -> list[dict]:
+    """Плюсующие товары сверки для выпадающего списка ручного выбора.
+
+    Тот же набор, что уходит модели: строки с излишком (`F > 0`), крупные
+    первыми. Минусующие строки в список не попадают — фото товара
+    объясняет излишек, а не недостачу.
+    """
+    rows = getattr(job.result, "clusters", None) or []
+    items = vision_core.items_from_rows(rows, tuple(getattr(settings, "type_words", ())))
+    return [
+        {"row": item.row, "name": item.name, "diff": item.diff}
+        for item in vision_core.surplus_items(items)
+    ]
+
+
 def cards(job, store) -> list[dict]:
     """Все снимки архива сверки карточками для страницы «Фото товара»."""
     out: list[dict] = []
@@ -105,22 +135,14 @@ def cards(job, store) -> list[dict]:
 
 
 def manual_items(job, store) -> list:
-    """Что показывать таблицей кандидатов: ручной подбор и снимки с диска.
+    """Что показывать таблицей кандидатов ниже сетки.
 
-    Снимки архива, по которым ответа ещё нет, второй раз списком не идут:
-    они уже видны карточками. Остаются отправленные в ручной подбор и
-    снимки, загруженные руками на этой же странице.
+    Снимки архива идут только карточками: выбор строки делается там же,
+    в выпадающем списке. Таблица остаётся для фото, загруженных руками на
+    этой странице, — их в архиве письма нет.
     """
-    known = {}
-    for card in cards(job, store):
-        known[card["name"]] = card["state"]
-    keep = []
-    for item in job.photos:
-        name = str(getattr(item, "photo", "") or "")
-        if name in known and known[name] != MANUAL:
-            continue
-        keep.append(item)
-    return keep
+    known = {card["name"] for card in cards(job, store)}
+    return [item for item in job.photos if str(getattr(item, "photo", "") or "") not in known]
 
 
 def _set_title(store, uid: str, name: str, title: str) -> None:
@@ -143,48 +165,84 @@ def _set_title(store, uid: str, name: str, title: str) -> None:
         logger.exception("Имя снимка в архиве не сохранено")
 
 
-def apply_answer(job, store, settings, key: str, decision: str) -> tuple[bool, str, str]:
-    """Записывает ответ по карточке. Возвращает (получилось, состояние, текст)."""
+def _chosen(job, settings, card: dict, row: int) -> tuple[int, str, str]:
+    """Разбирает выбор человека: (строка, товар, ошибка)."""
+    if row <= NOT_ITEM_ROW:
+        return NOT_ITEM_ROW, "", ""
+    for option in options(job, settings):
+        if int(option["row"]) == row:
+            return row, str(option["name"]), ""
+    # Строка модели могла остаться в списке карточки после пересборки файла.
+    if row == card["row"] and card["guess"]:
+        return row, card["guess"], ""
+    return 0, "", NO_PICK
+
+
+def apply_answer(
+    job,
+    store,
+    settings,
+    key: str,
+    decision: str,
+    row: int = 0,
+) -> tuple[bool, str, str]:
+    """Записывает ответ по карточке. Возвращает (получилось, состояние, текст).
+
+    `decision`:
+
+    * `yes` — согласие со строкой модели;
+    * `pick` — ручной выбор из списка: `row` больше нуля, либо ноль,
+      если выбран пункт «Не товар».
+    """
     choice = str(decision or "").strip().lower()
-    if choice not in (YES, NO):
+    if choice not in (YES, PICK):
         return False, "", NO_DECISION
     card = next((item for item in cards(job, store) if item["key"] == str(key or "")), None)
     if card is None:
         return False, "", NO_CARD
-    yes = choice == YES
-    if yes and card["row"] <= 0:
-        return False, "", NO_ROW
 
+    if choice == YES:
+        if card["row"] <= 0:
+            return False, "", NO_ROW
+        number, name, source = card["row"], card["guess"], card["source"] or "модель"
+    else:
+        number, name, trouble = _chosen(job, settings, card, int(row or 0))
+        if trouble:
+            return False, "", trouble
+        source = "рука"
+
+    picked = number > 0
     try:
         vision_core.remember(
             settings,
             card["name"],
             card["digest"],
             card["text"],
-            card["row"] if yes else 0,
-            card["guess"],
-            yes,
-            card["source"],
+            number,
+            name,
+            picked,
+            source,
         )
     except Exception:  # noqa: BLE001
         logger.exception("Ответ по снимку не сохранён в базу примеров")
 
-    if yes:
-        job.photo_rows.add(card["row"])
-        job.photo_answers[card["key"]] = YES
-        drop_photo(job, card["name"], card["digest"])
-        _set_title(store, card["uid"], card["name"], card["guess"])
+    if picked:
+        job.photo_rows.add(number)
+        job.photo_answers[card["key"]] = DONE
+        _set_title(store, card["uid"], card["name"], name)
     else:
+        # «Не товар»: строка модели не подтверждается, а имя файла в архиве
+        # остаётся тем, что пришло в письме, — `title` не трогаем.
         if card["row"] > 0:
             job.photo_rows.discard(card["row"])
-        job.photo_answers[card["key"]] = MANUAL
-        _set_title(store, card["uid"], card["name"], "")
+        job.photo_answers[card["key"]] = NOT_ITEM
+    drop_photo(job, card["name"], card["digest"])
 
     ok, detail = photo_notes(job, settings)
     if not ok:
         return False, "", detail
-    if yes:
-        text = f"Строка {card['row']} подтверждена: {card['guess']}."
+    if picked:
+        text = f"Строка {number} подтверждена: {name}."
     else:
-        text = "Снимок ушёл в ручной подбор строки — раздел «Что распознано» ниже."
-    return True, YES if yes else MANUAL, f"{text} {detail}".strip()
+        text = "Отмечено «не товар»: имя снимка в архиве осталось как в письме."
+    return True, DONE if picked else NOT_ITEM, f"{text} {detail}".strip()

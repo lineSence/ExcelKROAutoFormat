@@ -1,9 +1,13 @@
 /*
-Ответы «Да»/«Нет» по карточкам снимков без перезагрузки страницы.
+Ответы по карточкам снимков без перезагрузки страницы.
 
-Каждая карточка — обычная форма на /vision/answer. Без этого файла
-страница остаётся работоспособной: форма уходит обычным POST и раздел
-перерисовывается целиком.
+На карточке две кнопки. «Да» — обычная форма на /vision/answer. «Нет»
+никуда не ходит: она открывает выпадающий список плюсующих товаров
+сверки, и выбор уходит той же формой (решение `pick`, ноль — «Не товар»).
+
+Без этого файла страница остаётся работоспособной: список показан
+сразу, а форма выбора уходит обычным POST и раздел перерисовывается
+целиком.
 */
 (function () {
 	"use strict";
@@ -11,6 +15,14 @@
 	var root = document.querySelector("[data-photo-grid]");
 	if (!root || !window.fetch || !window.FormData) {
 		return;
+	}
+
+	function cards() {
+		return Array.prototype.slice.call(root.querySelectorAll("[data-photo-card]"));
+	}
+
+	function pickBox(card) {
+		return card ? card.querySelector("[data-photo-pick]") : null;
 	}
 
 	function buttons(card) {
@@ -32,6 +44,29 @@
 		box.hidden = !text;
 		box.classList.toggle("alert-warn", !ok);
 	}
+
+	// Пока JavaScript есть, список прячется: он открывается кнопкой «Нет».
+	cards().forEach(function (card) {
+		var box = pickBox(card);
+		if (box) {
+			box.hidden = true;
+		}
+	});
+
+	root.addEventListener("click", function (event) {
+		var button = event.target.closest ? event.target.closest("[data-photo-no]") : null;
+		if (!button) {
+			return;
+		}
+		var box = pickBox(button.closest("[data-photo-card]"));
+		if (box) {
+			box.hidden = !box.hidden;
+			var list = box.querySelector("select");
+			if (list && !box.hidden) {
+				list.focus();
+			}
+		}
+	});
 
 	root.addEventListener("submit", function (event) {
 		var form = event.target;

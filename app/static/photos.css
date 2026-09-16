@@ -58,13 +58,42 @@
 	margin: 0;
 }
 
+/* Ручной выбор товара: список плюсующих строк сверки под кнопками. */
+.photo-pick {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.photo-pick[hidden] {
+	display: none;
+}
+
+.photo-pick form {
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.photo-pick select {
+	width: 100%;
+	max-width: 100%;
+}
+
+.photo-pick label {
+	font-size: 13px;
+	color: #4a5561;
+}
+
 /* Отвеченная карточка сворачивается: остаётся строка с именем и итогом. */
 .photo-card-done {
 	opacity: 0.75;
 }
 
 .photo-card-done img,
-.photo-card-done .actions {
+.photo-card-done .actions,
+.photo-card-done .photo-pick {
 	display: none;
 }
 
@@ -74,6 +103,6 @@
 	color: #2f6f3e;
 }
 
-.photo-card[data-state="manual"] .photo-note {
+.photo-card[data-state="notitem"] .photo-note {
 	color: #8a5a00;
 }

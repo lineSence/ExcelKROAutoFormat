@@ -142,11 +142,13 @@ async def vision_answer(
     token: str = Form(...),
     key: str = Form(default=""),
     decision: str = Form(default=""),
+    row: str = Form(default="0"),
 ):
-    """Ответ «Да»/«Нет» по карточке снимка.
+    """Ответ по карточке снимка: «Да» либо ручной выбор из списка.
 
     Страница не перезагружается: браузер просит JSON и сворачивает карточку
     сам. Без JavaScript тот же адрес отдаёт обычную страницу раздела.
+    Ноль в `row` — пункт «Не товар».
     """
     wants_json = "application/json" in str(request.headers.get("accept") or "")
     job = jobs.alive(token)
@@ -160,9 +162,10 @@ async def vision_answer(
             photo_cards.apply_answer,
             job,
             letters,
-            settings,
+            base(),
             key,
             decision,
+            whole_number(row, 0),
         )
     except Exception:  # noqa: BLE001
         logger.exception("Ответ по карточке снимка не сохранён")
