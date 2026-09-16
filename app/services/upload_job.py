@@ -8,8 +8,8 @@ from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
 
-from ..core import progress
-from ..core.meta import SheetMeta
+from ..core import progress, sellers as sellers_book
+from ..core.meta import SHARE_HOURS, SheetMeta
 from ..core.parse import ParseError
 from ..core.pipeline import PipelineResult, process
 from ..core.repair import RepairError
@@ -25,10 +25,14 @@ logger = logging.getLogger("excelkro")
 
 UPLOAD_STAGES = (
     ("save", "Файл принят и записан на диск"),
+    ("sellers", "Продавцы и часы из файла 1С"),
     ("parse", "Разбор сверки: ремонт файла, пересорты, справочники"),
     ("photo", "Пометки «нет фото» в готовом файле"),
     ("mail", "Снимки из писем ревизоров в нейросеть"),
 )
+
+SELLERS_SKIPPED = "Файл продавцов не загружен."
+SELLERS_FAILED = "файл продавцов не разобран, сверка собирается без него"
 
 
 class RebuildFailed(Exception):
@@ -68,6 +72,47 @@ async def run_pipeline(
     )
 
 
+async def read_sellers(
+    ticket: str,
+    sellers_path: Path | None,
+    folder: Path,
+    settings,
+) -> SheetMeta | None:
+    """Шаг «продавцы»: выгрузка 1С → готовая шапка со списком и часами.
+
+    Сбой файла продавцов не роняет сверку: этап помечается как неудачный,
+    продавцов можно вписать вручную на странице результата.
+    """
+    if sellers_path is None:
+        progress.skip(ticket, "sellers", SELLERS_SKIPPED)
+        return None
+    progress.begin(ticket, "sellers")
+    try:
+        data = await run_in_threadpool(
+            sellers_book.read,
+            sellers_path,
+            folder,
+            settings.sheet_name,
+            settings.repair_mode,
+        )
+    except sellers_book.SellersError as error:
+        logger.warning("Файл продавцов не разобран: %s", error)
+        progress.stage_failed(ticket, "sellers", SELLERS_FAILED)
+        return None
+    except Exception:  # noqa: BLE001
+        logger.exception("Файл продавцов не разобран")
+        progress.stage_failed(ticket, "sellers", SELLERS_FAILED)
+        return None
+
+    if not data.sellers:
+        progress.skip(ticket, "sellers", data.note())
+        return None
+    detail = ", ".join([data.note(), *data.notes])
+    progress.done(ticket, "sellers", detail)
+    # Часы есть в выгрузке, поэтому доли сразу считаются по часам.
+    return SheetMeta(sellers=tuple(data.sellers), share_mode=SHARE_HOURS)
+
+
 async def run_upload_job(
     ticket: str,
     source: Path,
@@ -84,7 +129,12 @@ async def run_upload_job(
     settings,
     settings_for: Callable,
     base: Callable,
+    sellers_path: Path | None = None,
+    sellers_name: str = "",
 ) -> None:
+    sheet_meta = await read_sellers(ticket, sellers_path, folder, settings)
+    if sheet_meta is not None:
+        logger.info("Продавцы из файла %s", sellers_name or "без имени")
     try:
         progress.begin(ticket, "parse")
         result = await run_pipeline(
@@ -92,6 +142,7 @@ async def run_upload_job(
             name,
             settings_for(strict, verify, logic),
             folder,
+            sheet_meta=sheet_meta,
             prev_path=prev_path,
             prev_name=prev_name,
         )
