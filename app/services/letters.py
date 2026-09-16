@@ -9,7 +9,7 @@ from ..core import mail_match, mail_vision
 from ..state.jobs import Job
 from ..state.letters import LetterStore
 from ..web.messages import GENERIC_ERROR, NO_PHOTO, OTHER_STORE
-from .photos import keep_answers, photo_notes, vision_items
+from .photos import keep_answers, photo_notes, show_answers, vision_items
 
 logger = logging.getLogger("excelkro")
 
@@ -100,6 +100,9 @@ async def letter_vision(
         return False, GENERIC_ERROR
     job.mail_vision = dict(report)
     keep_answers(job, report)
+    # Без этого шага ответы остаются только в отчёте, а страница «Фото
+    # товара» показывает пустой список.
+    show_answers(job, report)
     if report.get("named"):
         store.save()
     ok, detail = photo_notes(job, settings)
@@ -132,6 +135,9 @@ async def mail_vision_for(
         return {}
     job.mail_vision = dict(report)
     keep_answers(job, report)
+    # Разбор идёт в фоне, поэтому ответы кладём в память сверки сразу:
+    # человек подтверждает строки в разделе «Фото товара».
+    show_answers(job, report)
     if report.get("named"):
         store.save()
     photo_notes(job, settings)

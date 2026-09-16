@@ -49,6 +49,37 @@ def keep_answers(job, report: dict) -> int:
     return added
 
 
+def show_answers(job, report: dict) -> int:
+    """Кладёт ответы модели на страницу «Фото товара»; возвращает число новых.
+
+    Снимки писем разбираются в фоне, при обработке сверки. Раньше отчёт
+    разбора никуда, кроме сообщения на странице сверки, не попадал: список
+    на подтверждение страница «Фото товара» берёт из `job.photos`, а туда
+    ответы не складывались — человек читал «узнано товаров: 6», а
+    подтверждать было нечего.
+
+    Снимки без кандидатов не показываем: подтверждать там нечего. Один и тот
+    же снимок дважды в список не попадает — иначе пересборка файла или
+    повторный разбор письма плодили бы карточки.
+    """
+
+    def key(item) -> tuple[str, str]:
+        return (
+            str(getattr(item, "photo", "") or ""),
+            str(getattr(item, "digest", "") or ""),
+        )
+
+    added = 0
+    for answer in report.get("results") or []:
+        if not (getattr(answer, "candidates", None) or []):
+            continue
+        if any(key(item) == key(answer) for item in job.photos):
+            continue
+        job.photos.append(answer)
+        added += 1
+    return added
+
+
 def drop_photo(job, photo: str, digest: str) -> None:
     def same(item) -> bool:
         return str(getattr(item, "photo", "")) == str(photo) and (

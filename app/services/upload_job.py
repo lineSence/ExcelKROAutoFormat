@@ -8,7 +8,7 @@ from pathlib import Path
 
 from starlette.concurrency import run_in_threadpool
 
-from ..core import progress, sellers as sellers_book
+from ..core import mail_vision, progress, sellers as sellers_book
 from ..core.meta import SHARE_HOURS, SheetMeta
 from ..core.parse import ParseError
 from ..core.pipeline import PipelineResult, process
@@ -33,6 +33,7 @@ UPLOAD_STAGES = (
 
 SELLERS_SKIPPED = "Файл продавцов не загружен."
 SELLERS_FAILED = "файл продавцов не разобран, сверка собирается без него"
+NO_LETTERS_NOTE = "писем для разбора нет"
 
 
 class RebuildFailed(Exception):
@@ -178,7 +179,10 @@ async def run_upload_job(
     try:
         if letters.items:
             report = await mail_vision_for(job, letters, settings, base)
-            note = str(report.get("note") or "") or "писем для разбора нет"
+            # У успешного разбора поля `note` нет: там пишут причину, по
+            # которой разбора не было. Поэтому этап подписывается тем же
+            # текстом, что видит человек на странице сверки.
+            note = mail_vision.summary(report) or NO_LETTERS_NOTE
             if report.get("photos"):
                 progress.done(ticket, "mail", note)
             else:
