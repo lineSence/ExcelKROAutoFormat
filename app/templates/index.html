@@ -66,6 +66,16 @@
 	</div>
 
 	<div class="field">
+		<label class="field-label" for="sellers">Продавцы и часы (необязательно)</label>
+		<input id="sellers" type="file" name="sellers" accept=".xlsx" />
+		<p class="hint">
+			Выгрузка из 1С со списком продавцов и отработанными часами: ФИО
+			и часы подставятся в шапку сами, доли посчитаются по часам.
+			Любое значение можно поправить вручную после разбора.
+		</p>
+	</div>
+
+	<div class="field">
 		<span class="field-label">Подбор пар</span>
 		<label class="choice">
 			<input type="checkbox" name="strict" value="on" {% if strict %}checked{% endif %} />
