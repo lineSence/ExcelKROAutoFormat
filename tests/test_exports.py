@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,8 @@ class FakeLetter:
     uid: str = "1"
     photos: list = field(default_factory=list)
     files: list = field(default_factory=list)
+    at: object = None
+    day: object = None
 
 
 @dataclass
@@ -94,9 +97,15 @@ def test_dead_jobs_leave_the_queue():
     assert [x["token"] for x in store.items()] == ["живой"]
 
 
-def test_archive_name_uses_warehouse_and_date(tmp_path):
-    job = make_job(tmp_path)
-    assert archive_name(job) == "Фото_ВыборгРебусПДВ_2026-09-15.zip"
+def test_archive_name_is_date_and_time_of_letter():
+    letter = FakeLetter(uid="10", at=dt.datetime(2026, 7, 22, 16, 8, 4))
+    assert archive_name([letter]) == "22-07-2026_16-08-04.zip"
+
+
+def test_archive_name_without_letter_time_uses_now():
+    name = archive_name([])
+    assert name.endswith(".zip")
+    assert len(name) == len("22-07-2026_16-08-04.zip")
 
 
 def test_safe_part_drops_unsafe_signs():
@@ -112,13 +121,18 @@ def test_photo_zip_collects_only_own_letters(tmp_path):
     other_photo = tmp_path / "mail-photos" / "11" / "01-чужое.jpg"
     other_photo.parent.mkdir(parents=True, exist_ok=True)
     other_photo.write_bytes(b"jpeg")
-    mine = FakeLetter(uid="10", photos=[FakePhoto(name="01-фото.jpg", path=str(mine_photo), title="Мальборо")])
+    mine = FakeLetter(
+        uid="10",
+        photos=[FakePhoto(name="01-фото.jpg", path=str(mine_photo), title="Мальборо")],
+        at=dt.datetime(2026, 7, 22, 16, 8, 4),
+    )
     other = FakeLetter(uid="11", photos=[FakePhoto(name="01-чужое.jpg", path=str(other_photo))])
     store = FakeStore([mine, other])
 
     path = photo_zip(job, store, split=lambda warehouse, items: {"mine": [mine], "others": [other]})
 
     assert path is not None and path.is_file()
+    assert path.name == "22-07-2026_16-08-04.zip"
     with zipfile.ZipFile(path) as pack:
         names = pack.namelist()
     assert names == ["письмо-10/01-Мальборо.jpg"]

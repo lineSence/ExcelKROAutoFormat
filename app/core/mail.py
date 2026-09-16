@@ -30,9 +30,11 @@
 `&BB4EQgRHBRE-...`, а не как есть: иначе `imaplib` спотыкается на
 кириллице ещё до отправки команды.
 
-По каждому письму собирается архив (`build_archive`): все вложения плюс
-текстовый файл с самим письмом. Снимки в архиве переименованы по тому,
-что узнала нейросеть, — так по имени файла видно товар, не открывая фото.
+Текст письма хранится дважды и нарочно: `raw_text` — точная копия того,
+что пришло в письме (она уходит в `Письмо.txt` архива), а `text` —
+сжатый и обрезанный вариант для страницы. Архив письма собирает
+`app/core/mail_archive.py`; здешние `build_archive`, `archive_name` и
+`letter_text` остались тонкими обёртками для прежних вызовов.
 """
 
 from __future__ import annotations
@@ -44,7 +46,6 @@ import imaplib
 import json
 import logging
 import re
-import zipfile
 from dataclasses import dataclass, field
 from email.header import decode_header, make_header
 from email.message import Message
@@ -108,13 +109,11 @@ PHOTO_EXT = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp")
 SEEN_LIMIT = 1000
 
 # Сколько знаков текста письма показываем в интерфейсе.
+# В архив уходит текст целиком: там обрезка недопустима.
 TEXT_LIMIT = 1200
 
 # Сколько имён папок показываем в подсказке об ошибке.
 FOLDER_HINT_LIMIT = 30
-
-# Имя текстового файла с письмом внутри архива.
-LETTER_FILE = "письмо.txt"
 
 UNSAFE_NAME = re.compile(r"[\\/]+")
 
@@ -461,7 +460,12 @@ class Letter:
     sender: str = ""
     subject: str = ""
     day: dt.date | None = None
+    # Точное время письма: по нему называется архив.
+    at: dt.datetime | None = None
+    # Текст для страницы: сжатые пробелы и обрезка по TEXT_LIMIT.
     text: str = ""
+    # Текст письма как есть: он уходит в «Письмо.txt» архива.
+    raw_text: str = ""
     photos: list[Photo] = field(default_factory=list)
     # Вложения, которые снимками не являются: акты, таблицы, документы.
     files: list[Photo] = field(default_factory=list)
@@ -480,7 +484,12 @@ def _decoded(value: object) -> str:
 
 
 def _body(message: Message) -> str:
-    """Текст письма. HTML берём, только если простого текста нет."""
+    """Текст письма как есть. HTML берём, только если простого текста нет.
+
+    Ничего не чистится нарочно: этот текст уходит в `Письмо.txt` архива и
+    должен быть точной копией письма. Сжатие пробелов и обрезка нужны
+    только странице — это делает `_tidy`.
+    """
     plain: list[str] = []
     rich: list[str] = []
     for part in message.walk():
@@ -501,8 +510,12 @@ def _body(message: Message) -> str:
             plain.append(text)
         else:
             rich.append(re.sub(r"<[^>]+>", " ", text))
-    body = "\n".join(plain) if plain else "\n".join(rich)
-    return re.sub(r"[ \t\r\f\v]+", " ", body).strip()
+    return "\n".join(plain) if plain else "\n".join(rich)
+
+
+def _tidy(text: str) -> str:
+    """Текст для страницы: лишние пробелы убраны, переносы строк целы."""
+    return re.sub(r"[ \t\r\f\v]+", " ", str(text or "")).strip()
 
 
 def attachments(message: Message, limit_mb: int) -> tuple[list[Photo], list[Photo], list[str]]:
@@ -635,27 +648,33 @@ def read_hints(text: str, subject: str = "") -> dict:
 
 
 def parse_letter(uid: str, raw: bytes, limit_mb: int) -> Letter:
-    """Разбирает одно письмо целиком."""
+    """Разбирает одно письмо целиком.
+
+    Текст сохраняется двумя видами: `raw_text` — как пришло (уйдёт в
+    `Письмо.txt`), `text` — сжатый и обрезанный для страницы.
+    """
     message = email.message_from_bytes(raw)
     sender = parseaddr(_decoded(message.get("From")))[1].lower()
     subject = _decoded(message.get("Subject"))
-    day: dt.date | None = None
+    stamp: dt.datetime | None = None
     try:
         stamp = parsedate_to_datetime(message.get("Date"))
-        day = stamp.date() if stamp else None
     except (TypeError, ValueError):
-        day = None
-    text = _body(message)
+        stamp = None
+    body = _body(message)
+    shown = _tidy(body)
     photos, files, notes = attachments(message, limit_mb)
     return Letter(
         uid=str(uid),
         sender=sender,
         subject=subject,
-        day=day,
-        text=text[:TEXT_LIMIT],
+        day=stamp.date() if stamp else None,
+        at=stamp,
+        text=shown[:TEXT_LIMIT],
+        raw_text=body,
         photos=photos,
         files=files,
-        hints=read_hints(text, subject),
+        hints=read_hints(shown, subject),
         notes=notes,
     )
 
@@ -676,95 +695,30 @@ def allowed_sender(sender: str, senders: str) -> bool:
 
 
 # --- Архив письма ----------------------------------------------------------
-
-
-def letter_text(letter: Letter) -> str:
-    """Текстовый файл письма для архива: шапка, подсказки и сам текст."""
-    hints = letter.hints or {}
-    lines = [
-        f"Письмо: {letter.subject or 'без темы'}",
-        f"От кого: {letter.sender or 'неизвестно'}",
-        f"Дата: {letter.day or 'не указана'}",
-        f"Номер письма в ящике: {letter.uid}",
-        "",
-    ]
-    if hints.get("codes"):
-        lines.append("Коды товара: " + ", ".join(hints["codes"]))
-    if hints.get("quantity"):
-        lines.append(f"Количество: {hints['quantity']}")
-    if hints.get("store"):
-        lines.append(f"Магазин: {hints['store']}")
-    if hints.get("in_list"):
-        lines.append("В письме сказано, что товар есть в списке несосчитанного.")
-    if hints.get("seller"):
-        lines.append(f"Ночной продавец из письма: {hints['seller']}")
-    if letter.photos:
-        lines.append("")
-        lines.append("Снимки в архиве:")
-        for photo in letter.photos:
-            title = f" — {photo.title}" if photo.title else ""
-            lines.append(f"  {photo.name}{title}")
-    if letter.files:
-        lines.append("")
-        lines.append("Прочие вложения: " + ", ".join(item.name for item in letter.files))
-    lines.append("")
-    lines.append("Текст письма:")
-    lines.append(letter.text or "(письмо без текста)")
-    return "\n".join(lines)
+# Сама сборка живёт в `mail_archive.py`: модуль почты и без неё крупный.
+# Импорт отложенный, иначе получится кольцо: `mail_archive` берёт отсюда
+# `Letter`, `photos_dir` и `safe_name`.
 
 
 def archive_name(letter: Letter) -> str:
-    """Имя файла архива: по нему видно, о каком письме речь."""
-    parts = ["письмо", str(letter.uid)]
-    store = str((letter.hints or {}).get("store") or "").strip()
-    if store:
-        parts.append(f"магазин-{store}")
-    if letter.day:
-        parts.append(str(letter.day))
-    return safe_name("-".join(parts) + ".zip")
+    """Имя файла архива письма (см. `mail_archive.archive_name`)."""
+    from .mail_archive import archive_name as name_of
+
+    return name_of(letter)
 
 
-def entry_name(item: Photo, number: int, used: set) -> str:
-    """Имя файла внутри архива.
+def letter_text(letter: Letter) -> str:
+    """Содержимое «Письмо.txt» (см. `mail_archive.letter_text`)."""
+    from .mail_archive import letter_text as text_of
 
-    У снимка берётся имя от нейросети (`title`), у остального — своё.
-    Номер впереди сохраняет порядок вложений и разводит одинаковые имена.
-    """
-    suffix = Path(item.name).suffix or ".jpg"
-    base = Path(safe_name(item.title)).stem if str(item.title).strip() else Path(item.name).stem
-    name = f"{number:02d}-{base}{suffix}"
-    while name in used:
-        number += 1
-        name = f"{number:02d}-{base}{suffix}"
-    used.add(name)
-    return name
+    return text_of(letter)
 
 
 def build_archive(settings, letter: Letter, target: Path | None = None) -> Path:
-    """Складывает архив письма: все вложения плюс текст письма.
+    """Собирает архив письма (см. `mail_archive.build_archive`)."""
+    from .mail_archive import build_archive as build
 
-    Файлы берутся с диска: в памяти после захода в ящик их уже нет.
-    Снимки попадают в архив под именем, которое дала нейросеть.
-    """
-    folder = photos_dir(settings) / safe_name(letter.uid)
-    file = Path(target) if target is not None else folder / archive_name(letter)
-    file.parent.mkdir(parents=True, exist_ok=True)
-
-    used: set = set()
-    with zipfile.ZipFile(file, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(LETTER_FILE, letter_text(letter))
-        for number, item in enumerate(list(letter.photos) + list(letter.files), start=1):
-            data = item.data
-            if not data and item.path:
-                try:
-                    data = Path(item.path).read_bytes()
-                except OSError:
-                    logger.warning("Вложение %s не прочитано с диска", item.path)
-                    continue
-            if not data:
-                continue
-            archive.writestr(entry_name(item, number, used), data)
-    return file
+    return build(settings, letter, target)
 
 
 # --- Работа с ящиком -------------------------------------------------------

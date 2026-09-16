@@ -7,11 +7,17 @@
 ящик честно отвечал «новых писем нет».
 
 Здесь письма сохраняются в `mail-letters.json` рядом с остальными
-данными: тема, отправитель, дата, текст, подсказки из текста и пути к
-уже скачанным вложениям. Сами вложения лежат на диске в `mail-photos`,
-в файл они не попадают. Письмо, у которого на диске не осталось ни
-одного файла (снимки убрал срок хранения), при чтении отбрасывается:
-архив из него собрать уже нельзя.
+данными: тема, отправитель, дата и время, текст письма (точный и
+обрезанный для страницы), подсказки из текста и пути к уже скачанным
+вложениям. Сами вложения лежат на диске в `mail-photos`, в файл они не
+попадают. Письмо, у которого на диске не осталось ни одного файла
+(снимки убрал срок хранения), при чтении отбрасывается: архив из него
+собрать уже нельзя.
+
+Точное время письма (`at`) и точный текст (`raw_text`) нужны архиву:
+по времени зовётся файл архива, а точный текст уходит в `Письмо.txt`.
+У писем, записанных прежними версиями службы, этих полей нет — тогда
+берётся дата письма и обрезанный текст (см. `mail_archive.py`).
 
 Кнопка «Удалить все письма» в разделе почты зовёт `forget_all`: список
 писем, скачанные вложения и память о разобранных номерах убираются
@@ -71,7 +77,9 @@ def letter_json(letter: Letter) -> dict:
         "sender": str(letter.sender or ""),
         "subject": str(letter.subject or ""),
         "day": letter.day.isoformat() if letter.day else "",
+        "at": letter.at.isoformat() if letter.at else "",
         "text": str(letter.text or ""),
+        "raw_text": str(letter.raw_text or ""),
         "photos": [_photo_json(item) for item in letter.photos or []],
         "files": [_photo_json(item) for item in letter.files or []],
         "hints": dict(letter.hints or {}),
@@ -88,13 +96,22 @@ def letter_from(data: object) -> Letter:
             day = dt.date.fromisoformat(raw_day)
         except ValueError:
             day = None
+    at: dt.datetime | None = None
+    raw_at = str(values.get("at") or "").strip()
+    if raw_at:
+        try:
+            at = dt.datetime.fromisoformat(raw_at)
+        except ValueError:
+            at = None
     hints = values.get("hints")
     return Letter(
         uid=str(values.get("uid") or ""),
         sender=str(values.get("sender") or ""),
         subject=str(values.get("subject") or ""),
         day=day,
+        at=at,
         text=str(values.get("text") or ""),
+        raw_text=str(values.get("raw_text") or ""),
         photos=[_photo_from(item) for item in values.get("photos") or []],
         files=[_photo_from(item) for item in values.get("files") or []],
         hints=dict(hints) if isinstance(hints, dict) else {},
