@@ -5,7 +5,7 @@
 {% block head %}<link rel="stylesheet" href="/static/meta.css" />{% endblock %}
 
 {% block content %}
-{% if message %}<div class="alert alert-ok">{{ message }}</div>{% endif %}
+{# Служебное сообщение рисует base.html, здесь его повторять нельзя: [WEB-ONE-MESSAGE]. #}
 {% if mail_note and mail_note.in_list %}
 <div class="alert alert-warn">
 	В письме ревизора сказано, что товар есть в списке несосчитанного:
