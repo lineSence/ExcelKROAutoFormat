@@ -17,6 +17,13 @@ triggers:
       - docs/02-output-format.md
       - docs/03-transform-rules.md
 
+  - id: sellers
+    keywords: [продавец, продавцы, часы, файл продавцов, доли, share_mode, sellers]
+    load:
+      - docs/rules/domain.md
+      - docs/01-input-1c.md
+      - docs/references/architecture-map.md
+
   - id: resort
     keywords: [схожесть, similarity, группа, порог, mixed_score, logic_weight, влияние логики]
     load:
