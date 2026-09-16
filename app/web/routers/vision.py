@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ...core import runtime
 from ...core import vision as vision_core
 from ...core.guard import UploadTooLarge
-from ...deps import base, jobs, logger, settings
+from ...deps import base, jobs, letters, logger, settings
+from ...services import photo_cards
 from ...services.photos import drop_photo, keep_answers, photo_notes, vision_items
 from .. import render
 from ..forms import is_on, safe_name, whole_number
@@ -15,6 +16,8 @@ from ..messages import GENERIC_ERROR, NO_PHOTO, key_not_cleared, settings_not_sa
 from ..uploads import save_upload
 
 router = APIRouter()
+
+NO_JOB = "Сверка не найдена."
 
 
 @router.get("/vision", response_class=HTMLResponse)
@@ -71,7 +74,7 @@ async def vision_photos(
 ):
     job = jobs.alive(token)
     if job is None:
-        return render.vision_page(request, error="Сверка не найдена.", status_code=404)
+        return render.vision_page(request, error=NO_JOB, status_code=404)
 
     current = base()
     config = vision_core.load_config(current)
@@ -133,6 +136,52 @@ async def vision_photos(
     )
 
 
+@router.post("/vision/answer")
+async def vision_answer(
+    request: Request,
+    token: str = Form(...),
+    key: str = Form(default=""),
+    decision: str = Form(default=""),
+):
+    """Ответ «Да»/«Нет» по карточке снимка.
+
+    Страница не перезагружается: браузер просит JSON и сворачивает карточку
+    сам. Без JavaScript тот же адрес отдаёт обычную страницу раздела.
+    """
+    wants_json = "application/json" in str(request.headers.get("accept") or "")
+    job = jobs.alive(token)
+    if job is None:
+        if wants_json:
+            return JSONResponse({"ok": False, "state": "", "message": NO_JOB}, status_code=404)
+        return render.vision_page(request, error=NO_JOB, status_code=404)
+
+    try:
+        ok, state, message = await run_in_threadpool(
+            photo_cards.apply_answer,
+            job,
+            letters,
+            settings,
+            key,
+            decision,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Ответ по карточке снимка не сохранён")
+        if wants_json:
+            return JSONResponse({"ok": False, "state": "", "message": GENERIC_ERROR}, status_code=500)
+        return render.vision_page(request, error=GENERIC_ERROR, token=token, status_code=500)
+
+    status = 200 if ok else 400
+    if wants_json:
+        return JSONResponse({"ok": ok, "state": state, "message": message}, status_code=status)
+    return render.vision_page(
+        request,
+        message=message if ok else "",
+        error="" if ok else message,
+        token=token,
+        status_code=status,
+    )
+
+
 @router.post("/vision/confirm", response_class=HTMLResponse)
 async def vision_confirm(
     request: Request,
@@ -147,7 +196,7 @@ async def vision_confirm(
 ):
     job = jobs.alive(token)
     if job is None:
-        return render.vision_page(request, error="Сверка не найдена.", status_code=404)
+        return render.vision_page(request, error=NO_JOB, status_code=404)
 
     number = whole_number(row, 0)
     chosen = is_on(picked) and number > 0

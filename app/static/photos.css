@@ -1,0 +1,79 @@
+/* Сетка карточек снимков на странице «Фото товара»: три колонки и N рядов. */
+.photo-grid {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 16px;
+}
+
+@media (max-width: 900px) {
+	.photo-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
+
+@media (max-width: 600px) {
+	.photo-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+.photo-card {
+	margin: 0;
+	padding: 12px;
+	border: 1px solid #dfe3e8;
+	border-radius: 10px;
+	background: #fff;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.photo-card img {
+	width: 100%;
+	height: 220px;
+	object-fit: contain;
+	background: #f5f6f8;
+	border-radius: 8px;
+}
+
+.photo-card figcaption {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 14px;
+	word-break: break-word;
+}
+
+.photo-card .photo-name {
+	font-weight: 600;
+}
+
+.photo-card .actions {
+	display: flex;
+	gap: 8px;
+	margin: 0;
+}
+
+.photo-card .actions form {
+	margin: 0;
+}
+
+/* Отвеченная карточка сворачивается: остаётся строка с именем и итогом. */
+.photo-card-done {
+	opacity: 0.75;
+}
+
+.photo-card-done img,
+.photo-card-done .actions {
+	display: none;
+}
+
+.photo-note {
+	margin: 0;
+	font-size: 13px;
+	color: #2f6f3e;
+}
+
+.photo-card[data-state="manual"] .photo-note {
+	color: #8a5a00;
+}

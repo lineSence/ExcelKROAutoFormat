@@ -7,7 +7,7 @@ from ..core import claims as claims_book, mail as mail_core, mail_vision, refs_s
 from ..core.learning import dataset_stats
 from ..core.verify import model_status
 from ..deps import base, exports, jobs, letters, logger, settings, settings_for, templates
-from ..services import letters as letters_service, photos as photos_service
+from ..services import letters as letters_service, photo_cards, photos as photos_service
 from ..state.jobs import Job
 from .forms import DEFAULT_LOGIC, mode, percent
 
@@ -99,7 +99,10 @@ def vision_page(request, message="", error="", results=None, token="", status_co
     cards = job_cards(True)
     token = only_job(token, cards)
     job = jobs.get(token)
-    shown = results if results is not None else (job.photos if job else [])
+    # Карточки — все снимки архива сверки. Таблицей кандидатов ниже идут
+    # только снимки, отправленные в ручной подбор, и загруженные руками.
+    photos = photo_cards.cards(job, letters) if job else []
+    shown = results if results is not None else (photo_cards.manual_items(job, letters) if job else [])
     return templates.TemplateResponse(
         request=request,
         name="vision.html",
@@ -109,6 +112,7 @@ def vision_page(request, message="", error="", results=None, token="", status_co
             "vision_max_photo_mb": config["vision_max_photo_mb"],
             "jobs": cards,
             "token": token,
+            "photo_cards": photos,
             "results": shown,
             "message": message,
             "error": error,

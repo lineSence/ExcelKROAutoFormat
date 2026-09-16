@@ -21,6 +21,8 @@ class Job:
     photos: list = field(default_factory=list)
     photo_rows: set[int] = field(default_factory=set)
     mail_vision: dict = field(default_factory=dict)
+    # Ответы по карточкам снимков архива: ключ письма и файла -> "yes"/"manual".
+    photo_answers: dict = field(default_factory=dict)
 
     @property
     def alive(self) -> bool:
@@ -101,6 +103,7 @@ class JobStore:
             job.photos = list(old.photos)
             job.photo_rows = set(old.photo_rows)
             job.mail_vision = dict(old.mail_vision)
+            job.photo_answers = dict(old.photo_answers)
             # Пересборка пишет новый файл в ту же рабочую папку. Старую запись
             # надо убрать из индекса, но нельзя удалять папку: она теперь нужна
             # новой Job.
