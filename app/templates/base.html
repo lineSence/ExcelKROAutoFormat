@@ -5,13 +5,14 @@
 	1. новый шаблон с `{% extends "base.html" %}`;
 	2. новая запись в списке `nav_items` ниже.
 
-	Свои стили раздела подключаются через блок `head`.
+	Подписи пунктов — короткие, из одного-двух слов: шапка читается
+	одним взглядом. Свои стили раздела подключаются через блок `head`.
 #}
 {% set nav_items = nav_items | default([
-	{"href": "/", "label": "Сверка КРО"},
-	{"href": "/vision", "label": "Фото товара"},
-	{"href": "/mail", "label": "Почта ревизоров"},
-	{"href": "/training", "label": "Модель и обучение"},
+	{"href": "/", "label": "Сверки"},
+	{"href": "/vision", "label": "Фото"},
+	{"href": "/mail", "label": "Почта"},
+	{"href": "/training", "label": "Модели и обучение"},
 	{"href": "/update", "label": "Обновление"},
 ], true) %}
 {% set current = request.url.path if request else "/" %}
@@ -28,7 +29,6 @@
 <body>
 <header class="topbar">
 	<div class="topbar-inner">
-		<a class="brand" href="/">Складские сверки</a>
 		<nav class="nav">
 			{% for item in nav_items %}
 			<a class="nav-link{% if current == item.href %} nav-link-active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
