@@ -22,7 +22,17 @@ from pathlib import Path
 
 import openpyxl
 
-from .parse import COL_DIFF, COL_NAME, COL_SUM_DIFF, COL_TRAIT, parse
+from .parse import (
+    COL_BOOK,
+    COL_CODE,
+    COL_DIFF,
+    COL_FACT,
+    COL_NAME,
+    COL_PRICE,
+    COL_SUM_DIFF,
+    COL_TRAIT,
+    parse,
+)
 
 logger = logging.getLogger("excelkro.prev")
 
@@ -41,6 +51,8 @@ SERVICE_LABELS = (
 )
 # Блок продавцов идёт сразу под итогом последней группы.
 SELLER_SCAN_ROWS = 80
+# Числа позиции: у строки продавца эти столбцы пустые.
+ITEM_COLUMNS = (COL_FACT, COL_BOOK, COL_DIFF, COL_PRICE)
 
 
 def name_key(value: object) -> str:
@@ -53,6 +65,10 @@ def _number(value: object) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return 0.0
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 @dataclass(frozen=True)
@@ -112,21 +128,53 @@ def _is_formula(value: object) -> bool:
     return isinstance(value, str) and value.startswith("=")
 
 
+def _looks_like_item(sheet, row: int) -> bool:
+    """Строка товара: есть код в столбце A или числа в количествах и цене."""
+    if str(sheet.cell(row=row, column=COL_CODE).value or "").strip():
+        return True
+    return any(
+        _is_number(sheet.cell(row=row, column=column).value)
+        for column in ITEM_COLUMNS
+    )
+
+
+def _is_service_label(sheet, row: int) -> bool:
+    return name_key(sheet.cell(row=row, column=COL_NAME).value) in SERVICE_LABELS
+
+
+def _seller_at(sheet, row: int) -> PrevSeller | None:
+    """Продавец: ФИО без чисел позиции, а под ним числовая строка веса."""
+    value = sheet.cell(row=row, column=COL_NAME).value
+    text = str(value or "").strip()
+    if not text or _is_number(value) or _is_formula(value):
+        return None
+    if _is_service_label(sheet, row) or _looks_like_item(sheet, row):
+        return None
+    below = sheet.cell(row=row + 1, column=COL_NAME).value
+    if not _is_number(below):
+        return None
+    return PrevSeller(name=text, weight=_number(below))
+
+
 def read_sellers(sheet, start_row: int) -> tuple[PrevSeller, ...]:
-    """Блок продавцов: строка ФИО, под ней строка веса."""
+    """Блок продавцов: строка ФИО, под ней строка веса.
+
+    Товары нижней группы в список не попадают, даже если у группы нет
+    строки итога. Мини-таблица «Перезачёт» идёт ниже блока продавцов и
+    обрывает поиск: её ФИО — это уже другой расчёт.
+    """
     result: list[PrevSeller] = []
     row = start_row
     limit = min(sheet.max_row, start_row + SELLER_SCAN_ROWS)
     while row <= limit:
-        value = sheet.cell(row=row, column=COL_NAME).value
-        text = str(value or "").strip()
-        numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if not text or numeric or _is_formula(value) or name_key(text) in SERVICE_LABELS:
-            row += 1
+        seller = _seller_at(sheet, row)
+        if seller is not None:
+            result.append(seller)
+            row += 2
             continue
-        below = sheet.cell(row=row + 1, column=COL_NAME).value
-        result.append(PrevSeller(name=text, weight=_number(below)))
-        row += 2
+        if result and _is_service_label(sheet, row):
+            break
+        row += 1
     return tuple(result)
 
 
@@ -155,8 +203,10 @@ def read(path: str | Path, file_name: str = "", sheet_name: str = "TDSheet") -> 
             found = items.get(key)
             items[key] = _merge(found, item) if found is not None else item
 
-    last_total = max(group.total_row for group in document.groups)
-    sellers = read_sellers(sheet, last_total)
+    last_row = max(
+        max(group.total_row, group.last_data_row) for group in document.groups
+    )
+    sellers = read_sellers(sheet, last_row)
     logger.info(
         "Предыдущая сверка: позиций %s, продавцов %s", len(items), len(sellers)
     )
