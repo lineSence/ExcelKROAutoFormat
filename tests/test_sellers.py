@@ -104,9 +104,9 @@ def test_hours_with_comma_and_spaces():
 
 
 def test_broken_file_gives_russian_error(tmp_path):
-    """Не .xlsx — русская ошибка вместо трассировки."""
+    """Не архив — русская ошибка вместо трассировки."""
     broken = tmp_path / "sellers.xlsx"
-    broken.write_bytes(b"совсем не архив".decode and b"not a zip")
+    broken.write_bytes(b"not a zip")
 
     with pytest.raises(sellers.SellersError) as error:
         sellers.read(broken, tmp_path / "work")
